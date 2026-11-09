@@ -1,77 +1,74 @@
 #include "raster_io.h"
 #include <gdal_priv.h>
-#include <algorithm>
-#include <cmath>
 #include <iostream>
-#include <limits>
 
-// ============================================================================
-// Geospatial Raster I/O Engine (GDAL Integration)
-//
-// Handles reading and resampling of GeoTIFF raster files (e.g., elevation, 
-// fuel maps) into 1D simulation grid arrays using GDAL[cite: 1, 10, 12, 14].
-// Includes automatic resampling to target grid dimensions and NoData/NaN 
-// cleaning to ensure simulation stability[cite: 10].
-// ============================================================================
+bool LoadLandfireDataset(const std::string& elev_path,
+                         const std::string& slope_path,
+                         const std::string& fuel_path,
+                         const std::string& road_path,
+                         std::vector<Cell>& grid,
+                         int& width,
+                         int& height) {
+    GDALAllRegister();
 
-// Registers all available GDAL drivers globally (must be called before loading files)[cite: 10]
-void registerRasterDrivers() { GDALAllRegister(); }
-
-// ----------------------------------------------------------------------------
-// GeoTIFF Loader & Resampler
-// ----------------------------------------------------------------------------
-// Loads band 1 from a specified GeoTIFF raster file, resamples the spatial data 
-// to match the simulation's (targetWidth x targetHeight) grid, and cleans 
-// missing or invalid NoData sentinel values[cite: 10].
-bool loadGeoTIFF(const char* filePath, std::vector<float>& outData,
-    int targetWidth, int targetHeight, bool noDataToMin) {
-    // Open the dataset in read-only mode[cite: 10]
-    GDALDataset* ds = static_cast<GDALDataset*>(GDALOpen(filePath, GA_ReadOnly));
-    if (!ds) {
-        std::cerr << "[GDAL Error] Failed to open GeoTIFF file: " << filePath << "\n";
+    // 1. Open Elevation GeoTIFF to define primary dimensions
+    GDALDataset* ds_elev = (GDALDataset*) GDALOpen(elev_path.c_str(), GA_ReadOnly);
+    if (!ds_elev) {
+        std::cerr << "Failed to open elevation file: " << elev_path << std::endl;
         return false;
     }
 
-    // Access band 1 (primary data layer: elevation, fuel density, etc.)[cite: 10]
-    GDALRasterBand* band = ds->GetRasterBand(1);
-    int hasNoData = 0;
-    // Extract NoData sentinel value (e.g., -9999) if defined in raster header[cite: 10]
-    const float noData = static_cast<float>(band->GetNoDataValue(&hasNoData));
+    width = ds_elev->GetRasterXSize();   // 8808
+    height = ds_elev->GetRasterYSize();  // 6889
+    const size_t total_pixels = static_cast<size_t>(width) * height;
 
-    // Resize output vector to hold resampled target grid cells[cite: 10]
-    outData.resize(static_cast<size_t>(targetWidth) * targetHeight);
+    grid.clear();
+    grid.resize(total_pixels);
 
-    // Configure GDAL RasterIO resampling arguments[cite: 10]
-    GDALRasterIOExtraArg extra;
-    INIT_RASTERIO_EXTRA_ARG(extra);
-    extra.eResampleAlg = GRIORA_Average; // Bilinear/average resampling for continuous spatial rasters[cite: 10]
+    std::vector<float> buffer(total_pixels);
 
-    // Read and resample raw GeoTIFF dimensions into output buffer array[cite: 10]
-    CPLErr err = band->RasterIO(GF_Read, 0, 0, band->GetXSize(), band->GetYSize(),
-        outData.data(), targetWidth, targetHeight,
-        GDT_Float32, 0, 0, &extra);
-    GDALClose(ds); // Close dataset handle[cite: 10]
+    // Read Elevation (meters)
+    ds_elev->GetRasterBand(1)->RasterIO(GF_Read, 0, 0, width, height, buffer.data(), width, height, GDT_Float32, 0, 0);
+    for (size_t i = 0; i < total_pixels; ++i) {
+        grid[i].elevation = buffer[i];
+    }
+    GDALClose(ds_elev);
 
-    if (err != CE_None) {
-        std::cerr << "[GDAL Error] Failed to read raster band data from: " << filePath << "\n";
-        return false;
+    // 2. Read Slope (degrees)
+    GDALDataset* ds_slope = (GDALDataset*) GDALOpen(slope_path.c_str(), GA_ReadOnly);
+    if (ds_slope) {
+        ds_slope->GetRasterBand(1)->RasterIO(GF_Read, 0, 0, width, height, buffer.data(), width, height, GDT_Float32, 0, 0);
+        for (size_t i = 0; i < total_pixels; ++i) {
+            grid[i].slope_deg = buffer[i];
+        }
+        GDALClose(ds_slope);
+    } else {
+        std::cerr << "Warning: Could not open slope raster: " << slope_path << std::endl;
     }
 
-    // Helper lambda to identify invalid/missing pixels (NaNs or header NoData sentinels)[cite: 10]
-    auto invalid = [&](float v) { return std::isnan(v) || (hasNoData && v == noData); };
-
-    // --- Clean and fill missing NoData values ---
-    float minValid = std::numeric_limits<float>::max();
-    for (float v : outData) {
-        if (!invalid(v)) minValid = std::min(minValid, v);
+    // 3. Read FBFM40 Fuel Models
+    GDALDataset* ds_fuel = (GDALDataset*) GDALOpen(fuel_path.c_str(), GA_ReadOnly);
+    if (ds_fuel) {
+        ds_fuel->GetRasterBand(1)->RasterIO(GF_Read, 0, 0, width, height, buffer.data(), width, height, GDT_Float32, 0, 0);
+        for (size_t i = 0; i < total_pixels; ++i) {
+            grid[i].fuel_model = static_cast<int>(buffer[i]);
+        }
+        GDALClose(ds_fuel);
+    } else {
+        std::cerr << "Warning: Could not open fuel model raster: " << fuel_path << std::endl;
     }
 
-    // Choose replacement value: minimum valid value (useful for elevation rasters) or 0.0f[cite: 10]
-    const float fill = (noDataToMin && minValid != std::numeric_limits<float>::max()) ? minValid : 0.0f;
-    for (float& v : outData) {
-        if (invalid(v)) v = fill;
+    // 4. Read Operational Roads
+    GDALDataset* ds_road = (GDALDataset*) GDALOpen(road_path.c_str(), GA_ReadOnly);
+    if (ds_road) {
+        ds_road->GetRasterBand(1)->RasterIO(GF_Read, 0, 0, width, height, buffer.data(), width, height, GDT_Float32, 0, 0);
+        for (size_t i = 0; i < total_pixels; ++i) {
+            grid[i].is_road = (buffer[i] > 0.0f);
+        }
+        GDALClose(ds_road);
+    } else {
+        std::cerr << "Warning: Could not open operational roads raster: " << road_path << std::endl;
     }
 
-    std::cout << "[GDAL Success] Loaded raster map: " << filePath << "\n";
     return true;
 }
