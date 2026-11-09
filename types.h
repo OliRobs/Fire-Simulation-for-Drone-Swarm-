@@ -26,8 +26,12 @@ inline Vec2 cellCentre(int idx) { return Vec2(idx % GRID_WIDTH + 0.5f, idx / GRI
 enum class CellState : std::uint8_t { Unburned, Burning, Burned };
 
 struct Cell {
-    float elevation = 0.0f; // Altitude in metres (affects slope)
-    float fuel = 1.0f;      // Fuel density/moisture factor (0.0 to 1.0)
+    float elevation = 0.0f; // Altitude in metres
+    float slope_deg = 0.0f; // slop in degrees 
+    int fuel_model = 0;      // Scott & Burgan code 
+    bool is_road = flase; // Operational road barrier flag 
+
+    //Existing Fire state properties 
+    uint8_t state = 0; // 0: unburned, 1: burning, 2: burned 
     float burnTime = 0.0f;  // Ticks spent burning
-    CellState state = CellState::Unburned;
 };
