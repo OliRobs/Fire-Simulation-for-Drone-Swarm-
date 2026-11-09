@@ -33,5 +33,6 @@ struct Cell {
 
     //Existing Fire state properties 
     uint8_t state = 0; // 0: unburned, 1: burning, 2: burned 
-    float burnTime = 0.0f;  // Ticks spent burning
+    float ros = 0.0f; // calculated Rate of Spread (m/s)
+    float burn_time = 0.0f;  // time elapsed since ignition (sec) 
 };
