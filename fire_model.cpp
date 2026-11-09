@@ -1,169 +1,85 @@
 #include "fire_model.h"
-#include <algorithm>
 #include <cmath>
-#include <utility>
+#include <algorithm>
 
-// ============================================================================
-// Wildfire Propagation Physics & Simulation Model
-//
-// Models 2D grid-based fire spread influenced by:
-// 1. Wind speed and direction (vector dot product modifier).
-// 2. Terrain slope gradient (uphill elevation delta exponential multiplier).
-// 3. Cell fuel load and ignition probability per neighbor direction.
-// ============================================================================
+FireSimulation::FireSimulation(std::vector<Cell>& grid, int width, int height)
+    : grid_(grid), width_(width), height_(height) {}
 
-// ----------------------------------------------------------------------------
-// Wind Influence Calculation
-// ----------------------------------------------------------------------------
-// Returns an exponential multiplier based on how closely aligned the spread 
-// direction (dx, dy) is with the ambient wind direction vector.
-float getWindFactor(int dx, int dy, const Vec2& wind) {
-    const float len = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-    if (len == 0.0f) return 1.0f; // Center cell (no directional step)
-
-    // Dot product between normalized direction and wind vector
-    const float dot = (dx / len) * wind.x + (dy / len) * wind.y;
-
-    // Exponential scaling: downwind spreads significantly faster
-    return std::exp(dot * 0.8f);
+bool FireSimulation::IsNonBurnable(int fuel_code, bool is_road) const {
+    if (is_road) return true; // Operational roads serve as non-burnable barriers
+    // Non-burnable LANDFIRE FBFM40 codes: 91 (Urban), 92 (Snow/Ice), 93 (Ag), 98 (Water), 99 (Barren)
+    return (fuel_code == 91 || fuel_code == 92 || fuel_code == 93 || fuel_code == 98 || fuel_code == 99 || fuel_code <= 0);
 }
 
-// ----------------------------------------------------------------------------
-// Slope / Elevation Influence Calculation
-// ----------------------------------------------------------------------------
-// Returns an exponential multiplier based on elevation differences.
-// Fires spread exponentially faster when traveling uphill to neighboring cells.
-float getSlopeFactor(float elevationCurrent, float elevationNeighbor) {
-    return std::exp((elevationNeighbor - elevationCurrent) * 0.05f);
-}
-
-// ----------------------------------------------------------------------------
-// Simulation Engine Initialization
-// ----------------------------------------------------------------------------
-// Precomputes static ignition probability lookup tables for all cells across 
-// all 8 (or NUM_DIRS) neighbor direction vectors.
-FireSimulation::FireSimulation(std::vector<Cell> grid, Vec2 wind, std::uint32_t seed)
-    : grid_(std::move(grid)), fireMask_(grid_.size(), 0), rng_(seed) {
-    constexpr int N = GRID_WIDTH * GRID_HEIGHT;
-
-    // Precalculate directional wind factors for all neighbor directions
-    float windFactor[NUM_DIRS];
-    for (int d = 0; d < NUM_DIRS; ++d) {
-        windFactor[d] = getWindFactor(DX[d], DY[d], wind);
+float FireSimulation::CalculateCellROS(const Cell& cell, float wind_speed, float wind_dir) const {
+    if (IsNonBurnable(cell.fuel_model, cell.is_road)) {
+        return 0.0f;
     }
 
-    // Allocate directional ignition probability array: N cells * NUM_DIRS directions
-    ignitionProb_.assign(static_cast<size_t>(N) * NUM_DIRS, 0.0f);
+    // Convert slope degrees to percent slope: percent_slope = tan(slope_deg) * 100
+    float slope_rad = cell.slope_deg * (3.14159265f / 180.0f);
+    float slope_percent = std::tan(slope_rad) * 100.0f;
 
-    for (int y = 0; y < GRID_HEIGHT; ++y) {
-        for (int x = 0; x < GRID_WIDTH; ++x) {
-            const int idx = y * GRID_WIDTH + x;
+    // Slope influence factor phi_s
+    float phi_s = 5.275f * std::pow(slope_percent / 100.0f, 2.0f);
 
-            for (int d = 0; d < NUM_DIRS; ++d) {
-                const int nx = x + DX[d], ny = y + DY[d];
-                // Skip out-of-bounds neighbors
-                if (nx < 0 || nx >= GRID_WIDTH || ny < 0 || ny >= GRID_HEIGHT) continue;
+    // Base Rate of Spread (m/s) lookup by Scott & Burgan categories
+    float base_ros = 0.2f;
+    if (cell.fuel_model >= 101 && cell.fuel_model <= 109)      base_ros = 0.6f; // Low/High Grass (GR)
+    else if (cell.fuel_model >= 121 && cell.fuel_model <= 124) base_ros = 0.4f; // Low/High Shrub (SH)
+    else if (cell.fuel_model >= 141 && cell.fuel_model <= 149) base_ros = 0.5f; // Timber-Shrub (TS)
+    else if (cell.fuel_model >= 161 && cell.fuel_model <= 165) base_ros = 0.3f; // Timber-Understory (TU)
+    else if (cell.fuel_model >= 181 && cell.fuel_model <= 189) base_ros = 0.2f; // Timber Litter (TL)
 
-                const Cell& nb = grid_[ny * GRID_WIDTH + nx];
-                if (nb.fuel <= 0.0f) continue; // Unburnable neighbor cell
+    // Combined Rate of Spread
+    return base_ros * (1.0f + phi_s + (0.1f * wind_speed));
+}
 
-                // Combined probability formula: BaseRate * WindMod * SlopeMod * FuelDensity
-                const float p = BASE_IGNITION_RATE * windFactor[d]
-                    * getSlopeFactor(grid_[idx].elevation, nb.elevation) * nb.fuel;
+void FireSimulation::Ignite(int x, int y) {
+    int idx = y * width_ + x;
+    if (idx >= 0 && idx < static_cast<int>(grid_.size())) {
+        if (!IsNonBurnable(grid_[idx].fuel_model, grid_[idx].is_road)) {
+            grid_[idx].state = 1; // Burning
+        }
+    }
+}
 
-                // Store directional probability clamped to max 1.0
-                ignitionProb_[static_cast<size_t>(idx) * NUM_DIRS + d] = std::min(p, 1.0f);
+void FireSimulation::Update(float delta_time, float wind_speed, float wind_dir) {
+    std::vector<int> to_ignite;
+
+    for (int y = 0; y < height_; ++y) {
+        for (int x = 0; x < width_; ++x) {
+            int idx = y * width_ + x;
+            if (grid_[idx].state == 1) { // Burning cell
+                grid_[idx].burn_time += delta_time;
+
+                // Simple 4-neighbor spread propagation
+                const int dx[] = {0, 0, -1, 1};
+                const int dy[] = {-1, 1, 0, 0};
+
+                for (int i = 0; i < 4; ++i) {
+                    int nx = x + dx[i];
+                    int ny = y + dy[i];
+
+                    if (nx >= 0 && nx < width_ && ny >= 0 && ny < height_) {
+                        int nidx = ny * width_ + nx;
+                        if (grid_[nidx].state == 0) {
+                            float n_ros = CalculateCellROS(grid_[nidx], wind_speed, wind_dir);
+                            if (n_ros > 0.0f && grid_[idx].burn_time > (30.0f / n_ros)) {
+                                to_ignite.push_back(nidx);
+                            }
+                        }
+                    }
+                }
+
+                if (grid_[idx].burn_time > 300.0f) {
+                    grid_[idx].state = 2; // Burned out
+                }
             }
         }
     }
-}
 
-// ----------------------------------------------------------------------------
-// Internal Cell State Ignition
-// ----------------------------------------------------------------------------
-// Updates internal state when a cell transition to Burning occurs.
-void FireSimulation::igniteCell(int idx) {
-    grid_[idx].state = CellState::Burning;
-    fireMask_[idx] = 1;      // Binary fire mask for distance transform / spatial tracking
-    dirty_.push_back(idx);   // Queue cell index for renderer/GPU updates
-    fireGrew_ = true;        // Flag to trigger path planning or search graph invalidation
-}
-
-// ----------------------------------------------------------------------------
-// Public External Ignition Trigger
-// ----------------------------------------------------------------------------
-// Manually ignites a cell (e.g., initial fire origin or lightning strikes).
-bool FireSimulation::ignite(int idx) {
-    if (grid_[idx].state != CellState::Unburned) return false; // Already burning/burned
-    igniteCell(idx);
-    burning_.push_back(idx); // Add cell to active burning frontier list
-    return true;
-}
-
-// ----------------------------------------------------------------------------
-// Simulation Step (Single Time Frame / Tick)
-// ----------------------------------------------------------------------------
-// Advances burning processes, calculates stochastic neighbor ignitions, 
-// consumes fuel, and transitions fully consumed cells to Burned state.
-void FireSimulation::step() {
-    newlyIgnited_.clear();
-    size_t keep = 0; // In-place compaction index for active burning frontier
-
-    // Process all currently burning frontier cells
-    for (size_t i = 0; i < burning_.size(); ++i) {
-        const int idx = burning_[i];
-        const float* probs = &ignitionProb_[static_cast<size_t>(idx) * NUM_DIRS];
-
-        // Attempt stochastic ignition of adjacent unburned cells
-        for (int d = 0; d < NUM_DIRS; ++d) {
-            const float p = probs[d];
-            if (p <= 0.0f) continue;
-
-            const int nIdx = idx + DY[d] * GRID_WIDTH + DX[d];
-            if (grid_[nIdx].state != CellState::Unburned) continue;
-
-            // Monte Carlo trial based on precomputed probability
-            if (dist_(rng_) < p) {
-                igniteCell(nIdx);
-                newlyIgnited_.push_back(nIdx);
-            }
-        }
-
-        // Consume fuel of current burning cell
-        Cell& c = grid_[idx];
-        c.fuel -= FUEL_BURN_RATE;
-        c.burnTime += 1.0f;
-
-        if (c.fuel <= 0.0f) {
-            // Fuel depleted: transition cell state to Burned
-            c.state = CellState::Burned;
-            dirty_.push_back(idx);
-        }
-        else {
-            // Cell still has fuel: retain on burning frontier list
-            burning_[keep++] = idx;
-        }
+    for (int nidx : to_ignite) {
+        grid_[nidx].state = 1;
     }
-
-    // Shrink active list to remaining burning cells and append newly ignited cells
-    burning_.resize(keep);
-    burning_.insert(burning_.end(), newlyIgnited_.begin(), newlyIgnited_.end());
-}
-
-// ----------------------------------------------------------------------------
-// State Tracking Queries
-// ----------------------------------------------------------------------------
-
-// Flushes and returns grid indices modified since the last call (for rendering optimization)
-std::vector<int> FireSimulation::takeDirtyCells() {
-    std::vector<int> out;
-    out.swap(dirty_);
-    return out;
-}
-
-// Atomically checks and resets the fire perimeter expansion flag
-bool FireSimulation::takeFireGrew() {
-    const bool grew = fireGrew_;
-    fireGrew_ = false;
-    return grew;
 }
