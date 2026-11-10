@@ -122,6 +122,7 @@ exit /b 0</Command>
     <ClCompile Include="src\safe_planner.cpp" />
     <ClCompile Include="src\terrain.cpp" />
     <ClCompile Include="src\topography.cpp" />
+    <ClCompile Include="src\viewport.cpp" />
     <ClCompile Include="src\voronoi.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -143,6 +144,7 @@ exit /b 0</Command>
     <ClInclude Include="src\safe_planner.h" />
     <ClInclude Include="src\terrain.h" />
     <ClInclude Include="src\topography.h" />
+    <ClInclude Include="src\viewport.h" />
     <ClInclude Include="src\types.h" />
     <ClInclude Include="src\voronoi.h" />
   </ItemGroup>

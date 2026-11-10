@@ -42,7 +42,8 @@ struct WindowRequest {
 // CBD is kg/m^3 x 100; LANDFIRE product pages: CH is metres x 10). If it is larger than
 // GRID_WIDTH x GRID_HEIGHT cells of SIM_CELL_SIZE_M (LANDFIRE is), a window of that size is cut out at native
 // resolution; a smaller DEM (such as the bundled elevation_map.tif) is used whole, as before. Every other layer
-// is warped onto the same grid: average for elevation and slope, most common value for the category layers.
+// is warped onto the same grid: average for elevation and slope, most common value for fuel, max for roads.
+// With ALIGN_NORTH_UP the window is laid out north-up in the local UTM zone (see makeNorthUpWindow).
 Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window);
 
 // Elevation mapped linearly to 0 (lowest, black) .. 255 (highest, white), one value per cell.

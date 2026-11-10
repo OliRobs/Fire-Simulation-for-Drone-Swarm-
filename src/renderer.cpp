@@ -1,4 +1,6 @@
 #include "renderer.h"
+#include <algorithm>
+#include <cmath>
 
 namespace {
     // Color scheme for different drone mission path types
@@ -17,11 +19,12 @@ namespace {
 // ============================================================================
 Renderer::Renderer(const std::vector<std::uint8_t>& terrainShade)
     : window_(sf::VideoMode(GRID_WIDTH* CELL_SIZE, GRID_HEIGHT* CELL_SIZE),
-        "2D Wildfire Simulator (Rothermel, LANDFIRE) - P: perimeter, V: drone mission overlay, R: roads"),
+        "2D Wildfire Simulator (Rothermel, LANDFIRE) - wheel: zoom, right-drag: pan, F: frame fire"),
     terrainShade_(terrainShade),
     pixels_(static_cast<size_t>(GRID_WIDTH)* GRID_HEIGHT * 4, 255),       // RGBA primary grid buffer
     overlayPixels_(static_cast<size_t>(GRID_WIDTH)* GRID_HEIGHT * 4, 0),   // RGBA mission overlay buffer
-    marker_(3.0f), sensor_(SENSOR_RADIUS* CELL_SIZE), body_(5.0f) {
+    marker_(3.0f), sensor_(SENSOR_RADIUS* CELL_SIZE), body_(5.0f),
+    view_(static_cast<float>(GRID_WIDTH * CELL_SIZE), static_cast<float>(GRID_HEIGHT * CELL_SIZE)) {
     window_.setFramerateLimit(30); // Cap frame rate to 30 FPS
 
     // Create primary terrain & fire texture/sprite mapped to grid dimensions
@@ -43,6 +46,7 @@ Renderer::Renderer(const std::vector<std::uint8_t>& terrainShade)
     body_.setOrigin(5.0f, 5.0f);
     body_.setOutlineColor(sf::Color::White);
     body_.setOutlineThickness(1.0f);
+    applyView();
 }
 
 // Helper function to set raw RGBA pixel values in the base texture pixel array
@@ -182,6 +186,30 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
     window_.draw(sprite_);
 
     const float cs = static_cast<float>(CELL_SIZE);
+    // World units per screen pixel: markers are scaled by this so they keep their on-screen size when zoomed
+    const float perPixel = view_.width() / static_cast<float>(window_.getSize().x);
+
+    // Cell grid lines, once cells are big enough on screen to tell apart (fading in as you zoom)
+    const float cellPx = cs / perPixel;
+    if (cellPx >= 8.0f) {
+        const sf::Color lineColour(0, 0, 0, static_cast<sf::Uint8>(std::min(80.0f, 20.0f + (cellPx - 8.0f) * 4.0f)));
+        const int x0 = std::max(0, static_cast<int>(view_.left() / cs));
+        const int x1 = std::min(GRID_WIDTH, static_cast<int>(std::ceil((view_.left() + view_.width()) / cs)));
+        const int y0 = std::max(0, static_cast<int>(view_.top() / cs));
+        const int y1 = std::min(GRID_HEIGHT, static_cast<int>(std::ceil((view_.top() + view_.height()) / cs)));
+        sf::VertexArray lines(sf::Lines);
+        for (int x = x0; x <= x1; ++x) {   // Vertical lines on cell edges
+            lines.append(sf::Vertex(sf::Vector2f(x * cs, y0 * cs), lineColour));
+            lines.append(sf::Vertex(sf::Vector2f(x * cs, y1 * cs), lineColour));
+        }
+        for (int y = y0; y <= y1; ++y) {   // Horizontal lines
+            lines.append(sf::Vertex(sf::Vector2f(x0 * cs, y * cs), lineColour));
+            lines.append(sf::Vertex(sf::Vector2f(x1 * cs, y * cs), lineColour));
+        }
+        window_.draw(lines);
+    }
+    marker_.setScale(perPixel, perPixel);
+    body_.setScale(perPixel, perPixel);
 
     // Draw mission overlay details if enabled ('V' key toggle)
     if (showMission) {
@@ -219,4 +247,83 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
     }
 
     window_.display();
+}
+// ============================================================================
+// Zoom and Pan
+// ============================================================================
+
+// Copies the viewport into the window. Everything drawn afterwards (grid, overlays, drones) uses it, and
+// mapPixelToCoords (mouse clicks) follows it too.
+void Renderer::applyView() {
+    sf::View v(sf::FloatRect(view_.left(), view_.top(), view_.width(), view_.height()));
+    window_.setView(v);
+}
+
+// ----------------------------------------------------------------------------
+// Mouse and keyboard controls for the view
+// ----------------------------------------------------------------------------
+bool Renderer::handleViewEvent(const sf::Event& event) {
+    const float perPixel = view_.width() / static_cast<float>(window_.getSize().x);
+
+    switch (event.type) {
+    case sf::Event::MouseWheelScrolled: {
+        // Zoom about the point under the cursor: one notch = VIEW_ZOOM_STEP
+        if (event.mouseWheelScroll.wheel != sf::Mouse::VerticalWheel) return false;
+        const sf::Vector2f at = window_.mapPixelToCoords(sf::Vector2i(event.mouseWheelScroll.x, event.mouseWheelScroll.y));
+        view_.zoomAt(at.x, at.y, std::pow(VIEW_ZOOM_STEP, event.mouseWheelScroll.delta));
+        applyView();
+        return true;
+    }
+    case sf::Event::MouseButtonPressed:
+        // Right or middle button starts a drag (left button is left free for igniting cells)
+        if (event.mouseButton.button != sf::Mouse::Right && event.mouseButton.button != sf::Mouse::Middle) return false;
+        dragging_ = true;
+        lastMouse_ = sf::Vector2i(event.mouseButton.x, event.mouseButton.y);
+        return true;
+    case sf::Event::MouseButtonReleased:
+        if (event.mouseButton.button != sf::Mouse::Right && event.mouseButton.button != sf::Mouse::Middle) return false;
+        dragging_ = false;
+        return true;
+    case sf::Event::MouseMoved: {
+        if (!dragging_) return false;
+        // The map follows the mouse: move the view the opposite way to the cursor
+        const sf::Vector2i now(event.mouseMove.x, event.mouseMove.y);
+        view_.pan((lastMouse_.x - now.x) * perPixel, (lastMouse_.y - now.y) * perPixel);
+        lastMouse_ = now;
+        applyView();
+        return true;
+    }
+    case sf::Event::KeyPressed: {
+        const float step = 0.1f * view_.width();   // Arrow keys move a tenth of the visible width
+        switch (event.key.code) {
+        case sf::Keyboard::Add: case sf::Keyboard::Equal:
+            view_.zoomAt(view_.centreX(), view_.centreY(), VIEW_ZOOM_STEP); break;
+        case sf::Keyboard::Subtract: case sf::Keyboard::Hyphen:
+            view_.zoomAt(view_.centreX(), view_.centreY(), 1.0f / VIEW_ZOOM_STEP); break;
+        case sf::Keyboard::Left:  view_.pan(-step, 0); break;
+        case sf::Keyboard::Right: view_.pan(step, 0); break;
+        case sf::Keyboard::Up:    view_.pan(0, -step); break;
+        case sf::Keyboard::Down:  view_.pan(0, step); break;
+        case sf::Keyboard::Num0: case sf::Keyboard::Numpad0: case sf::Keyboard::Home:
+            view_.reset(); break;
+        default:
+            return false;
+        }
+        applyView();
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Frame the fire: fit the bounding box of the mask, with 10 cells of margin
+// ----------------------------------------------------------------------------
+void Renderer::frameMask(const std::vector<std::uint8_t>& mask) {
+    int x0, y0, x1, y1;
+    if (!maskBounds(mask, GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1)) return;   // No fire yet
+    const float cs = static_cast<float>(CELL_SIZE);
+    view_.frame(x0 * cs, y0 * cs, (x1 + 1) * cs, (y1 + 1) * cs, 10.0f * cs);
+    applyView();
 }

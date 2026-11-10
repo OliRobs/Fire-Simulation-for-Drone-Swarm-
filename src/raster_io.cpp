@@ -4,6 +4,7 @@
 #include <ogr_spatialref.h>
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -109,6 +110,86 @@ bool makeWindow(const RasterGrid& full, double centreX, double centreY, double c
 }
 
 // ----------------------------------------------------------------------------
+// North-up window in the local UTM zone
+// ----------------------------------------------------------------------------
+namespace {
+    // Coordinate transformation between two WKT/SRS definitions, x/y in "GIS order" (lon, lat for degrees)
+    struct Transform {
+        OGRCoordinateTransformation* ct = nullptr;
+        Transform(const OGRSpatialReference& from, const OGRSpatialReference& to)
+            : ct(OGRCreateCoordinateTransformation(&from, &to)) {}
+        ~Transform() { if (ct) OGRCoordinateTransformation::DestroyCT(ct); }
+        Transform(const Transform&) = delete;
+        Transform& operator=(const Transform&) = delete;
+        bool apply(double& x, double& y) const { return ct && ct->Transform(1, &x, &y) != 0; }
+    };
+}
+
+bool makeNorthUpWindow(const RasterGrid& full, double centreX, double centreY, double cellSize, RasterGrid& out,
+                       int& utmZone, double& rotationDeg) {
+    if (full.wkt.empty() || !full.projected) return false;
+
+    OGRSpatialReference src, geo, utm;
+    src.importFromWkt(full.wkt.c_str());
+    geo.SetWellKnownGeogCS("NAD83");                       // LANDFIRE's datum
+    for (OGRSpatialReference* r : { &src, &geo, &utm }) r->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
+    // --- Pick the UTM zone from the centre's longitude (6-degree zones from 180 W) ---
+    double lon = centreX, lat = centreY;
+    if (!Transform(src, geo).apply(lon, lat)) return false;
+    utmZone = std::clamp(static_cast<int>(std::floor((lon + 180.0) / 6.0)) + 1, 1, 60);
+    utm.SetWellKnownGeogCS("NAD83");
+    utm.SetUTM(utmZone, lat >= 0.0);
+    utm.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
+    const Transform toUtm(src, utm), toSrc(utm, src);
+    const double w = full.width * cellSize, h = full.height * cellSize;   // Window size on the ground
+
+    // --- Place the window, moving it in from the file's edges if a corner falls outside ---
+    // The north-up window is rotated relative to the file, so its corners are checked in the file's coordinates.
+    double cx = 0, cy = 0;
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        cx = centreX; cy = centreY;
+        if (!toUtm.apply(cx, cy)) return false;
+        cx = std::round(cx / cellSize) * cellSize;          // Keep cell edges on round coordinates
+        cy = std::round(cy / cellSize) * cellSize;
+
+        double lo[2] = { 1e300, 1e300 }, hi[2] = { -1e300, -1e300 };
+        for (int corner = 0; corner < 4; ++corner) {
+            double x = cx + ((corner & 1) ? w / 2 : -w / 2), y = cy + ((corner & 2) ? h / 2 : -h / 2);
+            if (!toSrc.apply(x, y)) return false;
+            lo[0] = std::min(lo[0], x); hi[0] = std::max(hi[0], x);
+            lo[1] = std::min(lo[1], y); hi[1] = std::max(hi[1], y);
+        }
+        if (hi[0] - lo[0] > full.maxX - full.minX || hi[1] - lo[1] > full.maxY - full.minY) return false;   // Too small
+
+        const double shiftX = std::max(full.minX - lo[0], 0.0) - std::max(hi[0] - full.maxX, 0.0);
+        const double shiftY = std::max(full.minY - lo[1], 0.0) - std::max(hi[1] - full.maxY, 0.0);
+        if (shiftX == 0.0 && shiftY == 0.0) break;           // Fits
+        centreX += shiftX + (shiftX > 0 ? cellSize : shiftX < 0 ? -cellSize : 0.0);   // Small margin for rounding
+        centreY += shiftY + (shiftY > 0 ? cellSize : shiftY < 0 ? -cellSize : 0.0);
+    }
+
+    // --- How far the file's grid is rotated from north here: map 1 km of UTM northing into the file ---
+    double nx0 = cx, ny0 = cy, nx1 = cx, ny1 = cy + 1000.0;
+    if (toSrc.apply(nx0, ny0) && toSrc.apply(nx1, ny1)) {
+        rotationDeg = std::atan2(nx1 - nx0, ny1 - ny0) * 57.29577951308232;
+    }
+
+    char* wkt = nullptr;
+    utm.exportToWkt(&wkt);
+    out = full;
+    out.wkt = wkt ? wkt : "";
+    CPLFree(wkt);
+    out.projected = true;
+    out.minX = cx - w / 2; out.maxX = cx + w / 2;
+    out.minY = cy - h / 2; out.maxY = cy + h / 2;
+    out.originX = out.minX; out.originY = out.maxY;      // The new grid is its own pixel grid
+    out.pixelW = out.pixelH = cellSize;
+    return true;
+}
+
+// ----------------------------------------------------------------------------
 // Longitude/latitude -> grid coordinates
 // ----------------------------------------------------------------------------
 bool lonLatToGrid(const RasterGrid& grid, double lon, double lat, double& x, double& y) {
@@ -148,7 +229,8 @@ bool loadRaster(const char* filePath, const RasterGrid& grid, Resample method, s
     args.AddString(fmt(grid.maxX).c_str()); args.AddString(fmt(grid.maxY).c_str());
     args.AddString("-ts");
     args.AddString(std::to_string(grid.width).c_str()); args.AddString(std::to_string(grid.height).c_str());
-    args.AddString("-r");   args.AddString(method == Resample::Mode ? "mode" : "average");
+    args.AddString("-r");
+    args.AddString(method == Resample::Mode ? "mode" : method == Resample::Max ? "max" : "average");
 
     // Reproject only when both sides have a coordinate system. If one is missing we can't check the
     // alignment, so say so and assume they already share one.

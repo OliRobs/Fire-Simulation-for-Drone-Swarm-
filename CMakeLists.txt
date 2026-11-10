@@ -34,6 +34,7 @@ add_library(wf_core STATIC
   src/rothermel.cpp
   src/crown_fire.cpp
   src/topography.cpp
+  src/viewport.cpp
   src/perimeter.cpp)
 target_include_directories(wf_core PUBLIC src)
 wf_warnings(wf_core)
