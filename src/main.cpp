@@ -157,6 +157,7 @@ int main(int argc, char** argv) {
 
     bool ringDirty = true; // Flag indicating UI/Visual perimeter ring needs updating
     int lastTitleMinute = -1; // Simulated minute last shown in the window title
+    float lastTitleZoom = 0.0f; // Zoom last shown in the window title
 
     // ------------------------------------------------------------------------
     // Step 3: Main Execution & Simulation Event Loop
@@ -166,6 +167,9 @@ int main(int argc, char** argv) {
 
         // --- 3a. User Event Handling ---
         while (renderer.window().pollEvent(event)) {
+            // Zoom / pan controls (mouse wheel, right-drag, +/-, arrows, 0) are handled by the renderer
+            if (renderer.handleViewEvent(event)) continue;
+
             if (event.type == sf::Event::Closed) {
                 renderer.window().close();
             }
@@ -192,6 +196,11 @@ int main(int argc, char** argv) {
             // 'V' Key: Toggle visual overlay of drone mission routes and waypoints
             if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::V) {
                 renderer.showMission = !renderer.showMission;
+            }
+
+            // 'F' Key: Zoom to fit the fire (burning and burned cells)
+            if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::F) {
+                renderer.frameMask(sim.fireMask());
             }
 
             // 'R' Key: Toggle the road overlay (repaints the base map, then the perimeter ring on top)
@@ -239,13 +248,15 @@ int main(int argc, char** argv) {
         // --- 3e. Render Frame ---
         renderer.draw(mission.plan(), mission.drones());
 
-        // Show the simulated time in the title bar, refreshed once per simulated minute
+        // Show the simulated time and zoom in the title bar, refreshed each simulated minute or on zooming
         const int simMinute = static_cast<int>(sim.minutes());
-        if (simMinute != lastTitleMinute) {
+        if (simMinute != lastTitleMinute || renderer.zoom() != lastTitleZoom) {
             lastTitleMinute = simMinute;
-            char title[128];
-            std::snprintf(title, sizeof(title), "Wildfire (Rothermel, LANDFIRE)  t = %dh %02dm  |  P perimeter, V mission, R roads",
-                          simMinute / 60, simMinute % 60);
+            lastTitleZoom = renderer.zoom();
+            char title[192];
+            std::snprintf(title, sizeof(title),
+                          "Wildfire  t = %dh %02dm  zoom %.1fx  |  wheel zoom, right-drag pan, F fire, 0 reset, P V R overlays",
+                          simMinute / 60, simMinute % 60, renderer.zoom());
             renderer.window().setTitle(title);
         }
     }

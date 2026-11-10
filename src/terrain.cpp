@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -117,10 +118,18 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
             cx = 0.5 * (full.minX + full.maxX);
             cy = 0.5 * (full.minY + full.maxY);
         }
-        // A large projected raster (LANDFIRE) gets a native-resolution window; a small DEM is used whole
-        if (full.projected && makeWindow(full, cx, cy, SIM_CELL_SIZE_M, grid)) {
+        // A large projected raster (LANDFIRE) gets a 30 m window, north-up in the local UTM zone (or on the
+        // file's own pixel grid if ALIGN_NORTH_UP is off); a small DEM is used whole
+        int zone = 0;
+        double rotation = 0.0;
+        if (full.projected && ALIGN_NORTH_UP && makeNorthUpWindow(full, cx, cy, SIM_CELL_SIZE_M, grid, zone, rotation)) {
+            std::printf("Simulation window: %d x %d cells of %.0f m, north-up on UTM zone %dN (the source grid is "
+                        "rotated %.1f deg from north here, so layers are re-sampled onto the new grid)\n",
+                        GRID_WIDTH, GRID_HEIGHT, SIM_CELL_SIZE_M, zone, rotation);
+        }
+        else if (full.projected && makeWindow(full, cx, cy, SIM_CELL_SIZE_M, grid)) {
             std::cout << "Simulation window: " << GRID_WIDTH << " x " << GRID_HEIGHT << " cells of "
-                      << SIM_CELL_SIZE_M << " m, x " << grid.minX << " .. " << grid.maxX
+                      << SIM_CELL_SIZE_M << " m on the source grid, x " << grid.minX << " .. " << grid.maxX
                       << ", y " << grid.minY << " .. " << grid.maxY << "\n";
         }
         else if (window.useLonLat) {
@@ -189,7 +198,7 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
     }
 
     // --- 5. Operational roads ---
-    if (haveGrid && loadLayer(paths.roads, grid, Resample::Mode, "roads", raw)) {
+    if (haveGrid && loadLayer(paths.roads, grid, Resample::Max, "roads", raw)) {
         int roadCells = 0;
         for (int i = 0; i < N; ++i) {
             const int v = isNoData(raw[i]) ? 0 : static_cast<int>(std::lround(raw[i]));

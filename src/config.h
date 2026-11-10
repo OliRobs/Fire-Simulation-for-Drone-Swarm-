@@ -9,9 +9,12 @@ constexpr float DEFAULT_CELL_SIZE_M = 30.0f; // Ground size of a cell when no DE
 
 // --- Simulation window on the LANDFIRE rasters ---
 // LANDFIRE layers are 30 m pixels covering a large area, so the simulation runs on a GRID_WIDTH x GRID_HEIGHT
-// window of them (500 x 30 m = 15 km square), at native resolution. The window is centred on the raster's
+// window of them (500 x 30 m = 15 km square). The window is centred on the raster's
 // centre unless --centre <lon> <lat> is given on the command line.
 constexpr float SIM_CELL_SIZE_M = 30.0f;
+// Lay the window out north-up (local UTM zone) rather than on the LANDFIRE Albers grid, which is rotated away
+// from north outside the central US (13 deg in Southern California). Also makes WIND_FROM_DEG a true bearing.
+constexpr bool ALIGN_NORTH_UP = true;
 
 // --- Fire spread (Rothermel surface fire model, see rothermel.h) ---
 // Simulated time per frame. With 30 m cells, DRONE_SPEED (5.5 cells per tick) is then 16.5 m/s, a realistic

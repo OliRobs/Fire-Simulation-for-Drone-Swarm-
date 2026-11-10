@@ -25,8 +25,20 @@ Windows: CMake looks for SFML in `C:\SFML-2.6.1` and GDAL in `C:\gdal` (the same
 
 The SFML DLLs are copied next to `wildfire.exe` after each build; GDAL's `bin` folder needs to be on `PATH`.
 
-Keys: left-click ignites a cell, P toggles the perimeter ring, V toggles the drone mission overlay, R toggles
-the road overlay. The title bar shows simulated time (one frame = 10 s).
+Controls:
+
+| Input | Action |
+|---|---|
+| Left-click | Ignite a cell |
+| Mouse wheel | Zoom in/out about the cursor (up to 50x, 10 cells across) |
+| Right- or middle-drag | Pan |
+| `+` / `-`, arrow keys | Zoom about the centre / pan |
+| `F` | Zoom to fit the fire (burning and burned cells) |
+| `0` or Home | Whole map |
+| `P`, `V`, `R` | Toggle the perimeter ring, drone mission overlay, roads |
+
+Cell grid lines appear once cells are about 8 pixels or more on screen. The title bar shows simulated time
+(one frame = 10 s) and the zoom.
 
 ## Input data (LANDFIRE)
 
@@ -42,7 +54,7 @@ were found.
 
 | Layer | Used for | Notes |
 |---|---|---|
-| Elevation (`_Elev_`, m) | Simulation grid, background shading, **aspect** (which way is uphill) | Defines the coordinate system. The download is 30 m pixels over ~264 x 207 km, so a window of GRID_WIDTH x GRID_HEIGHT cells (500 x 30 m = 15 km) is cut out at native resolution, centred on the raster centre or on `--centre <lon> <lat>`. |
+| Elevation (`_Elev_`, m) | Simulation grid, background shading, **aspect** (which way is uphill) | The download is 30 m pixels over ~264 x 207 km, so a window of GRID_WIDTH x GRID_HEIGHT cells (500 x 30 m = 15 km) is cut out, centred on the raster centre or on `--centre <lon> <lat>`. |
 | Slope (`_SlpD_`, degrees) | Rothermel slope factor | Missing cells (or a missing layer) fall back to slope computed from the elevation. |
 | FBFM40 (`FBFM40`) | Fuel model per cell | Scott & Burgan model numbers, looked up in `fuel_models.cpp` (Table 7 of RMRS-GTR-153). 91-99 (urban, water, agriculture, bare...) and NoData don't burn. |
 | Roads (`_Roads_`) | Fuel breaks, drawn in amber | Classes 20 primary, 21 secondary, 22 tertiary, 23 thinned. Road cells don't burn (`ROADS_ARE_FUEL_BREAKS`); diagonal road lines hold too. |
@@ -52,6 +64,13 @@ were found.
 | Canopy bulk density (`_CBD_`, kg/m3 x 100) | Active crown fire | Crown fire is active only if its spread rate exceeds 3.0 / CBD m/min. |
 
 Canopy values are stored by LANDFIRE as scaled integers (0 = no forest) and converted on load (RMRS-GTR-220).
+
+**North-up grid.** LANDFIRE's CONUS Albers projection (EPSG:5070) only points north at 96 W; elsewhere its grid
+is rotated (about 13 degrees in Southern California), which made the map, roads and wind direction tilted. So
+the window is laid out north-up in the local UTM zone (NAD83, picked from the window centre) and every layer is
+warped onto it: average for elevation, slope and canopy, most common value for fuel, max for roads (so a
+one-pixel road stays an unbroken fuel break). Set `ALIGN_NORTH_UP = false` in `config.h` to use the Albers
+pixel grid unchanged instead.
 Every layer is warped onto the elevation layer's grid (average for elevation and slope, most common value for
 fuel and roads), so layers with different extents still line up. Without a LANDFIRE folder the program falls
 back to the bundled UK `elevation_map.tif` (used whole, as before) with fuel model GR2 everywhere.
@@ -113,7 +132,8 @@ Aspect is not needed as a separate layer: it is computed from the elevation (Hor
 | Module | Responsibility |
 |---|---|
 | config.h, types.h | constants, neighbour tables, Vec2, Cell |
-| raster_io, terrain | GDAL loading: finds the LANDFIRE layers, cuts the window, warps every layer onto the DEM's grid (only code using GDAL) |
+| raster_io, terrain | GDAL loading: finds the LANDFIRE layers, cuts a north-up UTM window, warps every layer onto it (only code using GDAL) |
+| viewport | Zoom and pan maths (headless, tested); the renderer turns it into an sf::View |
 | fuel_models | The 40 Scott & Burgan fuel models (Table 7 of RMRS-GTR-153), looked up by FBFM40 code |
 | rothermel | Rothermel surface spread: fuel bed, wind and slope factors, wind adjustment (open and under canopy), head fire direction and ellipse |
 | crown_fire | Van Wagner torching threshold, active crown fire threshold, fireline intensity and flame length |

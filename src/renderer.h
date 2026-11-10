@@ -6,6 +6,7 @@
 #include "drone.h"
 #include "mission_types.h"
 #include "types.h"
+#include "viewport.h"
 
 // All SFML drawing. One RGBA texture for the grid (only changed pixels are rewritten) plus a second
 // transparent texture for the mission overlay, with drones, routes and points of interest drawn on top.
@@ -31,7 +32,16 @@ public:
 
     void draw(const MissionPlan& plan, const std::vector<Drone>& drones);
 
+    // --- Zoom and pan ---
+    // Handles mouse wheel (zoom at cursor), right/middle drag (pan), +/- (zoom), arrow keys (pan) and
+    // 0/Home (whole map). Returns true if the event was used, so the caller can skip it.
+    bool handleViewEvent(const sf::Event& event);
+    // Zooms to fit the non-zero cells of mask (e.g. the fire), with a margin of a few cells
+    void frameMask(const std::vector<std::uint8_t>& mask);
+    float zoom() const { return view_.zoom(); }
+
 private:
+    void applyView();   // Pushes view_ to the window as an sf::View
     void setColor(int idx, std::uint8_t r, std::uint8_t g, std::uint8_t b);
     void paintBase(int idx, const std::vector<Cell>& grid);
 
@@ -48,4 +58,8 @@ private:
 
     std::vector<int> ringCells_;
     sf::CircleShape marker_, sensor_, body_;
+
+    Viewport view_;
+    bool dragging_ = false;          // Right or middle mouse button held: panning
+    sf::Vector2i lastMouse_;         // Mouse position at the previous drag event, window pixels
 };

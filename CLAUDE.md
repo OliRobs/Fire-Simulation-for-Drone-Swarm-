@@ -28,11 +28,12 @@ surveys round the fire. README.md has the module table and input-data notes.
   Ask before changing them.
 - Input data is LANDFIRE (US only, EPSG:5070 Albers, 30 m): elevation, slope (degrees), FBFM40 fuel models,
   operational roads and the canopy layers CC (%), CH (m x 10), CBH (m x 10), CBD (kg/m3 x 100). Files are found by
-  name in `--data`, else `landfire/`, else loose in the working folder (the repo root). The elevation layer defines the simulation grid: a
-  GRID_WIDTH x GRID_HEIGHT window at native 30 m, snapped to the pixel grid; every other layer is warped onto it.
+  name in `--data`, else `landfire/`, else loose in the working folder (the repo root). The elevation layer's extent and centre define the simulation
+  grid: a GRID_WIDTH x GRID_HEIGHT window of 30 m cells laid out north-up in the local UTM zone (`ALIGN_NORTH_UP`;
+  the Albers grid is rotated ~13 deg in California). Every layer is warped onto it (fuel Mode, roads Max).
   The .tif files are git-ignored. `elevation_map.tif` (UK, EPSG:27700, 5 km) is only the no-data fallback.
 - Fuel rasters hold FBFM40 category codes: look them up through `fuel_models.cpp`, never average or clamp them
-  (resample with Mode). Same for road classes.
+  (resample with Mode; roads with Max so thin roads stay continuous).
 - Fire spread is Rothermel (`rothermel.cpp`), equations from Andrews 2018 (RMRS-GTR-371); canopy wind sheltering
   from Andrews 2012; crown fire (`crown_fire.cpp`) is the Finney 1998 method (Van Wagner 1977 thresholds, Rothermel
   1991 crown rate). Weather (fuel moisture, foliar moisture, wind) is not in the LANDFIRE data; the placeholders

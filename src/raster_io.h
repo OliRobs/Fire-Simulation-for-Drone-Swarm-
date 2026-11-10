@@ -28,12 +28,24 @@ bool readRasterGrid(const char* filePath, int width, int height, RasterGrid& out
 // every cell is exactly one source pixel). False if the file is smaller than the window.
 bool makeWindow(const RasterGrid& full, double centreX, double centreY, double cellSize, RasterGrid& out);
 
+// Like makeWindow, but the window is laid out on a NORTH-UP grid: the local UTM zone (NAD83, the LANDFIRE
+// datum) chosen from the window centre. Needed for LANDFIRE because its CONUS Albers projection (EPSG:5070) is
+// only north-up at 96 W; far from there its grid is rotated (13 degrees in Southern California), so the map,
+// roads and wind directions came out tilted. Every layer is then warped onto this grid.
+// (centreX, centreY) is given in full's coordinate system. The window is moved in from the edges of the file
+// if needed. False if the file is too small or the coordinate systems can't be converted.
+// rotationDeg returns how far the source grid was rotated from north at the centre (for the log).
+bool makeNorthUpWindow(const RasterGrid& full, double centreX, double centreY, double cellSize, RasterGrid& out,
+                       int& utmZone, double& rotationDeg);
+
 // Converts WGS84 longitude/latitude (degrees) into the grid's coordinate system
 bool lonLatToGrid(const RasterGrid& grid, double lon, double lat, double& x, double& y);
 
 enum class Resample {
     Average,  // Continuous data (elevation): mean of the source pixels in each cell
-    Mode      // Categorical data (fuel-model codes): most common source value in each cell, never a blend
+    Mode,     // Categorical data (fuel-model codes): most common source value in each cell, never a blend
+    Max       // Thin categorical features (roads): a cell takes the feature if any source pixel in it has one,
+              // so a one-pixel road stays unbroken after the grid is rotated
 };
 
 // Reads band 1 of filePath, reprojected and resampled onto grid (one value per cell, row-major).
