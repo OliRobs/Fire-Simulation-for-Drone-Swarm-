@@ -51,10 +51,16 @@
     <ClCompile Include="src\renderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\rothermel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\safe_planner.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\terrain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\topography.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\voronoi.cpp">
@@ -101,10 +107,16 @@
     <ClInclude Include="src\renderer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\rothermel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\safe_planner.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\terrain.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\topography.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\types.h">

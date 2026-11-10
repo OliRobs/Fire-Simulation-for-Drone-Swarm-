@@ -25,10 +25,14 @@ inline Vec2 cellCentre(int idx) { return Vec2(idx % GRID_WIDTH + 0.5f, idx / GRI
 
 enum class CellState : std::uint8_t { Unburned, Burning, Burned };
 
+// One 30 m patch of landscape: the LANDFIRE layers for that patch plus its fire state.
 struct Cell {
-    float elevation = 0.0f; // Altitude in metres (affects slope)
-    float fuel = 1.0f;      // Fuel remaining (0.0 to 1.0): burns down by FUEL_BURN_RATE per tick, so sets burn duration
-    float flammability = 1.0f; // How readily fire spreads INTO this cell (0.0 = nonburnable, 1.0 = fastest fuels)
-    float burnTime = 0.0f;  // Ticks spent burning
+    float elevation = 0.0f;  // Metres (LANDFIRE Elev)
+    float slopeDeg = 0.0f;   // Slope steepness in degrees (LANDFIRE SlpD, or derived from elevation)
+    float upslopeX = 0.0f;   // Unit vector pointing uphill, grid frame (x = east, y = south);
+    float upslopeY = 0.0f;   //   (0, 0) on flat ground. Derived from elevation (the aspect).
+    float burnTime = 0.0f;   // Minutes spent burning
+    std::int16_t fuelModel = DEFAULT_FUEL_MODEL; // FBFM40 fuel model number (Scott & Burgan); 91-99 = nonburnable
+    std::uint8_t roadClass = 0;                  // LANDFIRE road class 20-23, 0 = no road
     CellState state = CellState::Unburned;
 };

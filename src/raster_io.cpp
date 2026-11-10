@@ -71,16 +71,61 @@ bool readRasterGrid(const char* filePath, int width, int height, RasterGrid& out
     out.minX = std::min(x0, x1); out.maxX = std::max(x0, x1);
     out.minY = std::min(y0, y1); out.maxY = std::max(y0, y1);
     out.wkt = wktOf(ds.h);
+    const OGRSpatialReference* srs = GDALDataset::FromHandle(ds.h)->GetSpatialRef();
+    out.projected = srs && srs->IsProjected();
     out.width = width;
     out.height = height;
+    out.originX = gt[0];
+    out.originY = gt[3];
+    out.pixelW = std::fabs(gt[1]);
+    out.pixelH = std::fabs(gt[5]);
 
-    // The automaton assumes square cells. A non-square footprint still loads, but cells are stretched.
-    const double ratio = out.cellSizeX() / out.cellSizeY();
-    if (std::fabs(ratio - 1.0) > 0.01) {
-        std::cerr << "[GDAL] Warning: " << filePath << " is not square, so grid cells are "
-                  << out.cellSizeX() << " x " << out.cellSizeY() << " (stretched on screen)\n";
-    }
     return true;
+}
+
+// ----------------------------------------------------------------------------
+// Cut a simulation window out of a large raster
+// ----------------------------------------------------------------------------
+bool makeWindow(const RasterGrid& full, double centreX, double centreY, double cellSize, RasterGrid& out) {
+    const double w = full.width * cellSize, h = full.height * cellSize;   // Window size on the ground
+    if (w > full.maxX - full.minX || h > full.maxY - full.minY) return false;
+
+    // Keep the window inside the file: move the centre in from the edges if needed
+    centreX = std::clamp(centreX, full.minX + w / 2, full.maxX - w / 2);
+    centreY = std::clamp(centreY, full.minY + h / 2, full.maxY - h / 2);
+
+    // Snap the left and top edges to the file's pixel boundaries, then clamp back inside after rounding
+    double left = full.originX + std::round((centreX - w / 2 - full.originX) / full.pixelW) * full.pixelW;
+    double top = full.originY - std::round((full.originY - (centreY + h / 2)) / full.pixelH) * full.pixelH;
+    left = std::clamp(left, full.minX, full.maxX - w);
+    top = std::clamp(top, full.minY + h, full.maxY);
+
+    out = full;
+    out.minX = left;
+    out.maxX = left + w;
+    out.maxY = top;
+    out.minY = top - h;
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Longitude/latitude -> grid coordinates
+// ----------------------------------------------------------------------------
+bool lonLatToGrid(const RasterGrid& grid, double lon, double lat, double& x, double& y) {
+    if (grid.wkt.empty()) return false;
+    OGRSpatialReference wgs84, target;
+    wgs84.SetWellKnownGeogCS("WGS84");
+    wgs84.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);   // x = longitude, y = latitude
+    target.importFromWkt(grid.wkt.c_str());
+    target.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
+    OGRCoordinateTransformation* ct = OGRCreateCoordinateTransformation(&wgs84, &target);
+    if (!ct) return false;
+    x = lon;
+    y = lat;
+    const bool ok = ct->Transform(1, &x, &y) != 0;
+    OGRCoordinateTransformation::DestroyCT(ct);
+    return ok;
 }
 
 // ----------------------------------------------------------------------------

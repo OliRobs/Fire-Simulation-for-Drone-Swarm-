@@ -19,6 +19,8 @@
 #include "drone.h"
 #include "fire_model.h"
 #include "fuel_models.h"
+#include "rothermel.h"
+#include "topography.h"
 #include "mission_controller.h"
 #include "mission_planner.h"
 #include "perimeter.h"
@@ -152,50 +154,241 @@ TEST(planner_goal_inside_no_fly_zone_stops_short) {
 // ============================================================================
 // Fire model
 // ============================================================================
-TEST(slope_factor_uses_angle) {
-    CHECK(getSlopeFactor(0.0f, 5.0f, 10.0f) > 1.0f);               // Uphill speeds spread up
-    CHECK(getSlopeFactor(5.0f, 0.0f, 10.0f) < 1.0f);               // Downhill slows it
-    CHECK(std::fabs(getSlopeFactor(0, 0, 10.0f) - 1.0f) < 1e-6f);  // Flat: no effect
-    // Same angle at a different grid resolution gives the same factor
-    CHECK(std::fabs(getSlopeFactor(0, 5, 10) - getSlopeFactor(0, 50, 100)) < 1e-5f);
-    // A 45 degree slope gives exp(0.078 * 45)
-    CHECK(std::fabs(getSlopeFactor(0, 10, 10) - std::exp(SLOPE_COEFF * 45.0f)) < 1e-3f);
+// --- Rothermel model ---
+namespace {
+    // Scott & Burgan's adjective spread-rate classes (RMRS-GTR-153 Table 5), in chains per hour
+    enum SpreadClass { VL, L, M, H, VH, E };
+    SpreadClass classify(double chainsPerHour) {
+        if (chainsPerHour < 2) return VL;
+        if (chainsPerHour < 5) return L;
+        if (chainsPerHour < 20) return M;
+        if (chainsPerHour < 50) return H;
+        if (chainsPerHour < 150) return VH;
+        return E;
+    }
+    // Head fire rate (ft/min) for a fuel model on flat ground with a midflame wind blowing along +x
+    double headRosFtMin(const FuelModel& m, const FuelMoisture& mo, double midflameMph, bool windLimit) {
+        const SurfaceFuelBed bed = computeFuelBed(m, mo);
+        return computeSpread(bed, midflameMph * FT_PER_MIN_PER_MPH, 1, 0, 0, 0, 0, windLimit).headRos;
+    }
+}
+
+// Every fuel model's head fire rate must fall in the spread class the selection guide gives it
+// (RMRS-GTR-153 pp. 10-12: moisture scenario D2L2, 5 mi/h midflame wind, zero slope).
+TEST(rothermel_reproduces_scott_burgan_spread_classes) {
+    const std::pair<const char*, SpreadClass> expected[] = {
+        { "GR1", M }, { "GR2", H }, { "GR3", H }, { "GR4", VH }, { "GR5", VH }, { "GR6", VH }, { "GR7", VH },
+        { "GR8", VH }, { "GR9", E }, { "GS1", M }, { "GS2", H }, { "GS3", H }, { "GS4", H },
+        { "SH1", VL }, { "SH2", L }, { "SH3", L }, { "SH4", H }, { "SH5", VH }, { "SH6", H }, { "SH7", H },
+        { "SH8", H }, { "SH9", H }, { "TU1", L }, { "TU2", M }, { "TU3", H }, { "TU4", M }, { "TU5", M },
+        { "TL1", VL }, { "TL2", VL }, { "TL3", VL }, { "TL4", L }, { "TL5", L }, { "TL6", M }, { "TL7", L },
+        { "TL8", M }, { "TL9", M }, { "SB1", M }, { "SB2", M }, { "SB3", H }, { "SB4", VH },
+    };
+    int count = 0;
+    const FuelModel* models = allFuelModels(count);
+    CHECK(count == 40);
+    for (int i = 0; i < count; ++i) {
+        for (const auto& [name, cls] : expected) {
+            if (std::string(name) != models[i].name) continue;
+            const double chainsPerHour = headRosFtMin(models[i], FuelMoisture(), 5.0, true) * 60.0 / 66.0;
+            if (classify(chainsPerHour) != cls) {
+                std::printf("  %s: %.1f ch/h\n", name, chainsPerHour);
+                CHECK(classify(chainsPerHour) == cls);
+            }
+        }
+    }
+}
+
+// Packing ratio and characteristic SAV against the summary values on the fuel model pages (RMRS-GTR-153)
+TEST(rothermel_fuel_bed_matches_published_values) {
+    struct Ref { int code; double beta; double sigma; };
+    for (const Ref r : { Ref{ 101, 0.00143, 2054 }, Ref{ 142, 0.01198, 1672 }, Ref{ 181, 0.04878, 1716 },
+                         Ref{ 164, 0.01865, 2216 }, Ref{ 146, 0.00412, 1144 } }) {
+        const SurfaceFuelBed bed = computeFuelBed(*findFuelModel(r.code), FuelMoisture());
+        CHECK(std::fabs(bed.packingRatio - r.beta) / r.beta < 0.005);
+        CHECK(std::fabs(bed.sigma - r.sigma) < 1.0);
+    }
+}
+
+TEST(rothermel_moisture_and_curing) {
+    const FuelModel& gr2 = *findFuelModel(102);
+    // Dead fuel wetter than the 15 % moisture of extinction: no spread at all
+    FuelMoisture wet;
+    wet.dead1h = wet.dead10h = wet.dead100h = 0.30;
+    CHECK(!computeFuelBed(gr2, wet).burnable());
+    // Dynamic model: fully cured grass (herb moisture 30 %) burns much faster than green grass (120 %)
+    FuelMoisture cured, green;
+    cured.liveHerb = 0.30;
+    green.liveHerb = 1.20;
+    CHECK(computeFuelBed(gr2, cured).r0 > 2.0 * computeFuelBed(gr2, green).r0);
+}
+
+TEST(rothermel_wind_slope_and_ellipse) {
+    const SurfaceFuelBed bed = computeFuelBed(*findFuelModel(145), FuelMoisture());   // SH5
+    // No wind, no slope: a circle, spreading at R_0 every way
+    const SpreadEllipse still = computeSpread(bed, 0, 1, 0, 0, 0, 0, false);
+    CHECK(std::fabs(still.headRos - bed.r0) < 1e-9 && still.eccentricity == 0.0);
+    CHECK(std::fabs(still.rosToward(0, 1) - bed.r0) < 1e-9);
+
+    // Wind towards +x: head fire faster, flanks slower, backing slowest
+    const SpreadEllipse windy = computeSpread(bed, 5 * FT_PER_MIN_PER_MPH, 1, 0, 0, 0, 0, false);
+    CHECK(windy.headRos > 3.0 * bed.r0);
+    CHECK(std::fabs(windy.rosToward(1, 0) - windy.headRos) < 1e-9);
+    CHECK(windy.rosToward(0, 1) < windy.headRos && windy.backingRos() < windy.rosToward(0, 1));
+
+    // Slope alone (30 degrees, uphill = -y): head points uphill and gets the slope factor
+    const double tan30 = std::tan(30.0 * 3.14159265358979 / 180.0);
+    const SpreadEllipse slope = computeSpread(bed, 0, 1, 0, tan30, 0, -1, false);
+    CHECK(std::fabs(slope.dirY + 1.0) < 1e-9);
+    CHECK(std::fabs(slope.headRos - bed.r0 * (1 + bed.slopeFactor(tan30))) < 1e-9);
+
+    // Wind across the slope: the head direction lies between the two
+    const SpreadEllipse both = computeSpread(bed, 5 * FT_PER_MIN_PER_MPH, 1, 0, tan30, 0, -1, false);
+    CHECK(both.dirX > 0.0 && both.dirY < 0.0);
+
+    // Unsheltered WAF: deeper fuel beds feel more of the 20-ft wind (Andrews 2012)
+    CHECK(unshelteredWaf(1.0) > 0.3 && unshelteredWaf(1.0) < 0.4);
+    CHECK(unshelteredWaf(6.0) > unshelteredWaf(1.0));
 }
 
 TEST(fuel_lookup) {
     for (int code : { 91, 92, 93, 98, 99, 0, -9999 }) {
-        const FuelProperties f = fuelFromFbfm40(code);
-        CHECK(f.flammability == 0.0f && f.load == 0.0f);
+        CHECK(isNonburnableCode(code));
+        CHECK(findFuelModel(code) == nullptr);
     }
-    const FuelProperties gr9 = fuelFromFbfm40(109), tl1 = fuelFromFbfm40(181), sh9 = fuelFromFbfm40(149);
-    CHECK(gr9.flammability == 1.0f);                // Extreme spread class
-    CHECK(tl1.flammability < gr9.flammability);     // Compact litter spreads far slower than tall grass
-    CHECK(std::fabs(sh9.load - 1.0f) < 1e-6f);      // Heaviest model burns longest
-    CHECK(fuelFromFbfm40(101).load < sh9.load);     // Sparse grass burns out quickly
-    CHECK(fuelFromFbfm40(150).flammability > 0.0f); // Unknown code: moderate, not nonburnable
+    CHECK(findFuelModel(150) == nullptr);           // Reserved, unused number: not guessed
+    CHECK(std::string(findFuelModel(109)->name) == "GR9");
+    CHECK(findFuelModel(106)->heatBtuLb == 9000);    // GR6 is the one model with 9000 Btu/lb
+}
+
+TEST(wind_direction_convention) {
+    const Vec2 sw = windTowardGrid(225.0f);         // From the SW: blows to the NE (east = +x, north = -y)
+    CHECK(std::fabs(sw.x - 0.7071f) < 1e-3f && std::fabs(sw.y + 0.7071f) < 1e-3f);
+    const Vec2 w = windTowardGrid(270.0f);          // From the west: blows east
+    CHECK(std::fabs(w.x - 1.0f) < 1e-4f && std::fabs(w.y) < 1e-4f);
+}
+
+TEST(topography_from_elevation) {
+    // A plane rising 1 m per metre of northing (y decreasing): 45 degrees, uphill = -y
+    std::vector<Cell> grid(N);
+    for (int y = 0; y < GRID_HEIGHT; ++y)
+        for (int x = 0; x < GRID_WIDTH; ++x) grid[at(x, y)].elevation = (GRID_HEIGHT - y) * 30.0f;
+    computeTopography(grid, 30.0f, 30.0f, false);
+    const Cell& c = grid[at(250, 250)];
+    CHECK(std::fabs(c.slopeDeg - 45.0f) < 0.01f);
+    CHECK(std::fabs(c.upslopeX) < 1e-5f && std::fabs(c.upslopeY + 1.0f) < 1e-5f);
+}
+
+// --- Fire spread on the grid ---
+namespace {
+    FireWeather calm() {
+        FireWeather w;
+        w.wind20ftKmh = 0.0f;
+        return w;
+    }
+    // Furthest cell burned along a row/column from (x0, y0), in cells
+    int reach(const FireSimulation& sim, int x0, int y0, int dx, int dy) {
+        int k = 0;
+        while (true) {
+            const int x = x0 + (k + 1) * dx, y = y0 + (k + 1) * dy;
+            if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT || !sim.fireMask()[at(x, y)]) return k;
+            ++k;
+        }
+    }
+}
+
+// No wind, flat, uniform GR9: the front must advance at R_0 (along rows and along diagonals)
+TEST(fire_front_moves_at_rothermel_rate) {
+    std::vector<Cell> grid(N);
+    for (Cell& c : grid) c.fuelModel = 109;
+    FireSimulation sim(grid, calm(), 30.0f, 30.0f);
+    CHECK(sim.ignite(at(250, 250)));
+    const int ticks = 1200;                          // 200 minutes
+    for (int t = 0; t < ticks; ++t) sim.step();
+
+    const double r0 = computeFuelBed(*findFuelModel(109), FuelMoisture()).r0 * FT_PER_MIN_TO_M_PER_MIN;
+    const double expectedCells = r0 * sim.minutes() / 30.0;
+    const int east = reach(sim, 250, 250, 1, 0), diag = reach(sim, 250, 250, 1, 1);
+    std::printf("  (expected %.1f cells, reached %d along a row, %.1f along a diagonal)\n",
+                expectedCells, east, diag * std::sqrt(2.0));
+    CHECK(std::abs(east - expectedCells) <= 1.0);
+    CHECK(std::fabs(diag * std::sqrt(2.0) - expectedCells) <= 1.5);
+}
+
+TEST(fire_spreads_downwind_and_upslope) {
+    // Wind from the west: the fire runs east
+    {
+        std::vector<Cell> grid(N);
+        FireWeather w;
+        w.windFromDeg = 270.0f;
+        FireSimulation sim(grid, w, 30.0f, 30.0f);
+        sim.ignite(at(250, 250));
+        for (int t = 0; t < 1500; ++t) sim.step();
+        CHECK(reach(sim, 250, 250, 1, 0) > 3 * std::max(1, reach(sim, 250, 250, -1, 0)));
+    }
+    // No wind, ground rising to the north: the fire runs uphill
+    {
+        std::vector<Cell> grid(N);
+        for (int y = 0; y < GRID_HEIGHT; ++y)
+            for (int x = 0; x < GRID_WIDTH; ++x) grid[at(x, y)].elevation = (GRID_HEIGHT - y) * 15.0f;
+        computeTopography(grid, 30.0f, 30.0f, false);
+        FireSimulation sim(grid, calm(), 30.0f, 30.0f);
+        sim.ignite(at(250, 250));
+        for (int t = 0; t < 3000; ++t) sim.step();
+        CHECK(reach(sim, 250, 250, 0, -1) > 2 * std::max(1, reach(sim, 250, 250, 0, 1)));
+    }
 }
 
 TEST(fire_never_enters_nonburnable_cells) {
     std::vector<Cell> grid(N);
-    // A vertical strip of water down the middle of the map
+    for (Cell& c : grid) c.fuelModel = 104;          // GR4: fast grass
+    // A vertical strip of water (NB8) down the middle of the map
     for (int y = 0; y < GRID_HEIGHT; ++y)
-        for (int x = 240; x < 245; ++x) { grid[at(x, y)].fuel = 0.0f; grid[at(x, y)].flammability = 0.0f; }
+        for (int x = 240; x < 245; ++x) grid[at(x, y)].fuelModel = 98;
 
-    FireSimulation sim(grid, Vec2(1.0f, 0.0f), 3);  // Wind blowing towards the water
+    FireWeather w;
+    w.windFromDeg = 270.0f;                          // Wind blowing towards the water
+    FireSimulation sim(grid, w);
     CHECK(sim.ignite(at(230, 250)));
     CHECK(!sim.ignite(at(242, 250)));               // Can't light water by clicking on it
-    for (int t = 0; t < 1500; ++t) sim.step();
+    for (int t = 0; t < 3000; ++t) sim.step();
 
+    CHECK(sim.fireMask()[at(239, 250)] == 1);       // It did reach the water...
     for (int y = 0; y < GRID_HEIGHT; ++y)
-        for (int x = 240; x < 245; ++x) CHECK(sim.grid()[at(x, y)].state == CellState::Unburned);
+        for (int x = 240; x < GRID_WIDTH; ++x) CHECK(sim.grid()[at(x, y)].state == CellState::Unburned);
 }
 
-TEST(fire_is_deterministic_for_a_seed) {
+// A one-cell-wide DIAGONAL road must hold too: the fire may not squeeze between its corners
+TEST(roads_are_fuel_breaks_even_diagonally) {
     std::vector<Cell> grid(N);
-    FireSimulation a(grid, Vec2(0.7f, -0.7f), 99), b(grid, Vec2(0.7f, -0.7f), 99);
+    for (Cell& c : grid) c.fuelModel = 104;
+    for (int i = 0; i < GRID_WIDTH; ++i) grid[at(i, GRID_HEIGHT - 1 - i)].roadClass = 22;   // Tertiary road, SW-NE
+
+    FireWeather w;
+    w.windFromDeg = 315.0f;                          // From the NW, straight at the road
+    FireSimulation sim(grid, w);
+    CHECK(!sim.canBurn(at(250, 249)));
+    CHECK(sim.ignite(at(200, 200)));                 // North-west of the road (x + y < 499)
+    for (int t = 0; t < 4000; ++t) sim.step();
+    int beyond = 0;
+    for (int y = 0; y < GRID_HEIGHT; ++y)
+        for (int x = 0; x < GRID_WIDTH; ++x)
+            if (x + y > GRID_WIDTH - 1 && sim.fireMask()[at(x, y)]) ++beyond;
+    CHECK(sim.fireMask()[at(249, 249)] == 1);       // The fire reached the road...
+    CHECK(beyond == 0);                              // ...and didn't cross it
+}
+
+TEST(fire_is_deterministic) {
+    std::vector<Cell> grid(N);
+    FireSimulation a(grid), b(grid);
     a.ignite(at(250, 250)); b.ignite(at(250, 250));
-    for (int t = 0; t < 300; ++t) { a.step(); b.step(); }
+    for (int t = 0; t < 600; ++t) { a.step(); b.step(); }
     CHECK(a.fireMask() == b.fireMask());
+    // The tick length only changes how often we look, not where the fire goes
+    FireSimulation c(grid, FireWeather(), DEFAULT_CELL_SIZE_M, DEFAULT_CELL_SIZE_M, SIM_MINUTES_PER_TICK * 4);
+    c.ignite(at(250, 250));
+    for (int t = 0; t < 150; ++t) c.step();
+    CHECK(c.fireMask() == a.fireMask());
 }
 
 // ============================================================================
@@ -286,7 +479,7 @@ TEST(drone_stops_before_a_blocked_segment) {
 // and none may be inside the hard no-fly zone at the end of a frame.
 TEST(mission_drones_never_fly_over_fire) {
     std::vector<Cell> grid(N);
-    FireSimulation sim(grid, Vec2(0.707f, -0.707f), 1337);
+    FireSimulation sim(grid);                       // Default weather: wind from the SW
     // Several fires so drones have to work round them
     sim.ignite(at(250, 250)); sim.ignite(at(180, 300)); sim.ignite(at(320, 200));
 

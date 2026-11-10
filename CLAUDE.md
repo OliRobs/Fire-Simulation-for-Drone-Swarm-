@@ -6,7 +6,7 @@ surveys round the fire. README.md has the module table and input-data notes.
 ## Build and test
 
 - Full build: `cmake -S . -B build && cmake --build build`, then run `./build/wildfire` from the repo root
-  (it loads `elevation_map.tif` and optional `fuel_map.tif` from the working directory).
+  (it loads the LANDFIRE layers from `landfire/`, falling back to `elevation_map.tif`).
 - Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 5 seconds.
 - Core and tests only, without SFML or GDAL: add `-DWF_BUILD_APP=OFF`.
 - The owner builds day to day with Visual Studio: `UAVFireMap.vcxproj`, SFML in `C:\SFML-2.6.1`, GDAL in
@@ -26,9 +26,14 @@ surveys round the fire. README.md has the module table and input-data notes.
   Everything else is in `wf_core`, which must build without either so the tests stay headless.
 - The values in `config.h` (perimeter distances, fire standoffs, drone counts, speeds) are design decisions.
   Ask before changing them.
-- `elevation_map.tif` is British National Grid (EPSG:27700), 5 km square. The DEM defines the simulation
-  grid; every other layer is warped onto it. LANDFIRE data covers only the US, so it doesn't overlap this DEM.
-- Fuel rasters hold FBFM40 category codes: look them up through `fuel_models.cpp`, never average or clamp them.
+- Input data is LANDFIRE (US only, EPSG:5070 Albers, 30 m): elevation, slope (degrees), FBFM40 fuel models and
+  operational roads, read from `landfire/` (or `--data`). The elevation layer defines the simulation grid: a
+  GRID_WIDTH x GRID_HEIGHT window at native 30 m, snapped to the pixel grid; every other layer is warped onto it.
+  The .tif files are git-ignored. `elevation_map.tif` (UK, EPSG:27700, 5 km) is only the no-data fallback.
+- Fuel rasters hold FBFM40 category codes: look them up through `fuel_models.cpp`, never average or clamp them
+  (resample with Mode). Same for road classes.
+- Fire spread is Rothermel (`rothermel.cpp`), equations from Andrews 2018 (RMRS-GTR-371). Weather (fuel moisture,
+  wind) is not in the LANDFIRE data; the placeholders are in `config.h` / `FireWeather` (README lists them).
 
 ## Drone survey design
 
@@ -49,5 +54,5 @@ These behaviours were asked for explicitly. Keep them when changing planning cod
 - Any change to fire spread, planning or drone movement needs a test in `tests/tests.cpp`. Run `wf_tests`
   before committing.
 - Work on a branch and open a pull request; don't push to `main`.
-- Physics and fuel constants come from the papers in the claude.ai project (Scott & Burgan 2005; Rothermel;
-  Alexandridis et al. 2008 for slope). Cite the source in a comment when adding one.
+- Physics and fuel constants come from the papers in the claude.ai project (Scott & Burgan 2005 for the fuel
+  models; Andrews 2018 RMRS-GTR-371 for the Rothermel equations). Cite the source in a comment when adding one.
