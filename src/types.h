@@ -32,7 +32,13 @@ struct Cell {
     float upslopeX = 0.0f;   // Unit vector pointing uphill, grid frame (x = east, y = south);
     float upslopeY = 0.0f;   //   (0, 0) on flat ground. Derived from elevation (the aspect).
     float burnTime = 0.0f;   // Minutes spent burning
+    // Forest canopy (LANDFIRE CC, CH, CBH, CBD, converted to real units by the loader). All 0 = no trees.
+    float canopyCoverPct = 0.0f;        // CC: percent of the ground covered by tree crowns
+    float canopyHeightM = 0.0f;         // CH: height of the canopy top, m
+    float canopyBaseHeightM = 0.0f;     // CBH: height of the canopy bottom (where fire can climb in), m
+    float canopyBulkDensity = 0.0f;     // CBD: canopy fuel per unit volume, kg/m^3
     std::int16_t fuelModel = DEFAULT_FUEL_MODEL; // FBFM40 fuel model number (Scott & Burgan); 91-99 = nonburnable
     std::uint8_t roadClass = 0;                  // LANDFIRE road class 20-23, 0 = no road
+    std::uint8_t fireType = 0;                   // How it burns if reached (FireType: 0 surface, 1 passive, 2 active crown); set by FireSimulation
     CellState state = CellState::Unburned;
 };

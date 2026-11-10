@@ -10,7 +10,7 @@ the fire.
 Needs CMake 3.16+, **SFML 2.5 – 2.6** (not SFML 3, the API changed) and GDAL 3.x.
 
     cmake -S . -B build && cmake --build build
-    ./build/wildfire        # run from the repo root (reads LANDFIRE layers from ./landfire)
+    ./build/wildfire        # run from the repo root (reads the LANDFIRE .tif files there or in ./landfire)
     ./build/wildfire --data D:/gis/landfire --centre -118.07 34.29   # another folder / window centre
     ./build/wf_tests        # headless tests
 
@@ -30,16 +30,15 @@ the road overlay. The title bar shows simulated time (one frame = 10 s).
 
 ## Input data (LANDFIRE)
 
-Put the LANDFIRE downloads in a `landfire/` folder in the repo root (or pass `--data <folder>`). The folder is
-searched recursively and layers are recognised by name, so the unzipped download folders work as they are and
-any LANDFIRE version year is fine:
+Put the LANDFIRE `.tif` files either loose in the repo root (the working folder when run from Visual Studio
+or as `./build/wildfire`) or in a `landfire/` folder (sub-folders are searched), or pass `--data <folder>`.
+Layers are recognised by name, so any LANDFIRE version year works:
 
-    landfire/LF2020_Elev_CONUS/LF2020_Elev_CONUS.tif
-    landfire/LF2020_SlpD_CONUS/LF2020_SlpD_CONUS.tif
-    landfire/LF2025_FBFM40_CONUS/LF2025_FBFM40_CONUS.tif
-    landfire/LF2023_Roads_CONUS/LF2023_Roads_CONUS.tif
+    LF2020_Elev_CONUS.tif   LF2020_SlpD_CONUS.tif   LF2025_FBFM40_CONUS.tif   LF2023_Roads_CONUS.tif
+    LF2025_CC_CONUS.tif     LF2025_CH_CONUS.tif     LF2025_CBH_CONUS.tif      LF2025_CBD_CONUS.tif
 
-The `.tif` files are git-ignored (they are too big for GitHub).
+The `.tif` files are git-ignored (about 120 MB each, too big for GitHub). The startup log lists which layers
+were found.
 
 | Layer | Used for | Notes |
 |---|---|---|
@@ -47,7 +46,12 @@ The `.tif` files are git-ignored (they are too big for GitHub).
 | Slope (`_SlpD_`, degrees) | Rothermel slope factor | Missing cells (or a missing layer) fall back to slope computed from the elevation. |
 | FBFM40 (`FBFM40`) | Fuel model per cell | Scott & Burgan model numbers, looked up in `fuel_models.cpp` (Table 7 of RMRS-GTR-153). 91-99 (urban, water, agriculture, bare...) and NoData don't burn. |
 | Roads (`_Roads_`) | Fuel breaks, drawn in amber | Classes 20 primary, 21 secondary, 22 tertiary, 23 thinned. Road cells don't burn (`ROADS_ARE_FUEL_BREAKS`); diagonal road lines hold too. |
+| Canopy cover (`_CC_`, %) | Wind sheltering | With canopy height and base height gives the crown fill portion, which sets the sheltered wind adjustment factor (Andrews 2012). |
+| Canopy height (`_CH_`, m x 10) | Wind sheltering | |
+| Canopy base height (`_CBH_`, m x 10) | Crown fire initiation, crown ratio | Van Wagner (1977) torching threshold. |
+| Canopy bulk density (`_CBD_`, kg/m3 x 100) | Active crown fire | Crown fire is active only if its spread rate exceeds 3.0 / CBD m/min. |
 
+Canopy values are stored by LANDFIRE as scaled integers (0 = no forest) and converted on load (RMRS-GTR-220).
 Every layer is warped onto the elevation layer's grid (average for elevation and slope, most common value for
 fuel and roads), so layers with different extents still line up. Without a LANDFIRE folder the program falls
 back to the bundled UK `elevation_map.tif` (used whole, as before) with fuel model GR2 everywhere.
@@ -68,11 +72,29 @@ herbaceous load from live to dead:
   propagated in time order, so the front moves at the Rothermel rates whatever the frame rate.
 - A cell shows as burning while the front crosses it plus the flame residence time t_r = 384/sigma.
 
+### Canopy and crown fire (`crown_fire.cpp`)
+
+Under a forest canopy the midflame wind is reduced with the sheltered wind adjustment factor (Andrews 2012,
+crown fill portion from CC, CH and CBH). Crown fire follows the Finney (1998) method that FARSITE and FlamMap
+use by default:
+
+1. **Torching** (Van Wagner 1977): if the surface fireline intensity (Byram, I_B = I_R t_r R) reaches
+   I_0 = (0.010 CBH (460 + 25.9 FMC))^1.5 kW/m, the canopy ignites.
+2. **Crown spread rate** (Rothermel 1991): 3.34 x the surface rate of original fuel model 10 with midflame wind
+   0.4 x the 20-ft wind.
+3. **Active vs passive**: if that rate is at least 3.0 / CBD m/min the cell is an active crown fire and spreads at
+   the crown rate (or the surface rate if that is faster); otherwise it only torches and spreads at the surface
+   rate.
+
+Burning cells are coloured by fire type: orange-red surface fire, orange torching, yellow active crown fire.
+The startup log reports how many cells would torch or crown under the current weather.
+Crown fire spread is not affected by the surface WAF: the crown is in the open wind.
+
 Check: with Scott & Burgan's standard conditions (D2L2 moisture, 5 mi/h midflame wind, flat) all 40 fuel models
 land in the spread-rate class the paper gives them, and packing ratios and characteristic SAV match the
 published values (`wf_tests`).
 
-### Data the Rothermel model still needs (not in the LANDFIRE layers)
+### Data the model still needs (not in the LANDFIRE layers)
 
 These are fixed placeholder values in `config.h` / `FireWeather` for now:
 
@@ -80,10 +102,9 @@ These are fixed placeholder values in `config.h` / `FireWeather` for now:
 |---|---|---|
 | **Dead fuel moisture** 1-h, 10-h, 100-h | 6 / 7 / 8 % (Scott & Burgan scenario D2) | Nearest RAWS weather station / NFDRS output, or computed from temperature and relative humidity (e.g. Nelson dead fuel moisture model). The single biggest driver of spread rate. |
 | **Live fuel moisture** herbaceous, woody | 60 / 90 % (scenario L2, two-thirds cured) | National Fuel Moisture Database samples, or a curing / greenness estimate (RMRS-GTR-153 Table 2 converts % cured to herb moisture). Controls the dynamic grass models strongly. |
-| **Wind speed** at 20 ft | 20 km/h | RAWS observations or a forecast (NWS / HRRR). |
+| **Foliar moisture** of the canopy | 100 % | Seasonal values from the literature (normal range 75-150 %, RMRS-GTR-220). Lower values make torching much easier. |
+| **Wind speed** at 20 ft | 20 km/h | RAWS observations or a forecast (NWS / HRRR). Decides whether crown fire becomes active. |
 | **Wind direction** | from 225 deg (SW) | As above. Real wind is bent by terrain: a gridded wind (e.g. WindNinja run on the LANDFIRE DEM) would replace the single value. |
-| **Canopy cover and canopy height** | not used: wind adjustment is the *unsheltered* factor from fuel depth | LANDFIRE `CC` and `CH` layers. Under a forest canopy the midflame wind is much lower, so without these spread under timber is over-predicted. |
-| Canopy base height and bulk density | not used | LANDFIRE `CBH` and `CBD` layers, only needed to add crown fire (outside Rothermel's surface model). |
 
 Aspect is not needed as a separate layer: it is computed from the elevation (Horn's method, `topography.cpp`).
 
@@ -94,7 +115,8 @@ Aspect is not needed as a separate layer: it is computed from the elevation (Hor
 | config.h, types.h | constants, neighbour tables, Vec2, Cell |
 | raster_io, terrain | GDAL loading: finds the LANDFIRE layers, cuts the window, warps every layer onto the DEM's grid (only code using GDAL) |
 | fuel_models | The 40 Scott & Burgan fuel models (Table 7 of RMRS-GTR-153), looked up by FBFM40 code |
-| rothermel | Rothermel surface spread: fuel bed, wind and slope factors, head fire direction and ellipse |
+| rothermel | Rothermel surface spread: fuel bed, wind and slope factors, wind adjustment (open and under canopy), head fire direction and ellipse |
+| crown_fire | Van Wagner torching threshold, active crown fire threshold, fireline intensity and flame length |
 | topography | slope and aspect (upslope direction) from the DEM |
 | fire_model | FireSimulation: per-cell Rothermel rates, fire arrival times in time order |
 | distance_transform | exact Euclidean distance transform |

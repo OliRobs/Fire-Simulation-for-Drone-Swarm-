@@ -107,6 +107,7 @@ exit /b 0</Command>
   <ItemGroup>
     <ClCompile Include="src\aco.cpp" />
     <ClCompile Include="src\boustrophedon.cpp" />
+    <ClCompile Include="src\crown_fire.cpp" />
     <ClCompile Include="src\distance_transform.cpp" />
     <ClCompile Include="src\drone.cpp" />
     <ClCompile Include="src\fire_model.cpp" />
@@ -127,6 +128,7 @@ exit /b 0</Command>
     <ClInclude Include="src\aco.h" />
     <ClInclude Include="src\boustrophedon.h" />
     <ClInclude Include="src\config.h" />
+    <ClInclude Include="src\crown_fire.h" />
     <ClInclude Include="src\distance_transform.h" />
     <ClInclude Include="src\drone.h" />
     <ClInclude Include="src\fire_model.h" />

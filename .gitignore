@@ -14,5 +14,6 @@ Release/
 # GDAL side-car files created when rasters are opened
 *.aux.xml
 
-# LANDFIRE downloads (hundreds of MB; see README)
+# LANDFIRE downloads (~120 MB per layer; see README), in landfire/ or loose in the repo root
 landfire/
+/LF*_CONUS*

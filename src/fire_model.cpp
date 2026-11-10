@@ -9,8 +9,10 @@
 //
 // 1. Per fuel model: the no-wind no-slope Rothermel fuel bed (reaction intensity, R_0, wind/slope
 //    coefficients) for the current fuel moisture. Only 40 models exist, so this is done once per model.
-// 2. Per cell: wind (20-ft wind x wind adjustment factor = midflame wind) and the cell's slope and aspect are
-//    combined by vector addition into a head fire rate, direction and ellipse (RMRS-GTR-371 section 6).
+// 2. Per cell: wind (20-ft wind x wind adjustment factor = midflame wind, lower under a tree canopy) and the
+//    cell's slope and aspect are combined by vector addition into a head fire rate, direction and ellipse
+//    (RMRS-GTR-371 section 6). Where there is canopy, the crown fire checks may switch the cell to the crown
+//    fire rate (crown_fire.h).
 // 3. Per cell and direction: the ellipse gives the rate of spread towards each of the 8 neighbours.
 // 4. Fire arrival times spread outwards through the grid in time order (a priority queue), so the front
 //    moves at exactly the Rothermel rates however long a tick is.
@@ -52,22 +54,24 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weathe
 
     // --- 1. One Rothermel fuel bed per fuel model in use ---
     SurfaceFuelBed beds[kCodeSlots];
-    double midflame[kCodeSlots] = {};          // Midflame wind for each model, ft/min
+    const FuelModel* models[kCodeSlots] = {};
     bool known[kCodeSlots] = {};
-    const double wind20 = weather.wind20ftKmh * KMH_TO_FT_PER_MIN;
     for (const Cell& c : grid_) {
         const int code = c.fuelModel;
         if (code <= 0 || code >= kCodeSlots || known[code]) continue;
         known[code] = true;
         if (const FuelModel* m = findFuelModel(code)) {
+            models[code] = m;
             beds[code] = computeFuelBed(*m, weather.moisture);
-            // Fuel depth sets how much the vegetation slows the 20-ft wind, unless a WAF is given
-            const double waf = weather.windAdjustmentFactor > 0.0f ? weather.windAdjustmentFactor
-                                                                   : unshelteredWaf(m->depthFt);
-            midflame[code] = wind20 * waf;
         }
     }
     const Vec2 wind = windTowardGrid(weather.windFromDeg);
+    const double wind20 = weather.wind20ftKmh * KMH_TO_FT_PER_MIN;   // 20-ft wind, ft/min
+
+    // Crown fire spread uses original fuel model 10 with midflame wind = 0.4 x 20-ft wind (Rothermel 1991)
+    const SurfaceFuelBed fm10 = computeFuelBed(fuelModel10(), weather.moisture);
+    constexpr double ROTHERMEL_1991_WAF = 0.4;
+    constexpr double ROTHERMEL_1991_RATIO = 3.34;   // Crown rate / FM10 surface rate
 
     // --- 2 & 3. Per-cell ellipse and directional rates ---
     dirRos_.assign(static_cast<size_t>(N) * NUM_DIRS, 0.0f);
@@ -80,14 +84,45 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weathe
     constexpr double DEG_TO_RAD = 0.017453292519943295;
     const double minCell = std::min(cellSizeX, cellSizeY);
     for (int idx = 0; idx < N; ++idx) {
-        const Cell& c = grid_[idx];
+        Cell& c = grid_[idx];
+        c.fireType = static_cast<std::uint8_t>(FireType::Surface);
         const int code = c.fuelModel;
         if (code <= 0 || code >= kCodeSlots || !beds[code].burnable()) continue;   // No fuel, or too wet to burn
         if (ROADS_ARE_FUEL_BREAKS && c.roadClass >= ROAD_CLASS_MIN && c.roadClass <= ROAD_CLASS_MAX) continue;
 
         const SurfaceFuelBed& bed = beds[code];
-        const SpreadEllipse e = computeSpread(bed, midflame[code], wind.x, wind.y,
-            std::tan(c.slopeDeg * DEG_TO_RAD), c.upslopeX, c.upslopeY, weather.windLimit);
+        const double tanSlope = std::tan(c.slopeDeg * DEG_TO_RAD);
+
+        // Midflame wind: the 20-ft wind slowed by the surface fuel bed, or by the tree canopy where there is one
+        double waf = weather.windAdjustmentFactor;
+        if (waf <= 0.0) {
+            const double crownRatio = c.canopyHeightM > 0.0f
+                ? (c.canopyHeightM - c.canopyBaseHeightM) / c.canopyHeightM : 0.0;
+            waf = windAdjustmentFactor(models[code]->depthFt, c.canopyCoverPct, c.canopyHeightM * FT_PER_M, crownRatio);
+        }
+        SpreadEllipse e = computeSpread(bed, wind20 * waf, wind.x, wind.y, tanSlope, c.upslopeX, c.upslopeY,
+                                        weather.windLimit);
+
+        // Crown fire: only where LANDFIRE maps a forest canopy with fuel in it
+        if (weather.crownFire && c.canopyBulkDensity > 0.0f && c.canopyHeightM > 0.0f && c.canopyCoverPct > 0.0f) {
+            const double surfaceIntensity = firelineIntensityKwM(bed, e.headRos);
+            if (surfaceIntensity >= criticalSurfaceIntensity(c.canopyBaseHeightM, weather.foliarMoisturePct)) {
+                // The surface fire torches the canopy. Is the crown fire fast enough to be self-sustaining?
+                SpreadEllipse crown = computeSpread(fm10, wind20 * ROTHERMEL_1991_WAF, wind.x, wind.y, tanSlope,
+                                                    c.upslopeX, c.upslopeY, false);
+                crown.headRos *= ROTHERMEL_1991_RATIO;   // Scales every direction of the ellipse alike
+                const double crownMPerMin = crown.headRos * FT_PER_MIN_TO_M_PER_MIN;
+                if (crownMPerMin >= criticalActiveRos(c.canopyBulkDensity)) {
+                    c.fireType = static_cast<std::uint8_t>(FireType::Active);
+                    // Active crown fire runs at the crown rate (Finney 1998), unless the surface fire beneath
+                    // it is faster still (possible in tall shrub fuels)
+                    if (crown.headRos > e.headRos) e = crown;
+                }
+                else {
+                    c.fireType = static_cast<std::uint8_t>(FireType::Passive);   // Torching: surface rate
+                }
+            }
+        }
 
         burnable_[idx] = 1;
         headRos_[idx] = static_cast<float>(e.headRos * FT_PER_MIN_TO_M_PER_MIN);

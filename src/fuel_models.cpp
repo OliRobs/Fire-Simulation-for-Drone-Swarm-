@@ -102,3 +102,13 @@ const FuelModel* allFuelModels(int& count) {
     count = kModelCount;
     return kModels;
 }
+
+// ----------------------------------------------------------------------------
+// Original fuel model 10, for crown fire spread
+// ----------------------------------------------------------------------------
+// Values from RMRS-GTR-371 Table 8a (Andrews 2018): 1-h 3.0, 10-h 2.0, 100-h 5.0, live woody 2.0 t/ac;
+// SAV 2000 (1-h) and 1500 (live woody) 1/ft; depth 1.0 ft; extinction moisture 25 %; 8000 Btu/lb; static.
+const FuelModel& fuelModel10() {
+    static constexpr FuelModel fm10 = { 10, "FM10", 3.0f, 2.0f, 5.0f, 0.0f, 2.0f, STA, 2000, 9999, 1500, 1.0f, 25, 8000 };
+    return fm10;
+}

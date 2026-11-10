@@ -4,6 +4,7 @@
 #include <queue>
 #include <utility>
 #include <vector>
+#include "crown_fire.h"
 #include "rothermel.h"
 #include "types.h"
 
@@ -13,8 +14,10 @@ struct FireWeather {
     FuelMoisture moisture;                          // Dead 1/10/100-h and live herb/woody, fractions
     float wind20ftKmh = WIND_SPEED_20FT_KMH;        // Open wind at 20 ft
     float windFromDeg = WIND_FROM_DEG;              // Meteorological direction (wind comes FROM), clockwise from N
-    float windAdjustmentFactor = WIND_ADJUSTMENT_FACTOR; // <= 0: unsheltered WAF from each model's fuel depth
+    float windAdjustmentFactor = WIND_ADJUSTMENT_FACTOR; // <= 0: from fuel depth and the canopy layers (Andrews 2012)
     bool windLimit = APPLY_WIND_LIMIT;
+    bool crownFire = ENABLE_CROWN_FIRE;              // Allow torching / crown fire where there is canopy
+    float foliarMoisturePct = FOLIAR_MOISTURE_PCT;   // Live canopy foliage moisture, %
 };
 
 // Unit vector, in the grid frame (x = east, y = south), that a wind FROM fromDeg blows towards
@@ -22,7 +25,9 @@ Vec2 windTowardGrid(float fromDeg);
 
 // Rothermel-driven cellular automaton.
 //
-// Each cell gets a spread ellipse from its fuel model, slope, aspect and the wind (rothermel.h). The rate at
+// Each cell gets a spread ellipse from its fuel model, slope, aspect and the wind (rothermel.h), with the wind
+// reduced under a forest canopy. Where there is canopy and the surface fire is intense enough, the cell becomes
+// a passive or active crown fire (crown_fire.h); active crown fire spreads at the crown rate. The rate at
 // which fire crosses from a cell to a neighbour is the harmonic mean of the two cells' rates in that
 // direction (half the step through each cell), so the travel time is exact for the Rothermel rates. Fire
 // arrival times are then propagated with a priority queue (shortest travel time first), and step() advances

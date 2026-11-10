@@ -57,7 +57,7 @@ void Renderer::setColor(int idx, std::uint8_t r, std::uint8_t g, std::uint8_t b)
 // ----------------------------------------------------------------------------
 // Assigns pixel RGB colors according to current cell combustion state:
 // - Unburned: Grayscale elevation shading (white = highest elevation); road cells tinted amber.
-// - Burning: Bright orange/red fire color.
+// - Burning: orange-red surface fire, orange torching, yellow active crown fire.
 // - Burned: Dark red-brown char color.
 void Renderer::paintBase(int idx, const std::vector<Cell>& grid) {
     switch (grid[idx].state) {
@@ -73,7 +73,12 @@ void Renderer::paintBase(int idx, const std::vector<Cell>& grid) {
         }
         break;
     }
-    case CellState::Burning: setColor(idx, 255, 69, 0); break;   // Orange-Red
+    case CellState::Burning:
+        // Colour by fire type so crown fire runs stand out (as FlamMap's crown fire activity map)
+        if (grid[idx].fireType == 2)      setColor(idx, 255, 230, 60);   // Active crown fire: yellow
+        else if (grid[idx].fireType == 1) setColor(idx, 255, 150, 0);    // Torching (passive): orange
+        else                              setColor(idx, 255, 69, 0);     // Surface fire: orange-red
+        break;
     case CellState::Burned:  setColor(idx, 110, 35, 25); break;  // Charcoal / Red-brown
     }
 }

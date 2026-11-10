@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,7 +26,8 @@
 // 6. Real-time Visualization & User Event Processing (SFML)
 //
 // Usage:  wildfire [--data <folder>] [--centre <lon> <lat>]
-//   --data    folder holding the LANDFIRE downloads (searched recursively), default "landfire"
+//   --data    folder holding the LANDFIRE .tif files (searched recursively). Default: ./landfire, then the
+//             working folder itself (files such as LF2020_Elev_CONUS.tif placed in the repo root)
 //   --centre  WGS84 longitude/latitude of the simulation window centre, default the raster centre
 // Without LANDFIRE data it falls back to elevation_map.tif (+ optional fuel_map.tif) in the working folder.
 // ============================================================================
@@ -54,11 +56,13 @@ namespace {
     void printWeather(const FireWeather& w) {
         std::printf("Fire weather (fixed scenario, not from data):\n"
                     "  20-ft wind %.0f km/h from %.0f deg, WAF %s\n"
-                    "  fuel moisture: 1-h %.0f%%, 10-h %.0f%%, 100-h %.0f%%, live herb %.0f%%, live woody %.0f%%\n",
+                    "  fuel moisture: 1-h %.0f%%, 10-h %.0f%%, 100-h %.0f%%, live herb %.0f%%, live woody %.0f%%\n"
+                    "  foliar moisture %.0f%%, crown fire %s\n",
                     w.wind20ftKmh, w.windFromDeg,
-                    w.windAdjustmentFactor > 0 ? std::to_string(w.windAdjustmentFactor).c_str() : "unsheltered (from fuel depth)",
+                    w.windAdjustmentFactor > 0 ? std::to_string(w.windAdjustmentFactor).c_str() : "from fuel depth and canopy (Andrews 2012)",
                     w.moisture.dead1h * 100, w.moisture.dead10h * 100, w.moisture.dead100h * 100,
-                    w.moisture.liveHerb * 100, w.moisture.liveWoody * 100);
+                    w.moisture.liveHerb * 100, w.moisture.liveWoody * 100,
+                    w.foliarMoisturePct, w.crownFire ? "on" : "off");
     }
 }
 
@@ -69,7 +73,7 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------------
     // Step 1: Load the LANDFIRE landscape and build the fire simulation
     // ------------------------------------------------------------------------
-    std::string dataDir = "landfire";
+    std::string dataDir;   // Empty: look in ./landfire, then next to the program's working folder
     WindowRequest window;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
@@ -86,8 +90,18 @@ int main(int argc, char** argv) {
         }
     }
 
-    LandscapePaths paths = findLandfireLayers(dataDir);
-    if (paths.elevation.empty() && paths.fuel.empty()) {
+    // Where the LANDFIRE .tif files are: --data folder, else a landfire/ folder (and its sub-folders), else
+    // loose in the working folder (the repo root when run from Visual Studio or as ./build/wildfire)
+    LandscapePaths paths;
+    if (!dataDir.empty()) {
+        paths = findLandfireLayers(dataDir, true);
+        if (!paths.any()) std::cerr << "No LANDFIRE layers found in '" << dataDir << "'\n";
+    }
+    else {
+        paths = findLandfireLayers("landfire", true);
+        if (!paths.any()) paths = findLandfireLayers(".", false);
+    }
+    if (!paths.any()) {
         // No LANDFIRE download: the original bundled DEM (and optional fuel map) in the working folder
         std::cout << "Falling back to elevation_map.tif / fuel_map.tif\n";
         paths.elevation = "elevation_map.tif";
@@ -108,6 +122,17 @@ int main(int argc, char** argv) {
 
     // Seed the start fire at the centre of the map, or the nearest cell that can burn
     const int start = nearestBurnable(sim, (GRID_HEIGHT / 2) * GRID_WIDTH + GRID_WIDTH / 2);
+    // Summarise how the landscape would burn under this weather (crown fire needs the canopy layers)
+    int passive = 0, active = 0, burnableCells = 0;
+    for (int i = 0; i < GRID_WIDTH * GRID_HEIGHT; ++i) {
+        if (!sim.canBurn(i)) continue;
+        ++burnableCells;
+        passive += sim.grid()[i].fireType == static_cast<std::uint8_t>(FireType::Passive) ? 1 : 0;
+        active += sim.grid()[i].fireType == static_cast<std::uint8_t>(FireType::Active) ? 1 : 0;
+    }
+    std::printf("Burnable cells: %d. Crown fire potential: %d torching (passive), %d active crown fire\n",
+                burnableCells, passive, active);
+
     if (start >= 0) {
         sim.ignite(start);
         std::printf("Ignition at cell (%d, %d): fuel model %d, head fire %.1f m/min\n",
