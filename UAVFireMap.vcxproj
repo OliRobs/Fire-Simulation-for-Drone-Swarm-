@@ -117,8 +117,10 @@ exit /b 0</Command>
     <ClCompile Include="src\perimeter.cpp" />
     <ClCompile Include="src\raster_io.cpp" />
     <ClCompile Include="src\renderer.cpp" />
+    <ClCompile Include="src\rothermel.cpp" />
     <ClCompile Include="src\safe_planner.cpp" />
     <ClCompile Include="src\terrain.cpp" />
+    <ClCompile Include="src\topography.cpp" />
     <ClCompile Include="src\voronoi.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -135,8 +137,10 @@ exit /b 0</Command>
     <ClInclude Include="src\perimeter.h" />
     <ClInclude Include="src\raster_io.h" />
     <ClInclude Include="src\renderer.h" />
+    <ClInclude Include="src\rothermel.h" />
     <ClInclude Include="src\safe_planner.h" />
     <ClInclude Include="src\terrain.h" />
+    <ClInclude Include="src\topography.h" />
     <ClInclude Include="src\types.h" />
     <ClInclude Include="src\voronoi.h" />
   </ItemGroup>

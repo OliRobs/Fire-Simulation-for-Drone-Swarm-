@@ -5,13 +5,35 @@ constexpr int GRID_WIDTH = 500;
 constexpr int GRID_HEIGHT = 500;
 constexpr int CELL_SIZE = 2;            // Pixel size per grid cell
 constexpr int PERIMETER_DISTANCE = 40;  // Perimeter ring sits this many cells out from the fire
-constexpr float BASE_IGNITION_RATE = 0.005f;
-constexpr float FUEL_BURN_RATE = 0.01f;
-constexpr float DEFAULT_CELL_SIZE_M = 10.0f; // Ground size of a cell when no DEM is loaded (metres)
-// Slope effect, from Alexandridis et al. (2008) "A cellular automata model for forest fire spread
-// prediction: the case of the wildfire that swept through Spetses Island", Appl. Math. Comput. 204:
-// spread chance is multiplied by exp(SLOPE_COEFF * slope angle in degrees), up- or downhill.
-constexpr float SLOPE_COEFF = 0.078f;
+constexpr float DEFAULT_CELL_SIZE_M = 30.0f; // Ground size of a cell when no DEM is loaded (metres)
+
+// --- Simulation window on the LANDFIRE rasters ---
+// LANDFIRE layers are 30 m pixels covering a large area, so the simulation runs on a GRID_WIDTH x GRID_HEIGHT
+// window of them (500 x 30 m = 15 km square), at native resolution. The window is centred on the raster's
+// centre unless --centre <lon> <lat> is given on the command line.
+constexpr float SIM_CELL_SIZE_M = 30.0f;
+
+// --- Fire spread (Rothermel surface fire model, see rothermel.h) ---
+// Simulated time per frame. With 30 m cells, DRONE_SPEED (5.5 cells per tick) is then 16.5 m/s, a realistic
+// survey-drone speed, so fire and drones move at the right speeds relative to each other.
+constexpr float SIM_MINUTES_PER_TICK = 10.0f / 60.0f;
+// Fuel model for cells with no fuel map (synthetic terrain, tests): GR2, low load dry climate grass
+constexpr int DEFAULT_FUEL_MODEL = 102;
+// Weather. NOT in the LANDFIRE data: these should come from a weather station or forecast (README,
+// "Data the Rothermel model still needs").
+constexpr float WIND_SPEED_20FT_KMH = 20.0f; // Open wind 20 ft (6.1 m) above the vegetation
+constexpr float WIND_FROM_DEG = 225.0f;      // Direction the wind blows FROM, degrees clockwise from north (SW)
+constexpr float WIND_ADJUSTMENT_FACTOR = 0.0f; // Midflame / 20-ft wind. <= 0: unsheltered WAF from fuel depth
+// Cap the effective wind at Rothermel's "maximum reliable wind" (RMRS-GTR-371 section 3.2.7). On by default:
+// with it on, all 40 fuel models reproduce the spread-rate classes Scott & Burgan (2005) publish for them.
+constexpr bool APPLY_WIND_LIMIT = true;
+
+// --- LANDFIRE Operational Roads (LF2023_Roads) ---
+// Raster values: 20 primary, 21 secondary, 22 tertiary, 23 thinned road; 0 background (from the layer's
+// .vat.dbf). Road cells are treated as fuel breaks: no fuel, so surface fire can't spread across them.
+constexpr bool ROADS_ARE_FUEL_BREAKS = true;
+constexpr int ROAD_CLASS_MIN = 20;
+constexpr int ROAD_CLASS_MAX = 23;
 
 // --- Drone survey configuration ---
 constexpr int SEARCH_DISTANCE = 70;       // Search area extends this many cells from the fire

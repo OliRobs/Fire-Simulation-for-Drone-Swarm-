@@ -3,71 +3,102 @@
 #include <set>
 
 // ============================================================================
-// FBFM40 Fuel-Model Lookup
+// FBFM40 Fuel-Model Table
 //
-// Source: Scott, J.H. & Burgan, R.E. (2005) Standard Fire Behavior Fuel Models,
-// USDA Forest Service RMRS-GTR-153 (in the project docs).
+// Source: Scott, J.H. & Burgan, R.E. (2005) Standard Fire Behavior Fuel Models: A Comprehensive Set for Use
+// with Rothermel's Surface Fire Spread Model. USDA Forest Service RMRS-GTR-153, Table 7 (p. 18).
+// Values are copied exactly as published (US customary units); rothermel.cpp converts them.
 //
-//  - Spread class: the adjective spread-rate class each model is given in the fuel model selection guide
-//    (pp. 10-12), for 5 mi/h midflame wind, dry dead fuel, two-thirds cured herbaceous, zero slope.
-//  - Total load: the sum of 1-h + 10-h + 100-h + live herb + live woody load from Table 7 (tons/acre).
-//
-// Mapping onto the automaton (these two scalings are our own calibration choice, not from the paper):
-//  - flammability = spread class mapped to 0.25 (very low) ... 1.0 (extreme)
-//  - load         = 0.2 + 0.8 * totalLoad / max total load, so heavy shrub and slash burn far longer than grass
+// Where Table 7 lists an SAV of 9999 the class has no load, so the value never enters the calculation;
+// it is kept here only so the rows read the same as the paper.
 // ============================================================================
 
 namespace {
-    // Spread-rate adjective classes from the selection guide
-    enum Spread { VL, L, M, H, VH, E };
+    constexpr bool DYN = true;   // Dynamic: herbaceous load is split between live and dead by curing
+    constexpr bool STA = false;  // Static, or no live herbaceous load ("N/A" in Table 7)
 
-    constexpr float kFlammability[] = { 0.25f, 0.40f, 0.60f, 0.80f, 0.90f, 1.00f };
-
-    struct Entry {
-        int code;           // FBFM40 fuel model number
-        Spread spread;      // Spread-rate class (selection guide)
-        float totalLoad;    // Total fuel load, tons/acre (Table 7)
+    constexpr FuelModel kModels[] = {
+        //  code  name    1-h   10-h  100-h  herb  woody  type  SAV1h herb  woody depth Mx  heat
+        // --- Grass (GR) ---
+        { 101, "GR1", 0.10f, 0.00f, 0.00f, 0.30f, 0.00f, DYN, 2200, 2000, 9999, 0.4f, 15, 8000 },
+        { 102, "GR2", 0.10f, 0.00f, 0.00f, 1.00f, 0.00f, DYN, 2000, 1800, 9999, 1.0f, 15, 8000 },
+        { 103, "GR3", 0.10f, 0.40f, 0.00f, 1.50f, 0.00f, DYN, 1500, 1300, 9999, 2.0f, 30, 8000 },
+        { 104, "GR4", 0.25f, 0.00f, 0.00f, 1.90f, 0.00f, DYN, 2000, 1800, 9999, 2.0f, 15, 8000 },
+        { 105, "GR5", 0.40f, 0.00f, 0.00f, 2.50f, 0.00f, DYN, 1800, 1600, 9999, 1.5f, 40, 8000 },
+        { 106, "GR6", 0.10f, 0.00f, 0.00f, 3.40f, 0.00f, DYN, 2200, 2000, 9999, 1.5f, 40, 9000 },
+        { 107, "GR7", 1.00f, 0.00f, 0.00f, 5.40f, 0.00f, DYN, 2000, 1800, 9999, 3.0f, 15, 8000 },
+        { 108, "GR8", 0.50f, 1.00f, 0.00f, 7.30f, 0.00f, DYN, 1500, 1300, 9999, 4.0f, 30, 8000 },
+        { 109, "GR9", 1.00f, 1.00f, 0.00f, 9.00f, 0.00f, DYN, 1800, 1600, 9999, 5.0f, 40, 8000 },
+        // --- Grass-shrub (GS) ---
+        { 121, "GS1", 0.20f, 0.00f, 0.00f, 0.50f, 0.65f, DYN, 2000, 1800, 1800, 0.9f, 15, 8000 },
+        { 122, "GS2", 0.50f, 0.50f, 0.00f, 0.60f, 1.00f, DYN, 2000, 1800, 1800, 1.5f, 15, 8000 },
+        { 123, "GS3", 0.30f, 0.25f, 0.00f, 1.45f, 1.25f, DYN, 1800, 1600, 1600, 1.8f, 40, 8000 },
+        { 124, "GS4", 1.90f, 0.30f, 0.10f, 3.40f, 7.10f, DYN, 1800, 1600, 1600, 2.1f, 40, 8000 },
+        // --- Shrub (SH) ---
+        { 141, "SH1", 0.25f, 0.25f, 0.00f, 0.15f, 1.30f, DYN, 2000, 1800, 1600, 1.0f, 15, 8000 },
+        { 142, "SH2", 1.35f, 2.40f, 0.75f, 0.00f, 3.85f, STA, 2000, 9999, 1600, 1.0f, 15, 8000 },
+        { 143, "SH3", 0.45f, 3.00f, 0.00f, 0.00f, 6.20f, STA, 1600, 9999, 1400, 2.4f, 40, 8000 },
+        { 144, "SH4", 0.85f, 1.15f, 0.20f, 0.00f, 2.55f, STA, 2000, 1800, 1600, 3.0f, 30, 8000 },
+        { 145, "SH5", 3.60f, 2.10f, 0.00f, 0.00f, 2.90f, STA,  750, 9999, 1600, 6.0f, 15, 8000 },
+        { 146, "SH6", 2.90f, 1.45f, 0.00f, 0.00f, 1.40f, STA,  750, 9999, 1600, 2.0f, 30, 8000 },
+        { 147, "SH7", 3.50f, 5.30f, 2.20f, 0.00f, 3.40f, STA,  750, 9999, 1600, 6.0f, 15, 8000 },
+        { 148, "SH8", 2.05f, 3.40f, 0.85f, 0.00f, 4.35f, STA,  750, 9999, 1600, 3.0f, 40, 8000 },
+        { 149, "SH9", 4.50f, 2.45f, 0.00f, 1.55f, 7.00f, DYN,  750, 1800, 1500, 4.4f, 40, 8000 },
+        // --- Timber-understory (TU) ---
+        { 161, "TU1", 0.20f, 0.90f, 1.50f, 0.20f, 0.90f, DYN, 2000, 1800, 1600, 0.6f, 20, 8000 },
+        { 162, "TU2", 0.95f, 1.80f, 1.25f, 0.00f, 0.20f, STA, 2000, 9999, 1600, 1.0f, 30, 8000 },
+        { 163, "TU3", 1.10f, 0.15f, 0.25f, 0.65f, 1.10f, DYN, 1800, 1600, 1400, 1.3f, 30, 8000 },
+        { 164, "TU4", 4.50f, 0.00f, 0.00f, 0.00f, 2.00f, STA, 2300, 9999, 2000, 0.5f, 12, 8000 },
+        { 165, "TU5", 4.00f, 4.00f, 3.00f, 0.00f, 3.00f, STA, 1500, 9999,  750, 1.0f, 25, 8000 },
+        // --- Timber litter (TL) ---
+        { 181, "TL1", 1.00f, 2.20f, 3.60f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 0.2f, 30, 8000 },
+        { 182, "TL2", 1.40f, 2.30f, 2.20f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 0.2f, 25, 8000 },
+        { 183, "TL3", 0.50f, 2.20f, 2.80f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 0.3f, 20, 8000 },
+        { 184, "TL4", 0.50f, 1.50f, 4.20f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 0.4f, 25, 8000 },
+        { 185, "TL5", 1.15f, 2.50f, 4.40f, 0.00f, 0.00f, STA, 2000, 9999, 1600, 0.6f, 25, 8000 },
+        { 186, "TL6", 2.40f, 1.20f, 1.20f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 0.3f, 25, 8000 },
+        { 187, "TL7", 0.30f, 1.40f, 8.10f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 0.4f, 25, 8000 },
+        { 188, "TL8", 5.80f, 1.40f, 1.10f, 0.00f, 0.00f, STA, 1800, 9999, 9999, 0.3f, 35, 8000 },
+        { 189, "TL9", 6.65f, 3.30f, 4.15f, 0.00f, 0.00f, STA, 1800, 9999, 1600, 0.6f, 35, 8000 },
+        // --- Slash-blowdown (SB) ---
+        { 201, "SB1", 1.50f, 3.00f, 11.00f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 1.0f, 25, 8000 },
+        { 202, "SB2", 4.50f, 4.25f, 4.00f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 1.0f, 25, 8000 },
+        { 203, "SB3", 5.50f, 2.75f, 3.00f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 1.2f, 25, 8000 },
+        { 204, "SB4", 5.25f, 3.50f, 5.25f, 0.00f, 0.00f, STA, 2000, 9999, 9999, 2.7f, 25, 8000 },
     };
-
-    // All 40 burnable standard fuel models
-    constexpr Entry kModels[] = {
-        // Grass (GR1-GR9)
-        { 101, M, 0.40f }, { 102, H, 1.10f }, { 103, H, 2.00f }, { 104, VH, 2.15f }, { 105, VH, 2.90f },
-        { 106, VH, 3.50f }, { 107, VH, 6.40f }, { 108, VH, 8.80f }, { 109, E, 11.00f },
-        // Grass-shrub (GS1-GS4)
-        { 121, M, 1.35f }, { 122, H, 2.60f }, { 123, H, 3.25f }, { 124, H, 12.80f },
-        // Shrub (SH1-SH9)
-        { 141, VL, 1.95f }, { 142, L, 8.35f }, { 143, L, 9.65f }, { 144, H, 4.75f }, { 145, VH, 8.60f },
-        { 146, H, 5.75f }, { 147, H, 14.40f }, { 148, H, 10.65f }, { 149, H, 15.50f },
-        // Timber-understory (TU1-TU5)
-        { 161, L, 3.70f }, { 162, M, 4.20f }, { 163, H, 3.25f }, { 164, M, 6.50f }, { 165, M, 14.00f },
-        // Timber litter (TL1-TL9)
-        { 181, VL, 6.80f }, { 182, VL, 5.90f }, { 183, VL, 5.50f }, { 184, L, 6.20f }, { 185, L, 8.05f },
-        { 186, M, 4.80f }, { 187, L, 9.80f }, { 188, M, 8.30f }, { 189, M, 14.10f },
-        // Slash-blowdown (SB1-SB4)
-        { 201, M, 15.50f }, { 202, M, 12.75f }, { 203, H, 11.25f }, { 204, VH, 14.00f },
-    };
-
-    constexpr float kMaxTotalLoad = 15.50f;  // SH9 and SB1, the heaviest models in the set
-
-    FuelProperties fromEntry(const Entry& e) {
-        return { kFlammability[e.spread], 0.2f + 0.8f * e.totalLoad / kMaxTotalLoad };
-    }
+    constexpr int kModelCount = static_cast<int>(sizeof(kModels) / sizeof(kModels[0]));
 }
 
-FuelProperties fuelFromFbfm40(int code) {
-    // NoData (LANDFIRE uses -9999, filled to 0 by the loader) and the non-burnable block NB1-NB9:
-    // urban, snow/ice, agriculture, open water, bare ground. No fuel, so fire cannot spread there.
-    if (code <= 0 || (code >= 90 && code <= 99)) return { 0.0f, 0.0f };
+// ----------------------------------------------------------------------------
+// Nonburnable codes
+// ----------------------------------------------------------------------------
+// NB1 urban (91), NB2 snow/ice (92), NB3 agriculture (93), NB8 water (98), NB9 bare ground (99), plus the
+// rest of the reserved 90-99 block. Codes <= 0 cover LANDFIRE's -9999 NoData and "no fuel loaded".
+bool isNonburnableCode(int code) {
+    return code <= 0 || (code >= 90 && code <= 99);
+}
 
-    for (const Entry& e : kModels) {
-        if (e.code == code) return fromEntry(e);
+// ----------------------------------------------------------------------------
+// Code -> Table 7 row
+// ----------------------------------------------------------------------------
+const FuelModel* findFuelModel(int code) {
+    if (isNonburnableCode(code)) return nullptr;
+
+    for (const FuelModel& m : kModels) {
+        if (m.code == code) return &m;
     }
 
-    // Custom or unexpected code: warn once per code, then treat it as a moderate fuel
+    // Custom or unexpected code: warn once per code. It is then treated as nonburnable rather than guessed,
+    // because a made-up fuel model would give made-up spread rates.
     static std::set<int> warned;
     if (warned.insert(code).second) {
-        std::cerr << "[Fuel] Unknown FBFM40 code " << code << ", treating as moderate fuel\n";
+        std::cerr << "[Fuel] FBFM40 code " << code << " is not one of the 40 standard models; "
+                     "treating it as nonburnable\n";
     }
-    return { kFlammability[M], 0.5f };
+    return nullptr;
+}
+
+const FuelModel* allFuelModels(int& count) {
+    count = kModelCount;
+    return kModels;
 }

@@ -1,55 +1,127 @@
 #include "terrain.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include "fuel_models.h"
 #include "raster_io.h"
+#include "topography.h"
 
 // ============================================================================
-// Terrain and Elevation/Fuel Data Manager
+// Landscape Loader (LANDFIRE GeoTIFFs)
 //
-// Responsible for loading GIS raster datasets (GeoTIFFs) into the 2D grid,
-// applying fallback synthetic terrain generation if files are missing, and
-// calculating the elevation shading used as the map background.
+// Builds the fire environment from four LANDFIRE layers, all on one simulation grid:
+//   Elevation (m)          -> Cell::elevation, and the aspect (upslope direction) via topography.cpp
+//   Slope (degrees)        -> Cell::slopeDeg  (falls back to slope derived from the elevation)
+//   FBFM40 fuel models     -> Cell::fuelModel (Scott & Burgan model number, looked up in fuel_models.cpp)
+//   Operational roads      -> Cell::roadClass (fuel breaks, see ROADS_ARE_FUEL_BREAKS)
+// Missing layers fall back to simple defaults, with a message saying so.
 // ============================================================================
+
+namespace {
+    namespace fs = std::filesystem;
+
+    // LANDFIRE marks NoData with -9999 (and 32767 / 255 in some products). GDAL turns declared NoData into
+    // NaN; this catches files where the value isn't declared.
+    bool isNoData(float v) { return std::isnan(v) || v <= -9000.0f || v >= 32000.0f; }
+
+    // Loads one layer onto the grid; returns false (and leaves `out` empty) if the path is empty or unusable
+    bool loadLayer(const std::string& path, const RasterGrid& grid, Resample method, const char* what,
+                   std::vector<float>& out) {
+        out.clear();
+        if (path.empty()) {
+            std::cout << "No " << what << " layer found\n";
+            return false;
+        }
+        return loadRaster(path.c_str(), grid, method, out);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Find the LANDFIRE layers in a folder
+// ----------------------------------------------------------------------------
+// Matches on the layer name inside the file name (e.g. LF2020_Elev_CONUS.tif, LF2025_FBFM40_CONUS.tif).
+LandscapePaths findLandfireLayers(const std::string& dir) {
+    LandscapePaths p;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        std::cout << "LANDFIRE folder '" << dir << "' not found\n";
+        return p;
+    }
+    for (const fs::directory_entry& e : fs::recursive_directory_iterator(dir, ec)) {
+        if (!e.is_regular_file()) continue;
+        std::string ext = e.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (ext != ".tif" && ext != ".tiff") continue;
+
+        const std::string name = e.path().filename().string();
+        const std::string full = e.path().string();
+        if (name.find("_Elev_") != std::string::npos) p.elevation = full;
+        else if (name.find("_SlpD_") != std::string::npos) p.slope = full;
+        else if (name.find("FBFM40") != std::string::npos) p.fuel = full;
+        else if (name.find("_Roads_") != std::string::npos) p.roads = full;
+    }
+    std::cout << "LANDFIRE layers in '" << dir << "':\n"
+              << "  elevation: " << (p.elevation.empty() ? "(missing)" : p.elevation) << "\n"
+              << "  slope:     " << (p.slope.empty() ? "(missing)" : p.slope) << "\n"
+              << "  fuel:      " << (p.fuel.empty() ? "(missing)" : p.fuel) << "\n"
+              << "  roads:     " << (p.roads.empty() ? "(missing)" : p.roads) << "\n";
+    return p;
+}
 
 // ----------------------------------------------------------------------------
 // Load Terrain Data
 // ----------------------------------------------------------------------------
-// 1. The DEM defines the simulation grid (its coordinate system and extent, split into GRID_WIDTH x GRID_HEIGHT).
-// 2. Elevation is area-averaged onto that grid; the fuel map is warped onto the SAME grid using the most
-//    common code per cell, so the two layers line up even if the fuel map has another projection or extent.
-// 3. Anything missing falls back to procedural data, with a message saying so.
-Terrain loadTerrain(const char* demPath, const char* fuelPath, std::mt19937& rng) {
+Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
     constexpr int N = GRID_WIDTH * GRID_HEIGHT;
     Terrain terrain;
     terrain.grid.resize(N);
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
     std::cout << "Loading GIS datasets via GDAL...\n";
 
-    // --- Simulation grid: the DEM's footprint, or the fuel map's if there is no DEM ---
-    RasterGrid grid;
-    bool haveGrid = readRasterGrid(demPath, GRID_WIDTH, GRID_HEIGHT, grid);
-    if (!haveGrid) haveGrid = readRasterGrid(fuelPath, GRID_WIDTH, GRID_HEIGHT, grid);
+    // --- 1. Simulation grid: from the elevation layer (or the fuel layer if there's no DEM) ---
+    RasterGrid full, grid;
+    const std::string& gridSource = !paths.elevation.empty() ? paths.elevation : paths.fuel;
+    bool haveGrid = !gridSource.empty() && readRasterGrid(gridSource.c_str(), GRID_WIDTH, GRID_HEIGHT, full);
     if (haveGrid) {
+        grid = full;
+        // Centre: requested lon/lat, else the middle of the raster
+        double cx = 0.5 * (full.minX + full.maxX), cy = 0.5 * (full.minY + full.maxY);
+        if (window.useLonLat && !lonLatToGrid(full, window.lon, window.lat, cx, cy)) {
+            std::cerr << "Could not convert " << window.lon << ", " << window.lat
+                      << " to the raster's coordinate system; using the raster centre\n";
+            cx = 0.5 * (full.minX + full.maxX);
+            cy = 0.5 * (full.minY + full.maxY);
+        }
+        // A large projected raster (LANDFIRE) gets a native-resolution window; a small DEM is used whole
+        if (full.projected && makeWindow(full, cx, cy, SIM_CELL_SIZE_M, grid)) {
+            std::cout << "Simulation window: " << GRID_WIDTH << " x " << GRID_HEIGHT << " cells of "
+                      << SIM_CELL_SIZE_M << " m, x " << grid.minX << " .. " << grid.maxX
+                      << ", y " << grid.minY << " .. " << grid.maxY << "\n";
+        }
+        else if (window.useLonLat) {
+            std::cout << "Raster is smaller than the simulation window, so --centre is ignored\n";
+        }
         terrain.cellSizeX = static_cast<float>(grid.cellSizeX());
         terrain.cellSizeY = static_cast<float>(grid.cellSizeY());
         std::cout << "Grid cell size: " << terrain.cellSizeX << " x " << terrain.cellSizeY << " (map units)\n";
+        // The automaton draws square cells; a non-square footprint still works but looks stretched
+        if (std::fabs(terrain.cellSizeX / terrain.cellSizeY - 1.0f) > 0.01f) {
+            std::cerr << "Warning: grid cells are not square (stretched on screen)\n";
+        }
     }
 
-    // --- Elevation ---
-    std::vector<float> rawElevation;
-    const bool demLoaded = haveGrid && loadRaster(demPath, grid, Resample::Average, rawElevation);
-    if (demLoaded) {
-        // Cells with no data (NaN) get the lowest valid elevation, so they don't create false cliffs
+    // --- 2. Elevation ---
+    std::vector<float> raw;
+    if (haveGrid && loadLayer(paths.elevation, grid, Resample::Average, "elevation", raw)) {
+        // Cells with no data get the lowest valid elevation, so they don't create false cliffs
         float minValid = std::numeric_limits<float>::max();
-        for (float v : rawElevation) if (!std::isnan(v)) minValid = std::min(minValid, v);
-        for (int i = 0; i < N; ++i) {
-            terrain.grid[i].elevation = std::isnan(rawElevation[i]) ? minValid : rawElevation[i];
-        }
+        for (float v : raw) if (!isNoData(v)) minValid = std::min(minValid, v);
+        for (int i = 0; i < N; ++i) terrain.grid[i].elevation = isNoData(raw[i]) ? minValid : raw[i];
     }
     else {
         std::cout << "No DEM: using a synthetic diagonal slope\n";
@@ -58,40 +130,55 @@ Terrain loadTerrain(const char* demPath, const char* fuelPath, std::mt19937& rng
                 terrain.grid[y * GRID_WIDTH + x].elevation = (x * 0.3f) + ((GRID_HEIGHT - y) * 0.5f);
     }
 
-    // --- Fuel ---
-    std::vector<float> rawFuel;
-    const bool fuelLoaded = haveGrid && loadRaster(fuelPath, grid, Resample::Mode, rawFuel);
-    if (fuelLoaded) {
-        // A map of FBFM40 codes has values like 91..204; a continuous fuel map stays within 0..1
-        float maxValid = 0.0f;
-        for (float v : rawFuel) if (!std::isnan(v)) maxValid = std::max(maxValid, v);
-        const bool isFbfm40 = maxValid > 1.0f;
-        std::cout << "Fuel map read as " << (isFbfm40 ? "FBFM40 fuel-model codes" : "0..1 flammability") << "\n";
-
+    // --- 3. Slope and aspect ---
+    // Aspect (which way is uphill) always comes from the DEM. Slope steepness is derived from it first, then
+    // replaced by the measured LANDFIRE slope wherever that layer has data.
+    computeTopography(terrain.grid, terrain.cellSizeX, terrain.cellSizeY, false);
+    if (haveGrid && loadLayer(paths.slope, grid, Resample::Average, "slope", raw)) {
         for (int i = 0; i < N; ++i) {
-            Cell& c = terrain.grid[i];
-            const float v = rawFuel[i];
-            if (std::isnan(v)) {            // Outside the fuel map: treat as nonburnable
-                c.flammability = 0.0f;
-                c.fuel = 0.0f;
-            }
-            else if (isFbfm40) {            // Category code -> Scott & Burgan lookup
-                const FuelProperties f = fuelFromFbfm40(static_cast<int>(std::lround(v)));
-                c.flammability = f.flammability;
-                c.fuel = f.load;
-            }
-            else {                          // Already a 0..1 value: use it for both
-                c.flammability = std::clamp(v, 0.0f, 1.0f);
-                c.fuel = c.flammability;
-            }
+            if (!isNoData(raw[i]) && raw[i] >= 0.0f && raw[i] <= 90.0f) terrain.grid[i].slopeDeg = raw[i];
         }
     }
     else {
-        std::cout << "No usable fuel map: using random fuel (0.8 - 1.0)\n";
-        for (Cell& c : terrain.grid) {
-            c.fuel = 0.8f + dist(rng) * 0.2f;
-            c.flammability = c.fuel;
+        std::cout << "Using slope derived from the elevation\n";
+    }
+
+    // --- 4. Fuel models (FBFM40 codes) ---
+    if (haveGrid && loadLayer(paths.fuel, grid, Resample::Mode, "fuel", raw)) {
+        std::map<int, int> counts;   // Fuel model -> number of cells, for the summary below
+        for (int i = 0; i < N; ++i) {
+            // Outside the fuel map: no fuel, so fire stops at the edge of the data
+            const int code = isNoData(raw[i]) ? 0 : static_cast<int>(std::lround(raw[i]));
+            terrain.grid[i].fuelModel = static_cast<std::int16_t>(code);
+            ++counts[code];
         }
+        // Report the most common fuel models so it's obvious what landscape was loaded
+        std::vector<std::pair<int, int>> top(counts.begin(), counts.end());
+        std::sort(top.begin(), top.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        std::cout << "Most common fuel models:";
+        for (size_t k = 0; k < top.size() && k < 6; ++k) {
+            const FuelModel* m = isNonburnableCode(top[k].first) ? nullptr : findFuelModel(top[k].first);
+            std::cout << " " << (m ? m->name : (top[k].first <= 0 ? "none" : "NB")) << "(" << top[k].first << ") "
+                      << (100 * top[k].second / N) << "%";
+        }
+        std::cout << "\n";
+    }
+    else {
+        std::cout << "No fuel map: every cell gets fuel model " << DEFAULT_FUEL_MODEL << "\n";
+        for (Cell& c : terrain.grid) c.fuelModel = DEFAULT_FUEL_MODEL;
+    }
+
+    // --- 5. Operational roads ---
+    if (haveGrid && loadLayer(paths.roads, grid, Resample::Mode, "roads", raw)) {
+        int roadCells = 0;
+        for (int i = 0; i < N; ++i) {
+            const int v = isNoData(raw[i]) ? 0 : static_cast<int>(std::lround(raw[i]));
+            const bool road = v >= ROAD_CLASS_MIN && v <= ROAD_CLASS_MAX;
+            terrain.grid[i].roadClass = static_cast<std::uint8_t>(road ? v : 0);
+            roadCells += road ? 1 : 0;
+        }
+        std::cout << "Road cells: " << roadCells << " (" << (ROADS_ARE_FUEL_BREAKS ? "fuel breaks" : "drawn only")
+                  << ")\n";
     }
     return terrain;
 }

@@ -17,7 +17,7 @@ namespace {
 // ============================================================================
 Renderer::Renderer(const std::vector<std::uint8_t>& terrainShade)
     : window_(sf::VideoMode(GRID_WIDTH* CELL_SIZE, GRID_HEIGHT* CELL_SIZE),
-        "2D Wildfire Simulator (GDAL GIS Engine) - P: perimeter, V: drone mission overlay"),
+        "2D Wildfire Simulator (Rothermel, LANDFIRE) - P: perimeter, V: drone mission overlay, R: roads"),
     terrainShade_(terrainShade),
     pixels_(static_cast<size_t>(GRID_WIDTH)* GRID_HEIGHT * 4, 255),       // RGBA primary grid buffer
     overlayPixels_(static_cast<size_t>(GRID_WIDTH)* GRID_HEIGHT * 4, 0),   // RGBA mission overlay buffer
@@ -56,14 +56,21 @@ void Renderer::setColor(int idx, std::uint8_t r, std::uint8_t g, std::uint8_t b)
 // Cell Color Mapping
 // ----------------------------------------------------------------------------
 // Assigns pixel RGB colors according to current cell combustion state:
-// - Unburned: Grayscale elevation shading (white = highest elevation).
+// - Unburned: Grayscale elevation shading (white = highest elevation); road cells tinted amber.
 // - Burning: Bright orange/red fire color.
 // - Burned: Dark red-brown char color.
 void Renderer::paintBase(int idx, const std::vector<Cell>& grid) {
     switch (grid[idx].state) {
     case CellState::Unburned: {
         const std::uint8_t g = terrainShade_[idx];
-        setColor(idx, g, g, g);
+        if (showRoads && grid[idx].roadClass != 0) {
+            // Roads: amber, blended half-and-half with the elevation shade so the terrain still shows through
+            setColor(idx, static_cast<std::uint8_t>((g + 230) / 2), static_cast<std::uint8_t>((g + 160) / 2),
+                     static_cast<std::uint8_t>(g / 2));
+        }
+        else {
+            setColor(idx, g, g, g);
+        }
         break;
     }
     case CellState::Burning: setColor(idx, 255, 69, 0); break;   // Orange-Red

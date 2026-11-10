@@ -31,6 +31,8 @@ add_library(wf_core STATIC
   src/mission_controller.cpp
   src/fire_model.cpp
   src/fuel_models.cpp
+  src/rothermel.cpp
+  src/topography.cpp
   src/perimeter.cpp)
 target_include_directories(wf_core PUBLIC src)
 wf_warnings(wf_core)
