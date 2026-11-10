@@ -1,3 +1,4 @@
+#include <cmath>
 #include <random>
 #include "distance_transform.h"
 #include "fire_model.h"
@@ -27,14 +28,16 @@ int main() {
     // ------------------------------------------------------------------------
     std::mt19937 rng(1337);
 
-    // Load real-world elevation and fuel datasets into the cell grid
-    std::vector<Cell> terrain = loadTerrain("elevation_map.tif", "fuel_map.tif", rng);
+    // Load real-world elevation and fuel datasets into the cell grid (the DEM defines the grid)
+    Terrain terrain = loadTerrain("elevation_map.tif", "fuel_map.tif", rng);
 
-    // Set up rendering engine with precalculated terrain hillshading
-    Renderer renderer(computeTerrainShade(terrain));
+    // Set up rendering engine with the elevation shading (white = highest)
+    Renderer renderer(computeTerrainShade(terrain.grid));
 
-    // Instantiate wildfire engine with vector wind (blowing North-East: x=0.707, y=-0.707)
-    FireSimulation sim(std::move(terrain), Vec2(0.707f, -0.707f), 1337);
+    // Instantiate wildfire engine with vector wind (blowing North-East: x=0.707, y=-0.707).
+    // The cell size lets the slope term use real rise-over-run.
+    FireSimulation sim(std::move(terrain.grid), Vec2(0.707f, -0.707f), 1337,
+                       terrain.cellSizeX, terrain.cellSizeY);
 
     // Initial full-grid visual repaint
     renderer.paintAll(sim.grid());
@@ -69,10 +72,14 @@ int main() {
                 renderer.window().close();
             }
 
-            // Left-Click: Manually ignite a new spot fire at mouse position
+            // Left-Click: Manually ignite a new spot fire at mouse position.
+            // mapPixelToCoords converts window pixels to world coordinates, so this stays correct
+            // after the window has been resized.
             if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left) {
-                const int cx = event.mouseButton.x / CELL_SIZE;
-                const int cy = event.mouseButton.y / CELL_SIZE;
+                const sf::Vector2f world = renderer.window().mapPixelToCoords(
+                    sf::Vector2i(event.mouseButton.x, event.mouseButton.y));
+                const int cx = static_cast<int>(std::floor(world.x / CELL_SIZE));
+                const int cy = static_cast<int>(std::floor(world.y / CELL_SIZE));
                 if (cx >= 0 && cx < GRID_WIDTH && cy >= 0 && cy < GRID_HEIGHT) {
                     sim.ignite(cy * GRID_WIDTH + cx);
                 }

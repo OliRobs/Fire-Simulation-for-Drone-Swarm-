@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -138,48 +138,47 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>C:\gdal\lib;C:\SFML-2.6.1\lib</AdditionalLibraryDirectories>
-      <AdditionalDependencies>gdal_i.lib;sfml-graphics-d.lib;sfml-window-d.lib;sfml-system-d.lib</AdditionalDependencies>
+      <AdditionalDependencies>gdal_i.lib;sfml-graphics.lib;sfml-window.lib;sfml-system.lib</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="aco.cpp" />
-    <ClCompile Include="boustrophedon.cpp" />
-    <ClCompile Include="distance_transform.cpp" />
-    <ClCompile Include="drone.cpp" />
-    <ClCompile Include="fire_model.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="mission_controller.cpp" />
-    <ClCompile Include="mission_planner.cpp" />
-    <ClCompile Include="perimeter.cpp" />
-    <ClCompile Include="raster_io.cpp" />
-    <ClCompile Include="Renderer.cpp" />
-    <ClCompile Include="safe_planner.cpp" />
-    <ClCompile Include="Terrain.cpp" />
-    <ClCompile Include="voronoi.cpp" />
+    <ClCompile Include="src\aco.cpp" />
+    <ClCompile Include="src\boustrophedon.cpp" />
+    <ClCompile Include="src\distance_transform.cpp" />
+    <ClCompile Include="src\drone.cpp" />
+    <ClCompile Include="src\fire_model.cpp" />
+    <ClCompile Include="src\fuel_models.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\mission_controller.cpp" />
+    <ClCompile Include="src\mission_planner.cpp" />
+    <ClCompile Include="src\perimeter.cpp" />
+    <ClCompile Include="src\raster_io.cpp" />
+    <ClCompile Include="src\renderer.cpp" />
+    <ClCompile Include="src\safe_planner.cpp" />
+    <ClCompile Include="src\terrain.cpp" />
+    <ClCompile Include="src\voronoi.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="aco.h" />
-    <ClInclude Include="boustrophedon.h" />
-    <ClInclude Include="config.h" />
-    <ClInclude Include="distance_transform.h" />
-    <ClInclude Include="drone.h" />
-    <ClInclude Include="fire_model.h" />
-    <ClInclude Include="h_files\aco.h" />
-    <ClInclude Include="h_files\distance_transform.h" />
-    <ClInclude Include="h_files\mission_controller.h" />
-    <ClInclude Include="mission_controller.h" />
-    <ClInclude Include="mission_planner.h" />
-    <ClInclude Include="mission_types.h" />
-    <ClInclude Include="perimeter.h" />
-    <ClInclude Include="raster_io.h" />
-    <ClInclude Include="renderer.h" />
-    <ClInclude Include="safe_planner.h" />
-    <ClInclude Include="Terrain.h" />
-    <ClInclude Include="Types.h" />
-    <ClInclude Include="voronoi.h" />
+    <ClInclude Include="src\aco.h" />
+    <ClInclude Include="src\boustrophedon.h" />
+    <ClInclude Include="src\config.h" />
+    <ClInclude Include="src\distance_transform.h" />
+    <ClInclude Include="src\drone.h" />
+    <ClInclude Include="src\fire_model.h" />
+    <ClInclude Include="src\fuel_models.h" />
+    <ClInclude Include="src\mission_controller.h" />
+    <ClInclude Include="src\mission_planner.h" />
+    <ClInclude Include="src\mission_types.h" />
+    <ClInclude Include="src\perimeter.h" />
+    <ClInclude Include="src\raster_io.h" />
+    <ClInclude Include="src\renderer.h" />
+    <ClInclude Include="src\safe_planner.h" />
+    <ClInclude Include="src\terrain.h" />
+    <ClInclude Include="src\types.h" />
+    <ClInclude Include="src\voronoi.h" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="CmakeLists.txt" />

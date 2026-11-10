@@ -5,27 +5,41 @@ on:
   pull_request:
 
 jobs:
-  build:
-    runs-on: windows-latest
-
+  # Full build (simulation, GDAL loader, SFML app) and tests.
+  # Ubuntu 24.04 packages SFML 2.6.1 and GDAL 3.8, the versions this project targets.
+  linux:
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install SFML and GDAL
-        shell: pwsh
+      - name: Install SFML 2.6 and GDAL
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install sfml:x64-windows gdal:x64-windows
+          sudo apt-get update
+          sudo apt-get install -y libsfml-dev libgdal-dev
 
       - name: Configure CMake
-        shell: pwsh
-        run: |
-          cmake -S . -B build `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build project
+        run: cmake --build build -j
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+  # MSVC build of the simulation core and tests, to catch Windows-only compile errors.
+  # The SFML/GDAL app is skipped here: building GDAL through vcpkg takes far longer than the rest of CI,
+  # and vcpkg's SFML is now version 3, which this code doesn't support.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B build -DWF_BUILD_APP=OFF
+
+      - name: Build core and tests
         run: cmake --build build --config Release
 
       - name: Run tests

@@ -4,7 +4,7 @@
 #include "config.h"
 #include "distance_transform.h"
 
-// The 20-cell perimeter, measured from a *committed* copy of the fire. The committed fire only absorbs live
+// The perimeter (PERIMETER_DISTANCE cells out), measured from a *committed* copy of the fire. The committed fire only absorbs live
 // fire near sections where the front has come within PERIMETER_UPDATE_DISTANCE of the ring, so the rest of
 // the perimeter (and the survey zones measured from it) stays put.
 class Perimeter {

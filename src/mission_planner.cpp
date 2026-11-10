@@ -164,19 +164,33 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     // ------------------------------------------------------------------------
     // Step 6: Convert All Flight Paths into Fire-Safe Routes
     // ------------------------------------------------------------------------
-    // Connects waypoints using A* pathfinding whenever straight-line flight 
-    // intersects the active fire standoff no-fly zone.
-    auto safeLoop = [&](const std::vector<Vec2>& wp) {
+    // Connects waypoints using A* pathfinding whenever straight-line flight
+    // intersects the active fire no-fly zone. Waypoints that can only be reached by
+    // crossing the fire are dropped, so a route never contains an unsafe leg.
+    auto safeLoop = [&](const std::vector<Vec2>& wp) -> std::vector<Vec2> {
         if (wp.size() < 2) return wp;
         std::vector<Vec2> out{ wp[0] };
 
         for (size_t i = 1; i < wp.size(); ++i) {
-            for (const Vec2& q : planner.leg(wp[i - 1], wp[i])) out.push_back(q);
+            // Plan from where the route actually got to (out.back()), which can differ from wp[i - 1]
+            // if that waypoint was dropped or the leg stopped short of it
+            const std::vector<Vec2> l = planner.leg(out.back(), wp[i]);
+            if (l.empty()) continue;   // Cut off by fire: skip this waypoint
+            out.insert(out.end(), l.begin(), l.end());
         }
+        if (out.size() < 2) return out;
 
-        // Connect route end back to start point to complete closed loop
-        const std::vector<Vec2> closing = planner.leg(wp.back(), wp.front());
-        out.insert(out.end(), closing.begin(), closing.end() - 1);
+        // Connect route end back to start point to complete the closed loop. The final point of the
+        // closing leg is out.front() itself, so it is left off (the drone wraps round to index 0).
+        const std::vector<Vec2> closing = planner.leg(out.back(), out.front());
+        if (!closing.empty()) {
+            out.insert(out.end(), closing.begin(), closing.end() - 1);
+        }
+        else {
+            // No safe way back to the start: fly back along the same route instead (out-and-back), so the
+            // wrap from the last waypoint to the first is always a leg that was already checked as safe
+            for (size_t i = out.size() - 1; i-- > 1;) out.push_back(out[i]);
+        }
         return out;
         };
 

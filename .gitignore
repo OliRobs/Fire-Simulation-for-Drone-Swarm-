@@ -1,0 +1,15 @@
+# Build output
+build/
+out/
+x64/
+Debug/
+Release/
+
+# Visual Studio per-user and cache files
+.vs/
+*.vcxproj.user
+*.user
+*.suo
+
+# GDAL side-car files created when rasters are opened
+*.aux.xml

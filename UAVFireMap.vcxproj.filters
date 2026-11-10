@@ -15,117 +15,103 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
+    <ClCompile Include="src\aco.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Renderer.cpp">
+    <ClCompile Include="src\boustrophedon.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Terrain.cpp">
+    <ClCompile Include="src\distance_transform.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="distance_transform.cpp">
+    <ClCompile Include="src\drone.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="mission_controller.cpp">
+    <ClCompile Include="src\fire_model.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="raster_io.cpp">
+    <ClCompile Include="src\fuel_models.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="aco.cpp">
+    <ClCompile Include="src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="boustrophedon.cpp">
+    <ClCompile Include="src\mission_controller.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="drone.cpp">
+    <ClCompile Include="src\mission_planner.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="fire_model.cpp">
+    <ClCompile Include="src\perimeter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="mission_planner.cpp">
+    <ClCompile Include="src\raster_io.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="perimeter.cpp">
+    <ClCompile Include="src\renderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="safe_planner.cpp">
+    <ClCompile Include="src\safe_planner.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="voronoi.cpp">
+    <ClCompile Include="src\terrain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\voronoi.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Terrain.h">
+    <ClInclude Include="src\aco.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Types.h">
+    <ClInclude Include="src\boustrophedon.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="config.h">
+    <ClInclude Include="src\config.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="distance_transform.h">
+    <ClInclude Include="src\distance_transform.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="raster_io.h">
+    <ClInclude Include="src\drone.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="aco.h">
+    <ClInclude Include="src\fire_model.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="boustrophedon.h">
+    <ClInclude Include="src\fuel_models.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="drone.h">
+    <ClInclude Include="src\mission_controller.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="fire_model.h">
+    <ClInclude Include="src\mission_planner.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="mission_controller.h">
+    <ClInclude Include="src\mission_types.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="mission_planner.h">
+    <ClInclude Include="src\perimeter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="mission_types.h">
+    <ClInclude Include="src\raster_io.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="perimeter.h">
+    <ClInclude Include="src\renderer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="renderer.h">
+    <ClInclude Include="src\safe_planner.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="safe_planner.h">
+    <ClInclude Include="src\terrain.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="voronoi.h">
+    <ClInclude Include="src\types.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="h_files\aco.h">
+    <ClInclude Include="src\voronoi.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="h_files\distance_transform.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="h_files\mission_controller.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <Text Include="CmakeLists.txt" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="ReadMe.md" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="elevation_map.tif">
-      <Filter>Resource Files</Filter>
-    </Image>
   </ItemGroup>
 </Project>

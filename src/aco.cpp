@@ -89,7 +89,7 @@ std::vector<int> solveACO(const std::vector<Vec2>& pts, std::mt19937& rng) {
             for (int step = 1; step < n; ++step) {
                 float sum = 0.0f;
 
-                // Calculate transition probability weights: tau^alpha * eta^beta (here alpha=1, beta=1 implicitly embedded in heur)
+                // Transition weights: tau^alpha * eta^beta with alpha = 1 and beta = 3 (heur already holds eta^3)
                 for (int j = 0; j < n; ++j) {
                     w[j] = visited[j] ? 0.0f : tau[cur * n + j] * heur[cur * n + j];
                     sum += w[j];

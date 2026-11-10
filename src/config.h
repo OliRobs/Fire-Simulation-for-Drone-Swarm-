@@ -7,6 +7,11 @@ constexpr int CELL_SIZE = 2;            // Pixel size per grid cell
 constexpr int PERIMETER_DISTANCE = 40;  // Perimeter ring sits this many cells out from the fire
 constexpr float BASE_IGNITION_RATE = 0.005f;
 constexpr float FUEL_BURN_RATE = 0.01f;
+constexpr float DEFAULT_CELL_SIZE_M = 10.0f; // Ground size of a cell when no DEM is loaded (metres)
+// Slope effect, from Alexandridis et al. (2008) "A cellular automata model for forest fire spread
+// prediction: the case of the wildfire that swept through Spetses Island", Appl. Math. Comput. 204:
+// spread chance is multiplied by exp(SLOPE_COEFF * slope angle in degrees), up- or downhill.
+constexpr float SLOPE_COEFF = 0.078f;
 
 // --- Drone survey configuration ---
 constexpr int SEARCH_DISTANCE = 70;       // Search area extends this many cells from the fire

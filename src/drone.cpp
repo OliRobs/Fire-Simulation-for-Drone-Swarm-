@@ -32,11 +32,15 @@ size_t nearestWaypoint(const std::vector<Vec2>& route, Vec2 p) {
 // ----------------------------------------------------------------------------
 // Advance Drone Position Along Route/Transit (Fixed Speed Step)
 // ----------------------------------------------------------------------------
-// Moves the drone forward at `DRONE_SPEED` per tick. 
+// Moves the drone forward at `DRONE_SPEED` per tick.
 // Priority order:
 // 1. Clears any queued fire-safe transit waypoints first.
 // 2. Cycles continuously around its assigned circular coverage route.
-void stepDrone(Drone& d) {
+// With a planner, each segment is checked against the live fire before the drone starts along it,
+// because the fire may have grown across a leg since the route was planned.
+bool stepDrone(Drone& d, const SafePlanner* planner) {
+    if (d.holding) return true; // Hovering until the controller finds a safe route
+
     float remaining = DRONE_SPEED; // Remaining movement distance budget for this frame
     const size_t maxSteps = d.route.size() + d.transit.size() + 1; // Safety guard against infinite loops
 
@@ -44,10 +48,14 @@ void stepDrone(Drone& d) {
         const bool inTransit = !d.transit.empty();
 
         // Return if drone has finished transit and has no loop route assigned
-        if (!inTransit && d.route.empty()) return;
+        if (!inTransit && d.route.empty()) return true;
 
         // Current target is the front of the transit queue, or the next point in the loop route
         const Vec2 goal = inTransit ? d.transit.front() : d.route[d.target];
+
+        // Refuse to start (or continue) along a segment that now crosses the hard no-fly zone
+        if (planner && !planner->lineClear(d.pos, goal)) return false;
+
         const Vec2 delta = goal - d.pos;
         const float len = std::sqrt(delta.x * delta.x + delta.y * delta.y);
 
@@ -72,6 +80,7 @@ void stepDrone(Drone& d) {
             remaining = 0.0f;
         }
     }
+    return true;
 }
 
 // ----------------------------------------------------------------------------
