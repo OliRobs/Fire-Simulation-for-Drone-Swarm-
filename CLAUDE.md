@@ -10,7 +10,8 @@ surveys round the fire. README.md has the module table and input-data notes.
 - Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 5 seconds.
 - Core and tests only, without SFML or GDAL: add `-DWF_BUILD_APP=OFF`.
 - The owner builds day to day with Visual Studio: `UAVFireMap.vcxproj`, SFML in `C:\SFML-2.6.1`, GDAL in
-  `C:\gdal`. Adding or removing a source file means updating `CMakeLists.txt`, `UAVFireMap.vcxproj` AND
+  `C:\gdal`. The project is x64 only (the SFML and GDAL builds are 64-bit). Debugger settings (working
+  directory, PATH to the DLLs) live in the .vcxproj itself, because `.vcxproj.user` is not tracked. Adding or removing a source file means updating `CMakeLists.txt`, `UAVFireMap.vcxproj` AND
   `UAVFireMap.vcxproj.filters`.
 - CI (`.github/workflows/build.yml`): full build and tests on Ubuntu 24.04, plus an MSVC build of the core and
   tests on Windows. Both must pass.
