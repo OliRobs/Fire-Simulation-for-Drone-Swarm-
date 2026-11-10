@@ -1,9 +1,9 @@
 #pragma once
 
 // --- Configuration & Constants ---
-constexpr int GRID_WIDTH = 500;
-constexpr int GRID_HEIGHT = 500;
-constexpr int CELL_SIZE = 2;            // Pixel size per grid cell
+constexpr int GRID_WIDTH = 700;
+constexpr int GRID_HEIGHT = 700;
+constexpr int CELL_SIZE = 1;            // Pixel size per grid cell
 constexpr int PERIMETER_DISTANCE = 40;  // Perimeter ring sits this many cells out from the fire
 constexpr float DEFAULT_CELL_SIZE_M = 30.0f; // Ground size of a cell when no DEM is loaded (metres)
 
