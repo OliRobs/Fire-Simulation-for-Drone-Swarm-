@@ -38,3 +38,7 @@ const FuelModel* findFuelModel(int code);
 
 // All 40 burnable models, for tests and tools
 const FuelModel* allFuelModels(int& count);
+
+// Original fuel model 10 (timber litter and understory, Anderson 1982). Not in FBFM40 maps: Rothermel's (1991)
+// crown fire spread rate is defined as 3.34 x the surface spread rate of this model (crown_fire.cpp).
+const FuelModel& fuelModel10();

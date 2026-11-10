@@ -27,6 +27,10 @@ constexpr float WIND_ADJUSTMENT_FACTOR = 0.0f; // Midflame / 20-ft wind. <= 0: u
 // Cap the effective wind at Rothermel's "maximum reliable wind" (RMRS-GTR-371 section 3.2.7). On by default:
 // with it on, all 40 fuel models reproduce the spread-rate classes Scott & Burgan (2005) publish for them.
 constexpr bool APPLY_WIND_LIMIT = true;
+// Crown fire from the LANDFIRE canopy layers (crown_fire.h). Foliar moisture is NOT in LANDFIRE: 100 % is the
+// usual default (Scott & Reinhardt 2001); RMRS-GTR-220 gives 75-150 % as the normal range.
+constexpr bool ENABLE_CROWN_FIRE = true;
+constexpr float FOLIAR_MOISTURE_PCT = 100.0f;
 
 // --- LANDFIRE Operational Roads (LF2023_Roads) ---
 // Raster values: 20 primary, 21 secondary, 22 tertiary, 23 thinned road; 0 background (from the layer's

@@ -196,6 +196,13 @@ double unshelteredWaf(double depthFt) {
     return 1.83 / std::log((20.0 + 0.36 * depthFt) / (0.13 * depthFt));
 }
 
+double windAdjustmentFactor(double fuelDepthFt, double canopyCoverPct, double canopyHeightFt, double crownRatio) {
+    const double f = (canopyCoverPct / 100.0) * std::clamp(crownRatio, 0.0, 1.0) / 3.0;   // Crown fill portion
+    if (f <= 0.05 || canopyHeightFt <= 0.0) return unshelteredWaf(fuelDepthFt);         // Open canopy: unsheltered
+    const double h = canopyHeightFt;
+    return 0.555 / (std::sqrt(f * h) * std::log((20.0 + 0.36 * h) / (0.13 * h)));
+}
+
 // ----------------------------------------------------------------------------
 // Direction of maximum spread and the fire ellipse
 // ----------------------------------------------------------------------------

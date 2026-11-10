@@ -62,6 +62,13 @@ SurfaceFuelBed computeFuelBed(const FuelModel& model, const FuelMoisture& moistu
 // which RMRS-GTR-371 refers to). "Unsheltered" means no forest canopy above the surface fuel.
 double unshelteredWaf(double fuelDepthFt);
 
+// Wind adjustment factor allowing for a forest canopy (Andrews 2012, RMRS-GTR-266, after Albini & Baughman 1979).
+// Crown fill portion f = (canopy cover / 100) x crown ratio / 3 (crowns taken as cones). If f <= 0.05 the fuel is
+// unsheltered and unshelteredWaf(depth) is used; otherwise the fuel is sheltered by the canopy:
+//     WAF = 0.555 / ( sqrt(f H) ln((20 + 0.36 H) / (0.13 H)) ),  H = canopy height in ft.
+// crownRatio = (canopy height - canopy base height) / canopy height, 0..1.
+double windAdjustmentFactor(double fuelDepthFt, double canopyCoverPct, double canopyHeightFt, double crownRatio);
+
 // Head fire rate and direction for one cell, from vector addition of the wind and slope effects
 // (RMRS-GTR-371 section 6.1, Table 26), and the ellipse that gives the rate in any other direction.
 // Directions are unit vectors in any consistent 2D frame (the simulation uses grid x = east, y = south).

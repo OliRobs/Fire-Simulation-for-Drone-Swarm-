@@ -45,31 +45,51 @@ namespace {
 // Find the LANDFIRE layers in a folder
 // ----------------------------------------------------------------------------
 // Matches on the layer name inside the file name (e.g. LF2020_Elev_CONUS.tif, LF2025_FBFM40_CONUS.tif).
-LandscapePaths findLandfireLayers(const std::string& dir) {
+LandscapePaths findLandfireLayers(const std::string& dir, bool recursive) {
     LandscapePaths p;
     std::error_code ec;
-    if (!fs::is_directory(dir, ec)) {
-        std::cout << "LANDFIRE folder '" << dir << "' not found\n";
-        return p;
-    }
-    for (const fs::directory_entry& e : fs::recursive_directory_iterator(dir, ec)) {
-        if (!e.is_regular_file()) continue;
-        std::string ext = e.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (ext != ".tif" && ext != ".tiff") continue;
+    if (!fs::is_directory(dir, ec)) return p;
 
-        const std::string name = e.path().filename().string();
-        const std::string full = e.path().string();
+    // Matches one file against the layer names. "_CH_" and "_CBH_" are distinct, so the canopy layers can't
+    // be confused with each other.
+    auto consider = [&p](const fs::path& path) {
+        std::string ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (ext != ".tif" && ext != ".tiff") return;
+
+        const std::string name = path.filename().string();
+        const std::string full = path.string();
         if (name.find("_Elev_") != std::string::npos) p.elevation = full;
         else if (name.find("_SlpD_") != std::string::npos) p.slope = full;
         else if (name.find("FBFM40") != std::string::npos) p.fuel = full;
         else if (name.find("_Roads_") != std::string::npos) p.roads = full;
+        else if (name.find("_CC_") != std::string::npos) p.canopyCover = full;
+        else if (name.find("_CH_") != std::string::npos) p.canopyHeight = full;
+        else if (name.find("_CBH_") != std::string::npos) p.canopyBaseHeight = full;
+        else if (name.find("_CBD_") != std::string::npos) p.canopyBulkDensity = full;
+    };
+    if (recursive) {
+        for (const fs::directory_entry& e : fs::recursive_directory_iterator(dir, ec))
+            if (e.is_regular_file()) consider(e.path());
     }
-    std::cout << "LANDFIRE layers in '" << dir << "':\n"
-              << "  elevation: " << (p.elevation.empty() ? "(missing)" : p.elevation) << "\n"
-              << "  slope:     " << (p.slope.empty() ? "(missing)" : p.slope) << "\n"
-              << "  fuel:      " << (p.fuel.empty() ? "(missing)" : p.fuel) << "\n"
-              << "  roads:     " << (p.roads.empty() ? "(missing)" : p.roads) << "\n";
+    else {
+        for (const fs::directory_entry& e : fs::directory_iterator(dir, ec))
+            if (e.is_regular_file()) consider(e.path());
+    }
+    if (!p.any()) return p;
+
+    auto show = [](const char* label, const std::string& path) {
+        std::cout << "  " << label << (path.empty() ? "(missing)" : path) << "\n";
+    };
+    std::cout << "LANDFIRE layers in '" << dir << "':\n";
+    show("elevation:          ", p.elevation);
+    show("slope:              ", p.slope);
+    show("fuel (FBFM40):      ", p.fuel);
+    show("roads:              ", p.roads);
+    show("canopy cover:       ", p.canopyCover);
+    show("canopy height:      ", p.canopyHeight);
+    show("canopy base height: ", p.canopyBaseHeight);
+    show("canopy bulk density:", p.canopyBulkDensity);
     return p;
 }
 
@@ -179,6 +199,40 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
         }
         std::cout << "Road cells: " << roadCells << " (" << (ROADS_ARE_FUEL_BREAKS ? "fuel breaks" : "drawn only")
                   << ")\n";
+    }
+
+    // --- 6. Forest canopy (wind sheltering and crown fire) ---
+    // LANDFIRE stores these as scaled integers and 0 for non-forest. Each layer is optional; a missing one
+    // leaves the value at 0 ("no trees"), which switches off sheltering and crown fire for that cell.
+    struct CanopyLayer {
+        const std::string* path;
+        const char* what;
+        float scale;                 // Stored value x scale = real value
+        float Cell::* field;
+    };
+    const CanopyLayer canopy[] = {
+        { &paths.canopyCover, "canopy cover", 1.0f, &Cell::canopyCoverPct },          // percent
+        { &paths.canopyHeight, "canopy height", 0.1f, &Cell::canopyHeightM },         // m x 10
+        { &paths.canopyBaseHeight, "canopy base height", 0.1f, &Cell::canopyBaseHeightM }, // m x 10
+        { &paths.canopyBulkDensity, "canopy bulk density", 0.01f, &Cell::canopyBulkDensity }, // kg/m^3 x 100
+    };
+    int canopyLayers = 0;
+    for (const CanopyLayer& layer : canopy) {
+        if (!(haveGrid && loadLayer(*layer.path, grid, Resample::Average, layer.what, raw))) continue;
+        ++canopyLayers;
+        for (int i = 0; i < N; ++i) {
+            const float v = isNoData(raw[i]) ? 0.0f : std::max(raw[i], 0.0f);
+            terrain.grid[i].*layer.field = v * layer.scale;
+        }
+    }
+    if (canopyLayers > 0) {
+        int forest = 0;
+        for (const Cell& c : terrain.grid) forest += c.canopyCoverPct > 0.0f ? 1 : 0;
+        std::cout << "Forest canopy over " << (100 * forest / N) << "% of the window\n";
+        if (canopyLayers < 4) {
+            std::cout << "Warning: only " << canopyLayers << " of the 4 canopy layers (CC, CH, CBH, CBD) found; "
+                         "crown fire needs all of them\n";
+        }
     }
     return terrain;
 }
