@@ -18,7 +18,8 @@ public:
 
     bool showPerimeter = true;  // P
     bool showMission = true;    // V: Voronoi overlay, points of interest and routes
-    bool showRoads = true;      // R: LANDFIRE roads drawn over the elevation shading (call paintAll after toggling)
+    bool showRoads = false;     // R: LANDFIRE roads drawn over the elevation shading (call paintAll after toggling).
+                                // Hidden by default; roads still act as fuel breaks either way.
 
     void paintAll(const std::vector<Cell>& grid);
     void paintCells(const std::vector<Cell>& grid, const std::vector<int>& cells);
