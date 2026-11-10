@@ -51,6 +51,19 @@
 $(LocalDebuggerEnvironment)</LocalDebuggerEnvironment>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
   </PropertyGroup>
+  <!-- After each build, copy the SFML and GDAL DLLs next to UAVFireMap.exe. Windows always looks in the
+       exe's own folder first, so the program then runs from Visual Studio, Explorer or a terminal without
+       relying on PATH. xcopy /D only copies files that are newer, so later builds are quick. -->
+  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+    <PostBuildEvent>
+      <Message>Copying SFML and GDAL DLLs next to the exe</Message>
+      <Command>if not exist "C:\SFML-2.6.1\bin\*.dll" echo UAVFireMap : warning W2: no SFML DLLs in C:\SFML-2.6.1\bin - update the SFML path in UAVFireMap.vcxproj
+if exist "C:\SFML-2.6.1\bin\*.dll" xcopy /Y /D /Q "C:\SFML-2.6.1\bin\*.dll" "$(OutDir)" &gt; nul
+if not exist "C:\gdal\bin\gdal.dll" echo UAVFireMap : warning W1: gdal.dll is not in C:\gdal\bin - find gdal.dll on this PC and update the path in UAVFireMap.vcxproj (PostBuildEvent and LocalDebuggerEnvironment)
+if exist "C:\gdal\bin\*.dll" xcopy /Y /D /Q "C:\gdal\bin\*.dll" "$(OutDir)" &gt; nul
+exit /b 0</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
