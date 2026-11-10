@@ -1,4 +1,4 @@
-﻿# Wildfire simulator
+# Wildfire simulator
 
 Cellular-automaton wildfire on real terrain (GDAL GeoTIFFs), with a drone swarm that surveys round the fire:
 boustrophedon sweeps inside the perimeter and an ant-colony-optimised tour outside it, both kept clear of
@@ -16,7 +16,12 @@ To build just the simulation core and the tests, without SFML or GDAL:
 
     cmake -S . -B build -DWF_BUILD_APP=OFF && cmake --build build && ctest --test-dir build
 
-Visual Studio: `UAVFireMap.vcxproj` expects GDAL in `C:\gdal` and SFML 2.6.1 in `C:\SFML-2.6.1`.
+Windows: CMake looks for SFML in `C:\SFML-2.6.1` and GDAL in `C:\gdal` (the same folders as
+`UAVFireMap.vcxproj`). If yours are elsewhere, point CMake at them:
+
+    cmake -S . -B build -DWF_SFML_ROOT=D:/libs/SFML-2.6.1 -DWF_GDAL_ROOT=D:/libs/gdal
+
+The SFML DLLs are copied next to `wildfire.exe` after each build; GDAL's `bin` folder needs to be on `PATH`.
 
 Keys: left-click ignites a cell, P toggles the perimeter ring, V toggles the drone mission overlay.
 

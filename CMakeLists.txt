@@ -43,12 +43,36 @@ wf_warnings(wf_tests)
 add_test(NAME wf_tests COMMAND wf_tests)
 
 if(WF_BUILD_APP)
+  # On Windows, SFML and GDAL are unpacked into plain folders rather than installed system-wide, so tell
+  # CMake where to look. The defaults match UAVFireMap.vcxproj; override them for another location, e.g.
+  #   cmake -S . -B build -DWF_SFML_ROOT=D:/libs/SFML-2.6.1 -DWF_GDAL_ROOT=D:/libs/gdal
+  if(WIN32)
+    set(WF_SFML_ROOT "C:/SFML-2.6.1" CACHE PATH "SFML 2.6 folder (contains include, lib, bin)")
+    set(WF_GDAL_ROOT "C:/gdal" CACHE PATH "GDAL folder (contains include, lib)")
+    list(APPEND CMAKE_PREFIX_PATH "${WF_SFML_ROOT}" "${WF_GDAL_ROOT}")
+  endif()
+
   # The code uses the SFML 2 API (sf::Uint8, VideoMode(w, h), pollEvent(event)...), so SFML 3 won't do.
-  find_package(SFML 2.5 COMPONENTS graphics window system REQUIRED)
+  find_package(SFML 2.5 COMPONENTS graphics window system QUIET)
+  if(NOT SFML_FOUND)
+    message(FATAL_ERROR
+      "SFML 2.5 - 2.6 not found.\n"
+      "Windows: set WF_SFML_ROOT to the SFML folder (the one containing lib/cmake/SFML), e.g.\n"
+      "  cmake -S . -B build -DWF_SFML_ROOT=C:/SFML-2.6.1\n"
+      "Linux: install libsfml-dev. To build only the core and tests: -DWF_BUILD_APP=OFF")
+  endif()
   if(SFML_VERSION VERSION_GREATER_EQUAL 3)
     message(FATAL_ERROR "Found SFML ${SFML_VERSION}; this project needs SFML 2.5 - 2.6")
   endif()
-  find_package(GDAL REQUIRED)
+
+  find_package(GDAL QUIET)
+  if(NOT GDAL_FOUND)
+    message(FATAL_ERROR
+      "GDAL not found.\n"
+      "Windows: set WF_GDAL_ROOT to the GDAL folder (containing include/gdal.h and lib/gdal_i.lib), e.g.\n"
+      "  cmake -S . -B build -DWF_GDAL_ROOT=C:/gdal\n"
+      "Linux: install libgdal-dev. To build only the core and tests: -DWF_BUILD_APP=OFF")
+  endif()
 
   # GIS input: the only code that touches GDAL
   add_library(wf_io STATIC src/raster_io.cpp src/terrain.cpp)
@@ -66,4 +90,13 @@ if(WF_BUILD_APP)
 
   # Run from the repo root (where elevation_map.tif lives) when launched from Visual Studio
   set_target_properties(wildfire PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+  # Windows finds DLLs next to the .exe, so copy the SFML DLLs there after each build.
+  # (GDAL's DLLs come from C:\gdal\bin, which needs to be on PATH, as it already is for the VS project.)
+  if(WIN32 AND NOT CMAKE_VERSION VERSION_LESS 3.21)
+    # The $<IF> skips the copy when there are no DLLs (e.g. static SFML), which would otherwise be an error
+    add_custom_command(TARGET wildfire POST_BUILD
+      COMMAND "$<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:wildfire>>,${CMAKE_COMMAND};-E;copy_if_different;$<TARGET_RUNTIME_DLLS:wildfire>;$<TARGET_FILE_DIR:wildfire>,${CMAKE_COMMAND};-E;true>"
+      COMMAND_EXPAND_LISTS)
+  endif()
 endif()
