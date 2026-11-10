@@ -8,8 +8,9 @@
 //
 // Models 2D grid-based fire spread influenced by:
 // 1. Wind speed and direction (vector dot product modifier).
-// 2. Terrain slope gradient (uphill elevation delta exponential multiplier).
-// 3. Cell fuel load and ignition probability per neighbor direction.
+// 2. Terrain slope angle (exponential in the angle: faster uphill, slower downhill).
+// 3. The neighbour's flammability (from the fuel map) and per-direction ignition probability.
+// 4. Fuel load, which sets how long a cell burns (and so how many chances it has to spread).
 // ============================================================================
 
 // ----------------------------------------------------------------------------
@@ -31,10 +32,14 @@ float getWindFactor(int dx, int dy, const Vec2& wind) {
 // ----------------------------------------------------------------------------
 // Slope / Elevation Influence Calculation
 // ----------------------------------------------------------------------------
-// Returns an exponential multiplier based on elevation differences.
-// Fires spread exponentially faster when traveling uphill to neighboring cells.
-float getSlopeFactor(float elevationCurrent, float elevationNeighbor) {
-    return std::exp((elevationNeighbor - elevationCurrent) * 0.05f);
+// Alexandridis et al. (2008): factor = exp(a * theta), where theta is the slope angle in degrees between the
+// two cell centres (positive uphill, negative downhill) and a = SLOPE_COEFF. Using the angle (rise over the
+// real horizontal distance) means the effect no longer depends on the grid resolution, and diagonal
+// neighbours, which are sqrt(2) further away, see a gentler slope for the same height difference.
+float getSlopeFactor(float elevationCurrent, float elevationNeighbor, float horizontalDistance) {
+    constexpr float RAD_TO_DEG = 57.2957795f;
+    const float thetaDeg = std::atan2(elevationNeighbor - elevationCurrent, horizontalDistance) * RAD_TO_DEG;
+    return std::exp(SLOPE_COEFF * thetaDeg);
 }
 
 // ----------------------------------------------------------------------------
@@ -42,14 +47,16 @@ float getSlopeFactor(float elevationCurrent, float elevationNeighbor) {
 // ----------------------------------------------------------------------------
 // Precomputes static ignition probability lookup tables for all cells across 
 // all 8 (or NUM_DIRS) neighbor direction vectors.
-FireSimulation::FireSimulation(std::vector<Cell> grid, Vec2 wind, std::uint32_t seed)
+FireSimulation::FireSimulation(std::vector<Cell> grid, Vec2 wind, std::uint32_t seed,
+    float cellSizeX, float cellSizeY)
     : grid_(std::move(grid)), fireMask_(grid_.size(), 0), rng_(seed) {
     constexpr int N = GRID_WIDTH * GRID_HEIGHT;
 
-    // Precalculate directional wind factors for all neighbor directions
-    float windFactor[NUM_DIRS];
+    // Precalculate directional wind factors and ground distances for all neighbor directions
+    float windFactor[NUM_DIRS], stepDistance[NUM_DIRS];
     for (int d = 0; d < NUM_DIRS; ++d) {
         windFactor[d] = getWindFactor(DX[d], DY[d], wind);
+        stepDistance[d] = std::sqrt(DX[d] * DX[d] * cellSizeX * cellSizeX + DY[d] * DY[d] * cellSizeY * cellSizeY);
     }
 
     // Allocate directional ignition probability array: N cells * NUM_DIRS directions
@@ -65,11 +72,11 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, Vec2 wind, std::uint32_t 
                 if (nx < 0 || nx >= GRID_WIDTH || ny < 0 || ny >= GRID_HEIGHT) continue;
 
                 const Cell& nb = grid_[ny * GRID_WIDTH + nx];
-                if (nb.fuel <= 0.0f) continue; // Unburnable neighbor cell
+                if (nb.fuel <= 0.0f || nb.flammability <= 0.0f) continue; // Unburnable neighbor cell
 
-                // Combined probability formula: BaseRate * WindMod * SlopeMod * FuelDensity
+                // Combined probability formula: BaseRate * WindMod * SlopeMod * Flammability
                 const float p = BASE_IGNITION_RATE * windFactor[d]
-                    * getSlopeFactor(grid_[idx].elevation, nb.elevation) * nb.fuel;
+                    * getSlopeFactor(grid_[idx].elevation, nb.elevation, stepDistance[d]) * nb.flammability;
 
                 // Store directional probability clamped to max 1.0
                 ignitionProb_[static_cast<size_t>(idx) * NUM_DIRS + d] = std::min(p, 1.0f);
@@ -95,6 +102,7 @@ void FireSimulation::igniteCell(int idx) {
 // Manually ignites a cell (e.g., initial fire origin or lightning strikes).
 bool FireSimulation::ignite(int idx) {
     if (grid_[idx].state != CellState::Unburned) return false; // Already burning/burned
+    if (grid_[idx].fuel <= 0.0f || grid_[idx].flammability <= 0.0f) return false; // Nonburnable (water, urban...)
     igniteCell(idx);
     burning_.push_back(idx); // Add cell to active burning frontier list
     return true;

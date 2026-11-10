@@ -27,7 +27,8 @@ enum class CellState : std::uint8_t { Unburned, Burning, Burned };
 
 struct Cell {
     float elevation = 0.0f; // Altitude in metres (affects slope)
-    float fuel = 1.0f;      // Fuel density/moisture factor (0.0 to 1.0)
+    float fuel = 1.0f;      // Fuel remaining (0.0 to 1.0): burns down by FUEL_BURN_RATE per tick, so sets burn duration
+    float flammability = 1.0f; // How readily fire spreads INTO this cell (0.0 = nonburnable, 1.0 = fastest fuels)
     float burnTime = 0.0f;  // Ticks spent burning
     CellState state = CellState::Unburned;
 };

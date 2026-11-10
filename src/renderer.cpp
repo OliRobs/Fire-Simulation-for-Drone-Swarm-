@@ -10,7 +10,7 @@ namespace {
 // Real-time Visual Renderer (SFML Graphics Engine)
 //
 // Visualizes:
-// 1. Terrain elevation hillshading and dynamic wildfire combustion states.
+// 1. Terrain elevation shading and dynamic wildfire combustion states.
 // 2. Dynamic containment perimeter rings (cyan).
 // 3. Voronoi sector boundaries, standoff safety zones, and outer search limits.
 // 4. Multi-drone positions, sensor range radii, and active flight paths.
@@ -56,7 +56,7 @@ void Renderer::setColor(int idx, std::uint8_t r, std::uint8_t g, std::uint8_t b)
 // Cell Color Mapping
 // ----------------------------------------------------------------------------
 // Assigns pixel RGB colors according to current cell combustion state:
-// - Unburned: Grayscale terrain hillshading (white = highest elevation).
+// - Unburned: Grayscale elevation shading (white = highest elevation).
 // - Burning: Bright orange/red fire color.
 // - Burned: Dark red-brown char color.
 void Renderer::paintBase(int idx, const std::vector<Cell>& grid) {

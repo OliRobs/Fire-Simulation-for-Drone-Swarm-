@@ -6,8 +6,9 @@
 #include "mission_types.h"
 #include "safe_planner.h"
 
-// Owns the drones and the current survey plan. Re-plans (rate-limited) when the fire has changed, hands the
-// new routes to the drones, and flies them each frame.
+// Owns the drones and their current mission plan. Re-plans (at most every REPLAN_INTERVAL frames) when the
+// fire changes, and between re-plans keeps every drone on fire-safe legs: if the fire grows across the leg a
+// drone is flying, that drone is re-routed straight away (or holds position if nothing is reachable).
 class MissionController {
 public:
     MissionController(const DistanceTransform& liveEdt, const DistanceTransform& perimEdt, Vec2 launchPoint);
@@ -21,6 +22,10 @@ public:
 
 private:
     void replan();
+
+    // Give d a fire-safe transit path to its current route target. If that target can't be reached, try
+    // the following waypoints along the route. If none can be reached the drone is put into holding.
+    void routeTo(Drone& d);
 
     const DistanceTransform& live_;
     const DistanceTransform& perim_;
