@@ -493,14 +493,17 @@ TEST(roads_are_fuel_breaks_even_diagonally) {
     FireWeather w;
     w.windFromDeg = 315.0f;                          // From the NW, straight at the road
     FireSimulation sim(grid, w);
-    CHECK(!sim.canBurn(at(250, 249)));
-    CHECK(sim.ignite(at(200, 200)));                 // North-west of the road (x + y < 499)
+    // Positions relative to the map size, so the test holds for any GRID_WIDTH (square grid assumed):
+    // k + k = GRID_WIDTH - 2 is the diagonal just north-west of the road
+    const int k = (GRID_WIDTH - 2) / 2;
+    CHECK(!sim.canBurn(at(k + 1, k)));               // On the road (x + y = GRID_WIDTH - 1)
+    CHECK(sim.ignite(at(k - 49, k - 49)));           // North-west of the road, ~50 cells from it
     for (int t = 0; t < 4000; ++t) sim.step();
     int beyond = 0;
     for (int y = 0; y < GRID_HEIGHT; ++y)
         for (int x = 0; x < GRID_WIDTH; ++x)
             if (x + y > GRID_WIDTH - 1 && sim.fireMask()[at(x, y)]) ++beyond;
-    CHECK(sim.fireMask()[at(249, 249)] == 1);       // The fire reached the road...
+    CHECK(sim.fireMask()[at(k, k)] == 1);           // The fire reached the road...
     CHECK(beyond == 0);                              // ...and didn't cross it
 }
 

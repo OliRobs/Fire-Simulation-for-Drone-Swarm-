@@ -35,7 +35,8 @@ Controls:
 | `+` / `-`, arrow keys | Zoom about the centre / pan |
 | `F` | Zoom to fit the fire (burning and burned cells) |
 | `0` or Home | Whole map |
-| `P`, `V`, `R` | Toggle the perimeter ring, drone mission overlay, roads |
+| `P`, `V` | Toggle the perimeter ring, drone mission overlay |
+| `R` | Show/hide roads (hidden by default) |
 
 Cell grid lines appear once cells are about 8 pixels or more on screen. The title bar shows simulated time
 (one frame = 10 s) and the zoom.
@@ -57,7 +58,7 @@ were found.
 | Elevation (`_Elev_`, m) | Simulation grid, background shading, **aspect** (which way is uphill) | The download is 30 m pixels over ~264 x 207 km, so a window of GRID_WIDTH x GRID_HEIGHT cells (500 x 30 m = 15 km) is cut out, centred on the raster centre or on `--centre <lon> <lat>`. |
 | Slope (`_SlpD_`, degrees) | Rothermel slope factor | Missing cells (or a missing layer) fall back to slope computed from the elevation. |
 | FBFM40 (`FBFM40`) | Fuel model per cell | Scott & Burgan model numbers, looked up in `fuel_models.cpp` (Table 7 of RMRS-GTR-153). 91-99 (urban, water, agriculture, bare...) and NoData don't burn. |
-| Roads (`_Roads_`) | Fuel breaks, drawn in amber | Classes 20 primary, 21 secondary, 22 tertiary, 23 thinned. Road cells don't burn (`ROADS_ARE_FUEL_BREAKS`); diagonal road lines hold too. |
+| Roads (`_Roads_`) | Fuel breaks (not drawn unless `R` is pressed) | Classes 20 primary, 21 secondary, 22 tertiary, 23 thinned. Road cells don't burn (`ROADS_ARE_FUEL_BREAKS`); diagonal road lines hold too. |
 | Canopy cover (`_CC_`, %) | Wind sheltering | With canopy height and base height gives the crown fill portion, which sets the sheltered wind adjustment factor (Andrews 2012). |
 | Canopy height (`_CH_`, m x 10) | Wind sheltering | |
 | Canopy base height (`_CBH_`, m x 10) | Crown fire initiation, crown ratio | Van Wagner (1977) torching threshold. |
