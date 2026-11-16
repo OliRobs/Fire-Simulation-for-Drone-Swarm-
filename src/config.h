@@ -1,24 +1,30 @@
 #pragma once
 
-// --- Configuration & Constants ---
-constexpr int GRID_WIDTH = 700;
-constexpr int GRID_HEIGHT = 700;
+// --- Simulation grid ---
+// The fire runs on GRID_WIDTH x GRID_HEIGHT cells of SIM_CELL_SIZE_M metres: 2000 x 10 m = 20 km square, the
+// area of four USGS 1 m DEM tiles (2 x 2 tiles of 10 km). Terrain (elevation, slope, aspect) is worked out
+// from the 1 m DEM and averaged into each 10 m cell; the 30 m LANDFIRE fuel and canopy layers are resampled
+// onto the same cells. 1 m cells would be 400 million cells (~16 GB) and are finer than the Rothermel model
+// is meant for (a uniform fuel bed), so the DEM detail goes into the slope instead.
+// The window is centred on the DEM (or the LANDFIRE raster without one) unless --centre <lon> <lat> is given.
+constexpr int GRID_WIDTH = 2000;
+constexpr int GRID_HEIGHT = 2000;
 constexpr int CELL_SIZE = 1;            // Pixel size per grid cell
-constexpr int PERIMETER_DISTANCE = 40;  // Perimeter ring sits this many cells out from the fire
-constexpr float DEFAULT_CELL_SIZE_M = 30.0f; // Ground size of a cell when no DEM is loaded (metres)
+constexpr float SIM_CELL_SIZE_M = 10.0f;
+constexpr float DEFAULT_CELL_SIZE_M = SIM_CELL_SIZE_M; // Ground size of a cell when no DEM is loaded (metres)
 
-// --- Simulation window on the LANDFIRE rasters ---
-// LANDFIRE layers are 30 m pixels covering a large area, so the simulation runs on a GRID_WIDTH x GRID_HEIGHT
-// window of them (500 x 30 m = 15 km square). The window is centred on the raster's
-// centre unless --centre <lon> <lat> is given on the command line.
-constexpr float SIM_CELL_SIZE_M = 30.0f;
+// Converts a ground distance into whole cells. The drone and perimeter settings below are design values in
+// METRES (they were chosen on 30 m cells), so they stay the same on the ground whatever SIM_CELL_SIZE_M is.
+constexpr int cellsFromMetres(float metres) { return static_cast<int>(metres / SIM_CELL_SIZE_M + 0.5f); }
+
+constexpr int PERIMETER_DISTANCE = cellsFromMetres(1200.0f);  // Perimeter ring sits 1.2 km out from the fire
 // Lay the window out north-up (local UTM zone) rather than on the LANDFIRE Albers grid, which is rotated away
 // from north outside the central US (13 deg in Southern California). Also makes WIND_FROM_DEG a true bearing.
 constexpr bool ALIGN_NORTH_UP = true;
 
 // --- Fire spread (Rothermel surface fire model, see rothermel.h) ---
-// Simulated time per frame. With 30 m cells, DRONE_SPEED (5.5 cells per tick) is then 16.5 m/s, a realistic
-// survey-drone speed, so fire and drones move at the right speeds relative to each other.
+// Simulated time per frame (10 s). With DRONE_SPEED_MPS below, drones fly 16.5 m/s, a realistic survey-drone
+// speed, so fire and drones move at the right speeds relative to each other.
 constexpr float SIM_MINUTES_PER_TICK = 10.0f / 60.0f;
 // Fuel model for cells with no fuel map (synthetic terrain, tests): GR2, low load dry climate grass
 constexpr int DEFAULT_FUEL_MODEL = 102;
@@ -43,20 +49,24 @@ constexpr int ROAD_CLASS_MIN = 20;
 constexpr int ROAD_CLASS_MAX = 23;
 
 // --- Drone survey configuration ---
-constexpr int SEARCH_DISTANCE = 70;       // Search area extends this many cells from the fire
-constexpr int MIN_FIRE_DISTANCE = 10;      // Survey standoff: sweeps and points of interest stay this far from the fire
-constexpr int HARD_MIN_FIRE_DISTANCE = 3; // Absolute limit: flight legs may cut inside the standoff down to this
+// Distances are set in metres and converted to cells (cellsFromMetres), so they keep their meaning on the
+// ground if the cell size changes. The values are the original 30 m-cell settings (e.g. 70 cells x 30 m).
+constexpr int SEARCH_DISTANCE = cellsFromMetres(2100.0f);       // Search area extends 2.1 km from the fire
+constexpr int MIN_FIRE_DISTANCE = cellsFromMetres(300.0f);      // Survey standoff: sweeps and points of interest stay 300 m from the fire
+constexpr int HARD_MIN_FIRE_DISTANCE = cellsFromMetres(90.0f);  // Absolute limit: flight legs may cut inside the standoff down to 90 m
 constexpr double NO_FLY_SQ = (MIN_FIRE_DISTANCE + 0.5) * (MIN_FIRE_DISTANCE + 0.5);           // squared, half-cell margin
 constexpr double HARD_NO_FLY_SQ = (HARD_MIN_FIRE_DISTANCE + 0.5) * (HARD_MIN_FIRE_DISTANCE + 0.5);
-constexpr int PERIMETER_UPDATE_DISTANCE = 20;  // A perimeter section moves only once the fire is this close to it
-constexpr int PERIMETER_SECTION_RADIUS = 10;  // How far along the front one update reaches (cells)
+constexpr int PERIMETER_UPDATE_DISTANCE = cellsFromMetres(600.0f); // A perimeter section moves only once the fire is 600 m from it
+constexpr int PERIMETER_SECTION_RADIUS = cellsFromMetres(300.0f);  // How far along the front one update reaches (300 m)
 constexpr int SWEEP_DRONES = 3;           // Boustrophedon drones (inside the perimeter)
 constexpr int ACO_DRONES = 5;             // ACO-routed drones (perimeter out to SEARCH_DISTANCE)
-constexpr float SENSOR_RADIUS = 2.0f;     // Cells; swath width = 2 * radius
+constexpr float SENSOR_RADIUS = 60.0f / SIM_CELL_SIZE_M;   // Cells; 60 m, so the swath is 120 m wide
 constexpr int LANE_SPACING = static_cast<int>(2.0f * SENSOR_RADIUS);
-constexpr float DRONE_SPEED = 5.5f;       // Cells per tick
+constexpr float DRONE_SPEED_MPS = 16.5f;  // Drone ground speed, m/s
+constexpr float DRONE_SPEED = DRONE_SPEED_MPS * SIM_MINUTES_PER_TICK * 60.0f / SIM_CELL_SIZE_M;   // Cells per tick
 constexpr int REPLAN_INTERVAL = 60;       // Minimum frames between re-plans as the fire grows
-constexpr int TARGET_REGION_CELLS = 450;  // Voronoi region size target (~21 x 21 cells)
+// Voronoi region size target: 630 m x 630 m (was 450 cells of 30 m, ~21 x 21 cells)
+constexpr int TARGET_REGION_CELLS = static_cast<int>(405000.0f / (SIM_CELL_SIZE_M * SIM_CELL_SIZE_M) + 0.5f);
 constexpr int MIN_SITES = 4;
 constexpr int MAX_SITES = 64;
 constexpr int LLOYD_ITERATIONS = 4;       // Relaxation passes so regions are evenly sized

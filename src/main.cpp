@@ -18,7 +18,7 @@
 // Main Application Entry Point
 //
 // Integrates simulation components:
-// 1. LANDFIRE GeoTIFF ingestion (elevation, slope, FBFM40 fuel models, roads)
+// 1. GeoTIFF ingestion: USGS 1 m DEM tiles (terrain) and LANDFIRE (fuel models, canopy, roads)
 // 2. Rothermel surface fire spread on the cell grid
 // 3. Distance Field Computation (Dynamic No-Fly Zones)
 // 4. Fire Perimeter Tracking & Containment Boundaries
@@ -26,9 +26,11 @@
 // 6. Real-time Visualization & User Event Processing (SFML)
 //
 // Usage:  wildfire [--data <folder>] [--centre <lon> <lat>]
-//   --data    folder holding the LANDFIRE .tif files (searched recursively). Default: ./landfire, then the
-//             working folder itself (files such as LF2020_Elev_CONUS.tif placed in the repo root)
-//   --centre  WGS84 longitude/latitude of the simulation window centre, default the raster centre
+//   --data    folder holding the LANDFIRE .tif files and the USGS 1 m DEM tiles (searched recursively).
+//             Default: ./landfire, then the working folder itself (files such as LF2020_Elev_CONUS.tif placed
+//             in the repo root); DEM tiles (USGS_1M_*.tif) are also looked for in ./dem
+//   --centre  WGS84 longitude/latitude of the simulation window centre, default the centre of the DEM tiles
+//             (or of the LANDFIRE raster without them)
 // Without LANDFIRE data it falls back to elevation_map.tif (+ optional fuel_map.tif) in the working folder.
 // ============================================================================
 
@@ -100,6 +102,13 @@ int main(int argc, char** argv) {
     else {
         paths = findLandfireLayers("landfire", true);
         if (!paths.any()) paths = findLandfireLayers(".", false);
+    }
+    // The USGS 1 m DEM tiles may sit apart from the LANDFIRE layers: also look in a dem/ folder and loose in
+    // the working folder (they are git-ignored there too)
+    if (paths.demTiles.empty() && dataDir.empty()) {
+        paths.demTiles = findDemTiles("dem", true);
+        if (paths.demTiles.empty()) paths.demTiles = findDemTiles(".", false);
+        if (!paths.demTiles.empty()) std::cout << "1 m DEM tiles found: " << paths.demTiles.size() << "\n";
     }
     if (!paths.any()) {
         // No LANDFIRE download: the original bundled DEM (and optional fuel map) in the working folder

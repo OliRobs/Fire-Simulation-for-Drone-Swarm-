@@ -25,7 +25,7 @@ inline Vec2 cellCentre(int idx) { return Vec2(idx % GRID_WIDTH + 0.5f, idx / GRI
 
 enum class CellState : std::uint8_t { Unburned, Burning, Burned };
 
-// One 30 m patch of landscape: the LANDFIRE layers for that patch plus its fire state.
+// One 10 m patch of landscape (SIM_CELL_SIZE_M): its terrain and LANDFIRE layers plus its fire state.
 struct Cell {
     float elevation = 0.0f;  // Metres (LANDFIRE Elev)
     float slopeDeg = 0.0f;   // Slope steepness in degrees (LANDFIRE SlpD, or derived from elevation)

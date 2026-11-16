@@ -7,7 +7,8 @@ surveys round the fire. README.md has the module table and input-data notes.
 
 - Full build: `cmake -S . -B build && cmake --build build`, then run `./build/wildfire` from the repo root
   (it loads the LANDFIRE layers from the repo root or `landfire/`, falling back to `elevation_map.tif`).
-- Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 5 seconds.
+- Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about a minute (most of
+  it the end-to-end mission test on the 2000 x 2000 grid).
 - Core and tests only, without SFML or GDAL: add `-DWF_BUILD_APP=OFF`.
 - The owner builds day to day with Visual Studio: `UAVFireMap.vcxproj`, SFML in `C:\SFML-2.6.1`, GDAL in
   `C:\gdal`. The project is x64 only (the SFML and GDAL builds are 64-bit). Debugger settings (working
@@ -25,12 +26,19 @@ surveys round the fire. README.md has the module table and input-data notes.
 - Library layering: only `raster_io` and `terrain` use GDAL; only `renderer` and `main.cpp` use SFML.
   Everything else is in `wf_core`, which must build without either so the tests stay headless.
 - The values in `config.h` (perimeter distances, fire standoffs, drone counts, speeds) are design decisions.
-  Ask before changing them.
-- Input data is LANDFIRE (US only, EPSG:5070 Albers, 30 m): elevation, slope (degrees), FBFM40 fuel models,
-  operational roads and the canopy layers CC (%), CH (m x 10), CBH (m x 10), CBD (kg/m3 x 100). Files are found by
-  name in `--data`, else `landfire/`, else loose in the working folder (the repo root). The elevation layer's extent and centre define the simulation
-  grid: a GRID_WIDTH x GRID_HEIGHT window of 30 m cells laid out north-up in the local UTM zone (`ALIGN_NORTH_UP`;
-  the Albers grid is rotated ~13 deg in California). Every layer is warped onto it (fuel Mode, roads Max).
+  Ask before changing them. Distances and speeds are set in metres and converted with `cellsFromMetres`, so
+  changing SIM_CELL_SIZE_M keeps their ground values.
+- Terrain comes from USGS 3DEP 1 m DEM tiles (`USGS_1M_11_x41-42y379-380_*.tif`, UTM zone 11, San Gabriel
+  Mountains). They define the simulation grid: GRID_WIDTH x GRID_HEIGHT = 2000 x 2000 cells of SIM_CELL_SIZE_M =
+  10 m, i.e. exactly the four tiles. Each cell's elevation, slope (mean of the 1 m slopes) and aspect come from the
+  1 m pixels inside it (`aggregateFineTopography`), read in strips so the 1 m data is never all in memory. Do not
+  run the fire on 1 m cells (400 M cells, ~16 GB, and below Rothermel's scale).
+- Other input data is LANDFIRE (US only, EPSG:5070 Albers, 30 m): FBFM40 fuel models, operational roads and the
+  canopy layers CC (%), CH (m x 10), CBH (m x 10), CBD (kg/m3 x 100), plus elevation and slope (degrees), which are
+  used only where there are no DEM tiles. Files are found by name in `--data`, else `landfire/` (DEM tiles also in
+  `dem/`), else loose in the working folder (the repo root). Without DEM tiles the LANDFIRE elevation layer defines
+  the grid, laid out north-up in the local UTM zone (`ALIGN_NORTH_UP`; the Albers grid is rotated ~13 deg in
+  California). Every LANDFIRE layer is warped onto the grid (fuel Mode, roads Max).
   The .tif files are git-ignored. `elevation_map.tif` (UK, EPSG:27700, 5 km) is only the no-data fallback.
 - Fuel rasters hold FBFM40 category codes: look them up through `fuel_models.cpp`, never average or clamp them
   (resample with Mode; roads with Max so thin roads stay continuous).

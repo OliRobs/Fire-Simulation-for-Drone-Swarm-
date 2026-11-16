@@ -130,7 +130,7 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weathe
             dirRos_[static_cast<size_t>(idx) * NUM_DIRS + d] =
                 static_cast<float>(e.rosToward(stepUx[d], stepUy[d]) * FT_PER_MIN_TO_M_PER_MIN);
         }
-        // A 30 m cell is "on fire" while the front crosses it plus the flaming residence time t_r (our
+        // A cell is "on fire" while the front crosses it plus the flaming residence time t_r (our
         // choice for the automaton: the Rothermel flame depth itself is much less than a cell).
         burnDuration_[idx] = static_cast<float>(minCell / headRos_[idx] + bed.residenceTime);
     }

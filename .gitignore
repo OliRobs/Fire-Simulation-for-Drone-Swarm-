@@ -17,3 +17,7 @@ Release/
 # LANDFIRE downloads (~120 MB per layer; see README), in landfire/ or loose in the repo root
 landfire/
 /LF*_CONUS*
+
+# USGS 3DEP 1 m DEM tiles (a few hundred MB each), in dem/, landfire/ or loose in the repo root
+dem/
+/USGS_1M*

@@ -405,6 +405,65 @@ TEST(topography_from_elevation) {
     CHECK(std::fabs(c.upslopeX) < 1e-5f && std::fabs(c.upslopeY + 1.0f) < 1e-5f);
 }
 
+// --- Simulation-cell terrain from a finer (1 m) DEM ---
+namespace {
+    // Fine DEM buffer for cellsX x cellsY cells of `factor` pixels, with the one-pixel halo, filled from
+    // z(px, py) where px, py are pixel columns/rows counted from the halo's top-left corner
+    std::vector<float> fineDem(int cellsX, int cellsY, int factor, const std::function<float(int, int)>& z) {
+        const int w = cellsX * factor + 2, h = cellsY * factor + 2;
+        std::vector<float> buf(static_cast<size_t>(w) * h);
+        for (int py = 0; py < h; ++py)
+            for (int px = 0; px < w; ++px) buf[static_cast<size_t>(py) * w + px] = z(px, py);
+        return buf;
+    }
+}
+
+// A tilted plane: every 1 m pixel has the same slope, so each 10 m cell must report exactly that slope, the
+// plane's uphill direction and the mean elevation of its 100 pixels
+TEST(fine_dem_plane_gives_exact_cell_terrain) {
+    // Rises 0.1 m per metre east and 0.2 m per metre north (rows run south, so -0.2 per row)
+    auto plane = [](int px, int py) { return 500.0f + 0.1f * px - 0.2f * py; };
+    std::vector<CellTopography> out;
+    aggregateFineTopography(fineDem(3, 2, 10, plane), 3, 2, 10, 1.0f, 1.0f, out);
+    CHECK(out.size() == 6);
+    const float expectSlope = static_cast<float>(std::atan(std::sqrt(0.01 + 0.04)) * 57.29577951308232);  // 12.6 deg
+    for (int k = 0; k < 6; ++k) {
+        CHECK(out[k].validPixels == 100);
+        CHECK(std::fabs(out[k].slopeDeg - expectSlope) < 0.01f);
+        CHECK(std::fabs(out[k].upslopeX - 0.4472136f) < 1e-4f && std::fabs(out[k].upslopeY + 0.8944272f) < 1e-4f);
+    }
+    // Cell (1, 1): pixels 11..20 across (in buffer columns, after the halo) and 11..20 down, centre 15.5
+    CHECK(std::fabs(out[4].elevation - plane(0, 0) - 0.1f * 15.5f + 0.2f * 15.5f) < 1e-3f);
+}
+
+// Corrugated ground (1 m ridges and gullies at 45 degrees) averages to a FLAT 10 m surface, but the fire
+// still sees steep slopes: the cell slope must come from the 1 m pixels, not from the smoothed elevations
+TEST(fine_dem_keeps_steep_detail) {
+    auto ridges = [](int px, int) { return 100.0f + std::fabs(static_cast<float>(px % 4) - 2.0f); };
+    std::vector<CellTopography> out;
+    aggregateFineTopography(fineDem(2, 2, 10, ridges), 2, 2, 10, 1.0f, 1.0f, out);
+    // Horn's 3x3 difference gives 45 deg on the sides and 0 on each ridge top and gully floor: 22.5 deg mean
+    for (const CellTopography& t : out) CHECK(std::fabs(t.slopeDeg - 22.5f) < 0.01f);
+
+    // The same ground at 10 m: cell means are nearly equal, so a 10 m slope would be close to flat
+    std::vector<Cell> coarse(N);
+    for (int i = 0; i < N; ++i) coarse[i].elevation = 101.0f;
+    for (int k = 0; k < 4; ++k) coarse[at(k % 2, k / 2)].elevation = out[k].elevation;
+    computeTopography(coarse, 10.0f, 10.0f, false);
+    CHECK(coarse[at(0, 0)].slopeDeg < 5.0f);
+}
+
+// Missing DEM pixels (NoData) are left out of the averages, and a cell with none at all is marked uncovered
+TEST(fine_dem_skips_missing_pixels) {
+    auto flat = [](int px, int) { return px < 11 ? NAN : 250.0f; };   // Left cell (buffer columns 0-10) has no data
+    std::vector<CellTopography> out;
+    aggregateFineTopography(fineDem(2, 1, 10, flat), 2, 1, 10, 1.0f, 1.0f, out);
+    CHECK(out[0].validPixels == 0);
+    CHECK(out[1].validPixels == 100);
+    CHECK(std::fabs(out[1].elevation - 250.0f) < 1e-4f);
+    CHECK(out[1].slopeDeg < 1e-3f);   // A NaN neighbour is replaced by the centre, so no false cliff at the edge
+}
+
 // --- Fire spread on the grid ---
 namespace {
     FireWeather calm() {
