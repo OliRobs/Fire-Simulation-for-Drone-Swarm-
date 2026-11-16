@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include "topography.h"
 
 // The only module that touches GDAL.
 void registerRasterDrivers();
@@ -52,3 +53,21 @@ enum class Resample {
 // Cells with no source data (outside the file, or NoData) come back as NaN.
 // Returns false if the file can't be read or doesn't overlap the grid at all.
 bool loadRaster(const char* filePath, const RasterGrid& grid, Resample method, std::vector<float>& outData);
+
+// ----------------------------------------------------------------------------
+// High-resolution DEM (USGS 3DEP 1 m tiles)
+// ----------------------------------------------------------------------------
+
+// Joins several DEM tiles into one virtual raster (a GDAL VRT kept in memory at vrtPath, e.g.
+// "/vsimem/dem.vrt"), so the four 10 km tiles can be read as one 20 km DEM. The tiles must share a coordinate
+// system (USGS 1 m tiles in one UTM zone do). False if none of them can be opened.
+bool buildMosaic(const std::vector<std::string>& tiles, const std::string& vrtPath);
+
+// Works out the terrain of every grid cell from the DEM at its FULL resolution (1 m), via
+// aggregateFineTopography: mean elevation, mean of the 1 m slopes, and the overall uphill direction.
+// The DEM is read in strips of cell rows, so the 400 million pixels of four 1 m tiles never sit in memory at
+// once (each strip is ~40 MB). The grid must be in the DEM's projected coordinate system (metres);
+// loadTerrain builds it that way. Cells outside the DEM come back with validPixels = 0.
+// finePixelM returns the pixel size used (the DEM's, adjusted so a whole number fits in a cell).
+bool loadFineTopography(const char* demPath, const RasterGrid& grid, std::vector<CellTopography>& out,
+                        double& finePixelM);

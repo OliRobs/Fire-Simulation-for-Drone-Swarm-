@@ -23,9 +23,16 @@ struct LandscapePaths {
     std::string canopyHeight;     // LF20xx_CH  : metres x 10
     std::string canopyBaseHeight; // LF20xx_CBH : metres x 10
     std::string canopyBulkDensity;// LF20xx_CBD : kg/m^3 x 100
+    // High-resolution DEM tiles (USGS 3DEP 1 m, USGS_1M_<zone>_x<..>y<..>_*.tif). When present they replace
+    // LANDFIRE's 30 m elevation and slope: they set the simulation grid, and the elevation, slope and aspect
+    // of each cell are worked out from the 1 m pixels inside it.
+    std::vector<std::string> demTiles;
 
-    bool any() const { return !elevation.empty() || !fuel.empty(); }
+    bool any() const { return !elevation.empty() || !fuel.empty() || !demTiles.empty(); }
 };
+
+// Finds USGS 1 m DEM tiles (file names containing "USGS_1M", any case) in `dir`, sorted by name.
+std::vector<std::string> findDemTiles(const std::string& dir, bool recursive = true);
 
 // Searches `dir` for the layers by name (LFxxxx_<Layer>_CONUS.tif), so any LANDFIRE version year works.
 // recursive: also look in sub-folders (the unzipped LANDFIRE download folders). Prints what it found.
@@ -37,7 +44,10 @@ struct WindowRequest {
     double lon = 0.0, lat = 0.0;  // WGS84 degrees
 };
 
-// Builds the grid from the GeoTIFFs. The elevation layer defines the coordinate system.
+// Builds the grid from the GeoTIFFs. With 1 m DEM tiles, the tiles define the grid: a GRID_WIDTH x
+// GRID_HEIGHT window of SIM_CELL_SIZE_M cells in the tiles' UTM zone, centred on the tiles (or --centre), and
+// each cell's elevation, slope and aspect come from the 1 m pixels inside it (aggregateFineTopography).
+// Without tiles, the LANDFIRE elevation layer defines the coordinate system as below.
 // Canopy layers are converted from LANDFIRE's stored integers to real units (RMRS-GTR-220: CBH is metres x 10,
 // CBD is kg/m^3 x 100; LANDFIRE product pages: CH is metres x 10). If it is larger than
 // GRID_WIDTH x GRID_HEIGHT cells of SIM_CELL_SIZE_M (LANDFIRE is), a window of that size is cut out at native

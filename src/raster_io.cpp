@@ -74,6 +74,16 @@ bool readRasterGrid(const char* filePath, int width, int height, RasterGrid& out
     out.wkt = wktOf(ds.h);
     const OGRSpatialReference* srs = GDALDataset::FromHandle(ds.h)->GetSpatialRef();
     out.projected = srs && srs->IsProjected();
+    // USGS DEMs carry a compound coordinate system (UTM + NAVD88 heights). Keep only the horizontal part:
+    // the grid is a 2D layout, and a vertical CRS in the warp target can trigger height conversions.
+    if (srs && srs->IsCompound()) {
+        OGRSpatialReference horizontal(*srs);
+        horizontal.StripVertical();
+        char* wkt = nullptr;
+        horizontal.exportToWkt(&wkt);
+        out.wkt = wkt ? wkt : "";
+        CPLFree(wkt);
+    }
     out.width = width;
     out.height = height;
     out.originX = gt[0];
@@ -275,5 +285,151 @@ bool loadRaster(const char* filePath, const RasterGrid& grid, Resample method, s
     }
 
     std::cout << "[GDAL] Loaded " << filePath << "\n";
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Mosaic of DEM tiles
+// ----------------------------------------------------------------------------
+bool buildMosaic(const std::vector<std::string>& tiles, const std::string& vrtPath) {
+    if (tiles.empty()) return false;
+    std::vector<const char*> names;
+    for (const std::string& t : tiles) names.push_back(t.c_str());
+
+    // gdalbuildvrt equivalent. Where tiles overlap (USGS tiles have a few metres of buffer) the values are
+    // the same, so it doesn't matter which tile is read.
+    int usageError = 0;
+    Dataset vrt(GDALBuildVRT(vrtPath.c_str(), static_cast<int>(names.size()), nullptr, names.data(), nullptr,
+                             &usageError));
+    if (!vrt.h) {
+        std::cerr << "[GDAL] Could not join the DEM tiles into one mosaic (different coordinate systems?)\n";
+        return false;
+    }
+    std::cout << "[GDAL] DEM mosaic of " << tiles.size() << " tile(s): " << GDALGetRasterXSize(vrt.h) << " x "
+              << GDALGetRasterYSize(vrt.h) << " pixels\n";
+    return true;   // Closing the handle writes the VRT to vrtPath, ready to be opened again
+}
+
+// ----------------------------------------------------------------------------
+// Grid-cell terrain from the full-resolution DEM
+// ----------------------------------------------------------------------------
+bool loadFineTopography(const char* demPath, const RasterGrid& grid, std::vector<CellTopography>& out,
+                        double& finePixelM) {
+    Dataset ds(GDALOpen(demPath, GA_ReadOnly));
+    if (!ds.h) {
+        std::cerr << "[GDAL] Could not open " << demPath << "\n";
+        return false;
+    }
+    double gt[6];
+    if (GDALGetGeoTransform(ds.h, gt) != CE_None || gt[2] != 0.0 || gt[4] != 0.0) {
+        std::cerr << "[GDAL] " << demPath << " has no north-up georeferencing\n";
+        return false;
+    }
+    GDALRasterBandH band = GDALGetRasterBand(ds.h, 1);
+    const int rasterW = GDALGetRasterXSize(ds.h), rasterH = GDALGetRasterYSize(ds.h);
+    int hasNoData = 0;
+    const double noData = GDALGetRasterNoDataValue(band, &hasNoData);
+
+    // --- Fine pixel size: the DEM's, nudged so a whole number of pixels fits in one cell ---
+    // (1 m DEM, 10 m cells: exactly 10 x 10 pixels per cell, read 1:1 with no resampling)
+    const double cell = grid.cellSizeX();
+    const double demPixel = std::fabs(gt[1]);
+    const int factor = std::max(1, static_cast<int>(std::lround(cell / demPixel)));
+    finePixelM = cell / factor;
+
+    // Source pixel coordinates of the buffer's top-left corner (the buffer has a one-pixel halo)
+    const double colStart = (grid.minX - finePixelM - gt[0]) / gt[1];
+    const double scale = finePixelM / demPixel;          // Source pixels per buffer pixel (1.0 for 1 m)
+    const bool oneToOne = std::fabs(scale - 1.0) < 1e-6
+        && std::fabs(colStart - std::round(colStart)) < 1e-3
+        && std::fabs((gt[3] - grid.maxY - finePixelM) / std::fabs(gt[5])
+                     - std::round((gt[3] - grid.maxY - finePixelM) / std::fabs(gt[5]))) < 1e-3;
+
+    // Reads buffer pixels [i0, i1) x [j0, j1) of the strip whose first buffer row starts at source row
+    // rowStart, into the right place in `buf` (width bufW). Parts outside the raster stay NaN.
+    auto readPart = [&](double rowStart, int bufW, int bufH, std::vector<float>& buf) -> bool {
+        // Which buffer pixels fall inside the raster (each buffer pixel spans `scale` source pixels)
+        const int i0 = std::max(0, static_cast<int>(std::ceil(-colStart / scale - 1e-9)));
+        const int i1 = std::min(bufW, static_cast<int>(std::floor((rasterW - colStart) / scale + 1e-9)));
+        const int j0 = std::max(0, static_cast<int>(std::ceil(-rowStart / scale - 1e-9)));
+        const int j1 = std::min(bufH, static_cast<int>(std::floor((rasterH - rowStart) / scale + 1e-9)));
+        if (i1 <= i0 || j1 <= j0) return true;           // Strip entirely outside the DEM
+        const int partW = i1 - i0, partH = j1 - j0;
+        std::vector<float> part(static_cast<size_t>(partW) * partH);
+
+        // Source window for that part. 1:1 reads are plain copies; otherwise GDAL resamples bilinearly from a
+        // floating-point window, so cells still line up with the ground exactly.
+        const double dfX = colStart + i0 * scale, dfY = rowStart + j0 * scale;
+        const double dfW = partW * scale, dfH = partH * scale;
+        GDALRasterIOExtraArg arg;
+        INIT_RASTERIO_EXTRA_ARG(arg);
+        int nX = static_cast<int>(std::lround(dfX)), nY = static_cast<int>(std::lround(dfY));
+        int nW = partW, nH = partH;
+        if (!oneToOne) {
+            arg.eResampleAlg = GRIORA_Bilinear;
+            arg.bFloatingPointWindowValidity = TRUE;
+            arg.dfXOff = dfX; arg.dfYOff = dfY; arg.dfXSize = dfW; arg.dfYSize = dfH;
+            nX = static_cast<int>(std::floor(dfX));
+            nY = static_cast<int>(std::floor(dfY));
+            nW = std::min(rasterW, static_cast<int>(std::ceil(dfX + dfW - 1e-9))) - nX;
+            nH = std::min(rasterH, static_cast<int>(std::ceil(dfY + dfH - 1e-9))) - nY;
+        }
+        nX = std::clamp(nX, 0, rasterW - 1);
+        nY = std::clamp(nY, 0, rasterH - 1);
+        nW = std::clamp(nW, 1, rasterW - nX);
+        nH = std::clamp(nH, 1, rasterH - nY);
+        if (GDALRasterIOEx(band, GF_Read, nX, nY, nW, nH, part.data(), partW, partH, GDT_Float32, 0, 0, &arg)
+            != CE_None) {
+            return false;
+        }
+        // Copy into the strip buffer, turning NoData into NaN
+        for (int j = 0; j < partH; ++j) {
+            for (int i = 0; i < partW; ++i) {
+                float v = part[static_cast<size_t>(j) * partW + i];
+                if ((hasNoData && v == static_cast<float>(noData)) || v <= -9000.0f) v = NAN;
+                buf[static_cast<size_t>(j0 + j) * bufW + (i0 + i)] = v;
+            }
+        }
+        return true;
+    };
+
+    // --- Read strip by strip and summarise each strip's cells ---
+    constexpr int STRIP_CELL_ROWS = 50;                  // 50 cell rows: (2000 x 10 + 2) x 502 floats = 40 MB
+    const int bufW = grid.width * factor + 2;
+    out.assign(static_cast<size_t>(grid.width) * grid.height, CellTopography{});
+    std::vector<float> buf;
+    std::vector<CellTopography> stripOut;
+    int lastReported = -1;
+    for (int r0 = 0; r0 < grid.height; r0 += STRIP_CELL_ROWS) {
+        const int rows = std::min(STRIP_CELL_ROWS, grid.height - r0);
+        const int bufH = rows * factor + 2;
+        buf.assign(static_cast<size_t>(bufW) * bufH, NAN);
+        // Source row of the strip's first buffer row (the halo row just above cell row r0)
+        const double rowStart = (gt[3] - (grid.maxY - r0 * cell + finePixelM)) / std::fabs(gt[5]);
+        if (!readPart(rowStart, bufW, bufH, buf)) {
+            std::cerr << "[GDAL] Could not read " << demPath << "\n";
+            return false;
+        }
+        aggregateFineTopography(buf, grid.width, rows, factor, static_cast<float>(finePixelM),
+                                static_cast<float>(finePixelM), stripOut);
+        std::copy(stripOut.begin(), stripOut.end(), out.begin() + static_cast<size_t>(r0) * grid.width);
+
+        // Progress: four 1 m tiles are 400 million pixels, so this takes a little while
+        const int pct = 100 * (r0 + rows) / grid.height;
+        if (pct / 10 != lastReported) {
+            lastReported = pct / 10;
+            std::cout << "\r[GDAL] Reading the DEM at " << finePixelM << " m: " << pct << "%" << std::flush;
+        }
+    }
+    std::cout << "\n";
+
+    size_t covered = 0;
+    for (const CellTopography& t : out) covered += t.validPixels > 0 ? 1 : 0;
+    if (covered == 0) {
+        std::cerr << "[GDAL] " << demPath << " does not overlap the simulation grid\n";
+        return false;
+    }
+    std::cout << "[GDAL] DEM covers " << (100.0 * covered / out.size()) << "% of the grid, " << factor << " x "
+              << factor << " pixels per cell\n";
     return true;
 }

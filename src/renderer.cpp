@@ -318,12 +318,12 @@ bool Renderer::handleViewEvent(const sf::Event& event) {
 }
 
 // ----------------------------------------------------------------------------
-// Frame the fire: fit the bounding box of the mask, with 10 cells of margin
+// Frame the fire: fit the bounding box of the mask, with 300 m of margin (30 cells of 10 m)
 // ----------------------------------------------------------------------------
 void Renderer::frameMask(const std::vector<std::uint8_t>& mask) {
     int x0, y0, x1, y1;
     if (!maskBounds(mask, GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1)) return;   // No fire yet
     const float cs = static_cast<float>(CELL_SIZE);
-    view_.frame(x0 * cs, y0 * cs, (x1 + 1) * cs, (y1 + 1) * cs, 10.0f * cs);
+    view_.frame(x0 * cs, y0 * cs, (x1 + 1) * cs, (y1 + 1) * cs, cellsFromMetres(300.0f) * cs);
     applyView();
 }

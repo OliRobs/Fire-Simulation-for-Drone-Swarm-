@@ -19,4 +19,5 @@ private:
     int w_, h_;
     std::vector<double> sq_, f_, d_, z_;
     std::vector<int> v_;
+    std::vector<int> lastSource_;   // Pass 1 scratch: row of the nearest source so far in each column
 };

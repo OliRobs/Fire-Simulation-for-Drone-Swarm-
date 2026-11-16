@@ -1,7 +1,8 @@
 # Wildfire simulator
 
-Wildfire spread on real terrain using Rothermel's surface fire spread model, driven by LANDFIRE data
-(elevation, slope, Scott & Burgan 40 fuel models, operational roads). A drone swarm surveys round the fire:
+Wildfire spread on real terrain using Rothermel's surface fire spread model, driven by USGS 1 m lidar
+elevation (terrain) and LANDFIRE data (Scott & Burgan 40 fuel models, canopy, operational roads). The fire runs on
+10 m cells over a 20 km x 20 km area. A drone swarm surveys round the fire:
 boustrophedon sweeps inside the perimeter and an ant-colony-optimised tour outside it, both kept clear of
 the fire.
 
@@ -10,8 +11,8 @@ the fire.
 Needs CMake 3.16+, **SFML 2.5 – 2.6** (not SFML 3, the API changed) and GDAL 3.x.
 
     cmake -S . -B build && cmake --build build
-    ./build/wildfire        # run from the repo root (reads the LANDFIRE .tif files there or in ./landfire)
-    ./build/wildfire --data D:/gis/landfire --centre -118.07 34.29   # another folder / window centre
+    ./build/wildfire        # run from the repo root (reads the .tif files there, in ./landfire or ./dem)
+    ./build/wildfire --data D:/gis/landfire --centre -117.87 34.25   # another folder / window centre
     ./build/wf_tests        # headless tests
 
 To build just the simulation core and the tests, without SFML or GDAL:
@@ -30,7 +31,7 @@ Controls:
 | Input | Action |
 |---|---|
 | Left-click | Ignite a cell |
-| Mouse wheel | Zoom in/out about the cursor (up to 50x, 10 cells across) |
+| Mouse wheel | Zoom in/out about the cursor (up to 200x, 10 cells = 100 m across) |
 | Right- or middle-drag | Pan |
 | `+` / `-`, arrow keys | Zoom about the centre / pan |
 | `F` | Zoom to fit the fire (burning and burned cells) |
@@ -41,22 +42,49 @@ Controls:
 Cell grid lines appear once cells are about 8 pixels or more on screen. The title bar shows simulated time
 (one frame = 10 s) and the zoom.
 
-## Input data (LANDFIRE)
+## Input data (USGS 1 m DEM + LANDFIRE)
 
-Put the LANDFIRE `.tif` files either loose in the repo root (the working folder when run from Visual Studio
-or as `./build/wildfire`) or in a `landfire/` folder (sub-folders are searched), or pass `--data <folder>`.
-Layers are recognised by name, so any LANDFIRE version year works:
+Put the `.tif` files either loose in the repo root (the working folder when run from Visual Studio or as
+`./build/wildfire`) or in a `landfire/` folder (sub-folders are searched), or pass `--data <folder>`. The DEM
+tiles can also go in a `dem/` folder. Layers are recognised by name, so any LANDFIRE version year works:
 
+    USGS_1M_11_x41y379_*.tif  USGS_1M_11_x41y380_*.tif  USGS_1M_11_x42y379_*.tif  USGS_1M_11_x42y380_*.tif
     LF2020_Elev_CONUS.tif   LF2020_SlpD_CONUS.tif   LF2025_FBFM40_CONUS.tif   LF2023_Roads_CONUS.tif
     LF2025_CC_CONUS.tif     LF2025_CH_CONUS.tif     LF2025_CBH_CONUS.tif      LF2025_CBD_CONUS.tif
 
-The `.tif` files are git-ignored (about 120 MB each, too big for GitHub). The startup log lists which layers
-were found.
+The `.tif` files are git-ignored (LANDFIRE ~120 MB per layer, DEM tiles a few hundred MB each, too big for
+GitHub). The startup log lists which layers were found.
+
+### Terrain: USGS 3DEP 1 m DEM tiles
+
+The four tiles x41-42 y379-380 (UTM zone 11, NAD83) cover easting 410-430 km, northing 3780-3800 km: about
+34.157-34.339 N, 117.978-117.759 W, in the San Gabriel Mountains. The tile name gives its north-west corner in
+10 km units (USGS tiles also carry a few metres of overlap buffer).
+
+When tiles are found they replace LANDFIRE's 30 m elevation and slope:
+
+- **Grid.** The tiles are joined into one mosaic (an in-memory GDAL VRT) and the simulation grid is a
+  GRID_WIDTH x GRID_HEIGHT window of 10 m cells cut from it in its UTM zone (already north-up), centred on the
+  tiles: 2000 x 2000 cells = exactly the four tiles. `--centre` moves the window.
+- **Terrain per cell.** Slope is worked out on every 1 m pixel (Horn's method) and averaged into the cell, so a
+  cell crossing a gully or steep bank keeps that steepness (slope from 10 m averaged elevations would smooth it
+  away, and Rothermel's slope factor grows with tan^2 of the slope). Elevation is the mean of the 100 pixels; the
+  upslope direction (aspect) is that of the mean gradient. See `aggregateFineTopography` in `topography.cpp`.
+- **Memory.** The 400 million pixels are read in strips of 50 cell rows (~40 MB each), never all at once.
+  Loading takes roughly 20 s.
+- **Why not 1 m cells?** 400 million cells would need ~16 GB and tiny time steps, and 1 m is below the scale the
+  Rothermel model is meant for (a uniform fuel bed); the LANDFIRE fuel data is 30 m anyway.
+- Cells the tiles don't cover (only if the window is moved off them) fall back to the LANDFIRE elevation and slope.
+
+The LANDFIRE layers are warped onto the same 10 m cells: fuel by most common value, roads by max, canopy by
+average. They are still 30 m data, so each 30 m pixel fills about 3 x 3 cells. The LANDFIRE download must cover
+the tiles (check its GeoJSON footprint).
 
 | Layer | Used for | Notes |
 |---|---|---|
-| Elevation (`_Elev_`, m) | Simulation grid, background shading, **aspect** (which way is uphill) | The download is 30 m pixels over ~264 x 207 km, so a window of GRID_WIDTH x GRID_HEIGHT cells (500 x 30 m = 15 km) is cut out, centred on the raster centre or on `--centre <lon> <lat>`. |
-| Slope (`_SlpD_`, degrees) | Rothermel slope factor | Missing cells (or a missing layer) fall back to slope computed from the elevation. |
+| 1 m DEM tiles (`USGS_1M_`, m) | Simulation grid, elevation, slope and aspect | See above. Takes priority over the LANDFIRE elevation and slope. |
+| Elevation (`_Elev_`, m) | Without DEM tiles: simulation grid, background shading, **aspect** (which way is uphill) | The download is 30 m pixels over ~264 x 207 km, so a window of GRID_WIDTH x GRID_HEIGHT cells (2000 x 10 m = 20 km) is cut out, centred on the raster centre or on `--centre <lon> <lat>`. Not read when the DEM tiles cover the whole window. |
+| Slope (`_SlpD_`, degrees) | Without DEM tiles: Rothermel slope factor | Missing cells (or a missing layer) fall back to slope computed from the elevation. |
 | FBFM40 (`FBFM40`) | Fuel model per cell | Scott & Burgan model numbers, looked up in `fuel_models.cpp` (Table 7 of RMRS-GTR-153). 91-99 (urban, water, agriculture, bare...) and NoData don't burn. |
 | Roads (`_Roads_`) | Fuel breaks (not drawn unless `R` is pressed) | Classes 20 primary, 21 secondary, 22 tertiary, 23 thinned. Road cells don't burn (`ROADS_ARE_FUEL_BREAKS`); diagonal road lines hold too. |
 | Canopy cover (`_CC_`, %) | Wind sheltering | With canopy height and base height gives the crown fill portion, which sets the sheltered wind adjustment factor (Andrews 2012). |
@@ -126,19 +154,20 @@ These are fixed placeholder values in `config.h` / `FireWeather` for now:
 | **Wind speed** at 20 ft | 20 km/h | RAWS observations or a forecast (NWS / HRRR). Decides whether crown fire becomes active. |
 | **Wind direction** | from 225 deg (SW) | As above. Real wind is bent by terrain: a gridded wind (e.g. WindNinja run on the LANDFIRE DEM) would replace the single value. |
 
-Aspect is not needed as a separate layer: it is computed from the elevation (Horn's method, `topography.cpp`).
+Aspect is not needed as a separate layer: it is computed from the elevation (Horn's method, `topography.cpp`),
+from the 1 m DEM when the tiles are present.
 
 ## Layout (src/)
 
 | Module | Responsibility |
 |---|---|
 | config.h, types.h | constants, neighbour tables, Vec2, Cell |
-| raster_io, terrain | GDAL loading: finds the LANDFIRE layers, cuts a north-up UTM window, warps every layer onto it (only code using GDAL) |
+| raster_io, terrain | GDAL loading: finds the DEM tiles and LANDFIRE layers, cuts the window, reads the 1 m DEM in strips, warps every layer onto the grid (only code using GDAL) |
 | viewport | Zoom and pan maths (headless, tested); the renderer turns it into an sf::View |
 | fuel_models | The 40 Scott & Burgan fuel models (Table 7 of RMRS-GTR-153), looked up by FBFM40 code |
 | rothermel | Rothermel surface spread: fuel bed, wind and slope factors, wind adjustment (open and under canopy), head fire direction and ellipse |
 | crown_fire | Van Wagner torching threshold, active crown fire threshold, fireline intensity and flame length |
-| topography | slope and aspect (upslope direction) from the DEM |
+| topography | slope and aspect (upslope direction) from the DEM; 10 m cell terrain from 1 m pixels |
 | fire_model | FireSimulation: per-cell Rothermel rates, fire arrival times in time order |
 | distance_transform | exact Euclidean distance transform |
 | perimeter | committed fire + sectional perimeter updates |
@@ -153,13 +182,20 @@ Library layering: wf_core (everything except GDAL/SFML) <- wf_io (GDAL), wf_rend
 
 ## Key settings (config.h)
 
+The grid is GRID_WIDTH x GRID_HEIGHT = 2000 x 2000 cells of SIM_CELL_SIZE_M = 10 m. The drone and perimeter
+distances are set in metres and converted to cells with `cellsFromMetres`, so they keep the same ground
+distances they had on the original 30 m cells:
+
 | Setting | Value | Meaning |
 |---|---|---|
-| PERIMETER_DISTANCE | 40 cells | Perimeter ring distance from the committed fire |
-| PERIMETER_UPDATE_DISTANCE | 20 cells | A perimeter section moves once the fire gets this close to it |
-| MIN_FIRE_DISTANCE | 10 cells | Survey standoff for sweeps and points of interest |
-| HARD_MIN_FIRE_DISTANCE | 3 cells | Flight legs may cut inside the standoff, but never closer than this |
-| SEARCH_DISTANCE | 70 cells | Outer edge of the ACO search area |
+| PERIMETER_DISTANCE | 1200 m (120 cells) | Perimeter ring distance from the committed fire |
+| PERIMETER_UPDATE_DISTANCE | 600 m (60 cells) | A perimeter section moves once the fire gets this close to it |
+| MIN_FIRE_DISTANCE | 300 m (30 cells) | Survey standoff for sweeps and points of interest |
+| HARD_MIN_FIRE_DISTANCE | 90 m (9 cells) | Flight legs may cut inside the standoff, but never closer than this |
+| SEARCH_DISTANCE | 2100 m (210 cells) | Outer edge of the ACO search area |
+| SENSOR_RADIUS | 60 m (6 cells) | Sensor swath half-width |
+| DRONE_SPEED_MPS | 16.5 m/s (16.5 cells per 10 s tick) | Drone ground speed |
+| TARGET_REGION_CELLS | 630 x 630 m (4050 cells) | Voronoi region size target |
 
 ## Drone safety
 
