@@ -169,7 +169,7 @@ from the 1 m DEM when the tiles are present.
 | crown_fire | Van Wagner torching threshold, active crown fire threshold, fireline intensity and flame length |
 | topography | slope and aspect (upslope direction) from the DEM; 10 m cell terrain from 1 m pixels |
 | fire_model | FireSimulation: per-cell Rothermel rates, fire arrival times in time order |
-| distance_transform | exact Euclidean distance transform |
+| distance_transform | exact Euclidean distance transform; optionally range-limited to a window round the fire so the per-frame cost follows the fire size |
 | perimeter | committed fire + sectional perimeter updates |
 | safe_planner | fire-safe legs: line of sight, A*, string pulling; reports "no safe path" instead of guessing |
 | voronoi, boustrophedon, aco | the three planning algorithms |

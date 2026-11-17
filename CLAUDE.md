@@ -7,7 +7,7 @@ surveys round the fire. README.md has the module table and input-data notes.
 
 - Full build: `cmake -S . -B build && cmake --build build`, then run `./build/wildfire` from the repo root
   (it loads the LANDFIRE layers from the repo root or `landfire/`, falling back to `elevation_map.tif`).
-- Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about a minute (most of
+- Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 25 s (most of
   it the end-to-end mission test on the 2000 x 2000 grid).
 - Core and tests only, without SFML or GDAL: add `-DWF_BUILD_APP=OFF`.
 - The owner builds day to day with Visual Studio: `UAVFireMap.vcxproj`, SFML in `C:\SFML-2.6.1`, GDAL in

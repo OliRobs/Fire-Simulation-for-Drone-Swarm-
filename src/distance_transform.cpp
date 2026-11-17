@@ -8,9 +8,10 @@
 // Implements the linear-time O(N) separable algorithm by Felzenszwalb & Huttenlocher.
 // ============================================================================
 
-// Constructor: Initializes grid dimensions and pre-allocates workspace buffers
-DistanceTransform::DistanceTransform(int w, int h)
-    : w_(w), h_(h), sq_(static_cast<size_t>(w)* h) {
+// Constructor: Initializes grid dimensions and pre-allocates workspace buffers. Every cell starts "very far"
+// (INF), so with a range limit the cells never inside a window read correctly without being written.
+DistanceTransform::DistanceTransform(int w, int h, int maxDistance)
+    : w_(w), h_(h), maxDistance_(maxDistance), sq_(static_cast<size_t>(w) * h, INF) {
     const int m = std::max(w, h);
     // Allocate 1D buffers used by the 1D EDT pass (sized to max dimension m)
     f_.resize(m); d_.resize(m); v_.resize(m); z_.resize(m + 1);
@@ -21,25 +22,61 @@ DistanceTransform::DistanceTransform(int w, int h)
 // ----------------------------------------------------------------------------
 // Inputs a binary mask (`sources`), where non-zero indicates a target/obstacle cell (distance = 0).
 // Populates internal `sq_` vector with squared Euclidean distance to the nearest source cell.
+// With a range limit (maxDistance_ > 0) only a window round the sources is worked out; see the header.
 void DistanceTransform::compute(const std::vector<std::uint8_t>& sources) {
+    // --- Pass 0: choose the window of cells to work out ---
+    Window win{ 0, 0, w_, h_ };   // No range limit: the whole grid
+    if (maxDistance_ > 0) {
+        // Bounding box of the sources. A row with no source is skipped with one std::find over its bytes.
+        int bx0 = w_, by0 = h_, bx1 = -1, by1 = -1;
+        for (int y = 0; y < h_; ++y) {
+            const std::uint8_t* row = sources.data() + static_cast<size_t>(y) * w_;
+            const std::uint8_t* first = std::find_if(row, row + w_, [](std::uint8_t v) { return v != 0; });
+            if (first == row + w_) continue;
+            const std::uint8_t* last = row + w_ - 1;
+            while (*last == 0) --last;   // Stops at 'first' at the latest
+            bx0 = std::min(bx0, static_cast<int>(first - row));
+            bx1 = std::max(bx1, static_cast<int>(last - row));
+            by0 = std::min(by0, y);
+            by1 = y;
+        }
+        // Grow the box by the range (+1 so a threshold of exactly maxDistance is still exact) and clip to the grid
+        const int r = maxDistance_ + 1;
+        win = bx1 < 0 ? Window{}   // No sources at all: nothing to work out, everything is INF
+                      : Window{ std::max(0, bx0 - r), std::max(0, by0 - r),
+                                std::min(w_, bx1 + 1 + r), std::min(h_, by1 + 1 + r) };
+
+        // Cells the previous window wrote but this one may not: back to INF. (The fire only grows, so the new
+        // window normally contains the old one and this just rewrites cells that are about to be overwritten.)
+        for (int y = last_.y0; y < last_.y1; ++y) {
+            std::fill(sq_.begin() + static_cast<size_t>(y) * w_ + last_.x0,
+                      sq_.begin() + static_cast<size_t>(y) * w_ + last_.x1, INF);
+        }
+        last_ = win;
+    }
+    const int wx0 = win.x0, wx1 = win.x1, wy0 = win.y0, wy1 = win.y1;
+    if (wx1 <= wx0 || wy1 <= wy0) return;
+    // All sources lie inside the window, so working only on its rows and columns gives the same exact distances
+    // as the whole-grid transform for every cell in it.
+
     // --- Pass 1: distance to the nearest source in the same COLUMN ---
     // The input is binary (0 or INF), so the 1D transform down a column is just the squared gap to the
     // nearest source above or below. That is found with two row-by-row sweeps (down, then up), which read
     // memory in order: much faster than walking each column (a 2000-cell stride per step on a 2000 x 2000
     // grid), and the result is identical to running edt1d on every column.
     lastSource_.assign(w_, -1);   // Row of the last source seen in each column, -1 = none yet
-    for (int y = 0; y < h_; ++y) {
+    for (int y = wy0; y < wy1; ++y) {
         const int row = y * w_;
-        for (int x = 0; x < w_; ++x) {
+        for (int x = wx0; x < wx1; ++x) {
             if (sources[row + x]) lastSource_[x] = y;
             const int gap = y - lastSource_[x];
             sq_[row + x] = lastSource_[x] >= 0 ? double(gap) * gap : INF;
         }
     }
     lastSource_.assign(w_, -1);   // Now the nearest source BELOW, sweeping up from the bottom row
-    for (int y = h_ - 1; y >= 0; --y) {
+    for (int y = wy1 - 1; y >= wy0; --y) {
         const int row = y * w_;
-        for (int x = 0; x < w_; ++x) {
+        for (int x = wx0; x < wx1; ++x) {
             if (sources[row + x]) lastSource_[x] = y;
             if (lastSource_[x] >= 0) {
                 const int gap = lastSource_[x] - y;
@@ -50,13 +87,16 @@ void DistanceTransform::compute(const std::vector<std::uint8_t>& sources) {
 
     // --- Pass 2: Compute 1D Euclidean Distance Transform along rows ---
     // Combines the column distances: the lower envelope of parabolas gives the exact 2D distance.
-    for (int y = 0; y < h_; ++y) {
-        for (int x = 0; x < w_; ++x) {
-            f_[x] = sq_[y * w_ + x]; // Load intermediate column EDT values
+    // Only the window's columns: outside them the column distances are all INF, which never wins.
+    const int n = wx1 - wx0;
+    for (int y = wy0; y < wy1; ++y) {
+        const int row = y * w_ + wx0;
+        for (int x = 0; x < n; ++x) {
+            f_[x] = sq_[row + x]; // Load intermediate column EDT values
         }
-        edt1d(w_); // Perform 1D EDT across row y
-        for (int x = 0; x < w_; ++x) {
-            sq_[y * w_ + x] = d_[x]; // Store final squared Euclidean distances
+        edt1d(n); // Perform 1D EDT across the window's part of row y
+        for (int x = 0; x < n; ++x) {
+            sq_[row + x] = d_[x]; // Store final squared Euclidean distances
         }
     }
 }

@@ -155,7 +155,9 @@ int main(int argc, char** argv) {
     // Step 2: Initialize Distance Field, Perimeter Tracking, and Mission Control
     // ------------------------------------------------------------------------
     // Live distance transform (EDT) maintaining safety buffers around active fire front
-    DistanceTransform liveEdt(GRID_WIDTH, GRID_HEIGHT);
+    // Only worked out within LIVE_EDT_RANGE of the fire: that is as far as any reader looks, and it makes the
+    // per-frame recompute proportional to the fire's size rather than the whole 2000 x 2000 grid
+    DistanceTransform liveEdt(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE);
 
     // Manages committed containment perimeter boundaries
     Perimeter perimeter(sim.fireMask());
