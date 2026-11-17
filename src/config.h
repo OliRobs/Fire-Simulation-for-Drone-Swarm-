@@ -58,6 +58,11 @@ constexpr double NO_FLY_SQ = (MIN_FIRE_DISTANCE + 0.5) * (MIN_FIRE_DISTANCE + 0.
 constexpr double HARD_NO_FLY_SQ = (HARD_MIN_FIRE_DISTANCE + 0.5) * (HARD_MIN_FIRE_DISTANCE + 0.5);
 constexpr int PERIMETER_UPDATE_DISTANCE = cellsFromMetres(600.0f); // A perimeter section moves only once the fire is 600 m from it
 constexpr int PERIMETER_SECTION_RADIUS = cellsFromMetres(300.0f);  // How far along the front one update reaches (300 m)
+// Range of the live-fire distance transform, in cells. Every reader of the live distance compares it with
+// MIN_FIRE_DISTANCE (+0.5) or the smaller HARD_MIN_FIRE_DISTANCE, so distances further out than this are never
+// needed and the transform only works out a window this far round the fire (distance_transform.h).
+// Derived from the settings above, not a design value of its own.
+constexpr int LIVE_EDT_RANGE = MIN_FIRE_DISTANCE + 1;
 constexpr int SWEEP_DRONES = 3;           // Boustrophedon drones (inside the perimeter)
 constexpr int ACO_DRONES = 5;             // ACO-routed drones (perimeter out to SEARCH_DISTANCE)
 constexpr float SENSOR_RADIUS = 60.0f / SIM_CELL_SIZE_M;   // Cells; 60 m, so the swath is 120 m wide

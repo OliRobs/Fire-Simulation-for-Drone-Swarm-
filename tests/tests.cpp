@@ -93,6 +93,27 @@ TEST(edt_matches_brute_force) {
     }
 }
 
+// Range-limited transform: exact within maxDistance of the sources, "very far" beyond, and correct when the
+// sources move (old window cleared) or disappear altogether
+TEST(edt_range_limit_matches_full_transform) {
+    const int w = 300, h = 200, range = 25;
+    DistanceTransform full(w, h), limited(w, h, range);
+    std::mt19937 rng(11);
+    for (int round = 0; round < 3; ++round) {
+        std::vector<std::uint8_t> src(w * h, 0);
+        // Round 0: sources bottom-right; round 1: top-left only (window moves); round 2: no sources
+        const int ox = round == 0 ? 180 : 20, oy = round == 0 ? 120 : 10;
+        if (round < 2) for (int k = 0; k < 8; ++k) src[(oy + rng() % 40) * w + ox + rng() % 60] = 1;
+        full.compute(src);
+        limited.compute(src);
+        for (int i = 0; i < w * h; ++i) {
+            const double f = full.squaredDistance(i), l = limited.squaredDistance(i);
+            if (f <= double(range) * range) CHECK(std::fabs(f - l) < 1e-9);   // Exact inside the range
+            else CHECK(l >= double(range) * range);                          // Never nearer than it really is
+        }
+    }
+}
+
 // ============================================================================
 // Safe planner
 // ============================================================================
@@ -671,7 +692,7 @@ TEST(mission_drones_never_fly_over_fire) {
     // Several fires so drones have to work round them
     sim.ignite(at(250, 250)); sim.ignite(at(180, 300)); sim.ignite(at(320, 200));
 
-    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE);   // Range-limited, as in main.cpp
     for (int t = 0; t < 400; ++t) sim.step();      // Let the fire get going before drones launch
     live.compute(sim.fireMask());
     Perimeter perim(sim.fireMask());

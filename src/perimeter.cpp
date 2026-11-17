@@ -13,7 +13,11 @@
 // Euclidean Distance Transform (EDT) around the initial fire shape.
 Perimeter::Perimeter(const std::vector<std::uint8_t>& initialFire)
     : committed_(initialFire), trigger_(initialFire.size(), 0),
-    perimEdt_(GRID_WIDTH, GRID_HEIGHT), triggerEdt_(GRID_WIDTH, GRID_HEIGHT) {
+    // Range limits (distance_transform.h): the committed-fire distance is read out to SEARCH_DISTANCE + 0.5
+    // (mission zones; the ring and the trigger distance are nearer), the trigger distance only out to
+    // PERIMETER_SECTION_RADIUS, so neither transform needs the whole grid.
+    perimEdt_(GRID_WIDTH, GRID_HEIGHT, SEARCH_DISTANCE + 1),
+    triggerEdt_(GRID_WIDTH, GRID_HEIGHT, PERIMETER_SECTION_RADIUS + 1) {
     // Initial distance field computation around committed fire boundaries
     perimEdt_.compute(committed_);
 }
