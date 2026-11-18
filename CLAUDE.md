@@ -55,7 +55,20 @@ These behaviours were asked for explicitly. Keep them when changing planning cod
 - Legs may cut inside the `MIN_FIRE_DISTANCE` survey standoff when the path allows, but never closer than
   `HARD_MIN_FIRE_DISTANCE`.
 - Boustrophedon sweeps cover inside the perimeter; the ant-colony (ACO) tour covers from the perimeter out to
-  `SEARCH_DISTANCE`. The search area is split into Voronoi regions that give the points of interest.
+  `SEARCH_DISTANCE`. The search area is split into Voronoi regions that give the ACO points of interest (they are
+  no longer used for the sweep).
+- Sweep lanes run straight in from the perimeter line (traced from the committed-fire distance field), at right
+  angles to the nearest fire edge, seeded at most `LANE_SPACING` (120 m) apart. Overlap where lanes converge is
+  accepted; gap-fill lanes cover the cells lanes miss in concave bays.
+- Each sweep drone owns one sector: a contiguous run of lanes along the perimeter line, borders halfway between
+  lanes. Only survey lanes are exclusive; drones may cross other sectors in transit, re-routes, fire detours and
+  on the way home. Sectors are matched to drones by the land they shared before (stable ownership); after a
+  re-plan a drone joins its route at the nearest waypoint and carries on in route order.
+- Fleet size follows the fire: sweep laps (closed route incl. the closing leg) within `MAX_SWEEP_LAP_S`; ACO count
+  = ceil(one-drone tour time / `ACO_REVISIT_S`). 3-10 sweep and 1-10 ACO drones. Growing is immediate (launch from
+  the launch point); a drone is retired only after `SHRINK_REPLANS` re-plans in a row within `SHRINK_MARGIN` of the
+  limit with one fewer, and flies a fire-safe route home before it is removed. Drones are found by role and id,
+  never by position in the list. Collision avoidance and batteries are out of scope for now.
 - ACO drones first fly to the closest point on the tour, then follow it, evenly spaced and in one direction.
 - The perimeter updates in sections, only where the fire front has come within `PERIMETER_UPDATE_DISTANCE`.
 

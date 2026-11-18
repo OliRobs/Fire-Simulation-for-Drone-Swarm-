@@ -3,8 +3,9 @@
 Wildfire spread on real terrain using Rothermel's surface fire spread model, driven by USGS 1 m lidar
 elevation (terrain) and LANDFIRE data (Scott & Burgan 40 fuel models, canopy, operational roads). The fire runs on
 10 m cells over a 20 km x 20 km area. A drone swarm surveys round the fire:
-boustrophedon sweeps inside the perimeter and an ant-colony-optimised tour outside it, both kept clear of
-the fire.
+sweep drones fly lanes at right angles to the fire inside the perimeter, each in its own sector, and ACO drones
+share an ant-colony-optimised tour outside it, all kept clear of the fire. The fleet grows and shrinks with the
+fire so every sweep lap and every revisit on the tour stays within 20 minutes (see "Drone survey").
 
 ## Build
 
@@ -40,7 +41,10 @@ Controls:
 | `R` | Show/hide roads (hidden by default) |
 
 Cell grid lines appear once cells are about 8 pixels or more on screen. The title bar shows simulated time
-(one frame = 10 s) and the zoom.
+(one frame = 10 s), the zoom, the number of sweep drones (with the longest lap) and ACO drones (with the revisit
+time), drones flying back to base, and a warning if the fleet is at its maximum and still over a time limit.
+The mission overlay (`V`) tints each sweep sector in its drone's colour, draws the sweep lanes, and shows the
+Voronoi regions and points of interest of the ACO tour outside the perimeter.
 
 ## Input data (USGS 1 m DEM + LANDFIRE)
 
@@ -170,11 +174,11 @@ from the 1 m DEM when the tiles are present.
 | topography | slope and aspect (upslope direction) from the DEM; 10 m cell terrain from 1 m pixels |
 | fire_model | FireSimulation: per-cell Rothermel rates, fire arrival times in time order |
 | distance_transform | exact Euclidean distance transform; optionally range-limited to a window round the fire so the per-frame cost follows the fire size |
-| perimeter | committed fire + sectional perimeter updates |
 | safe_planner | fire-safe legs: line of sight, A*, string pulling; reports "no safe path" instead of guessing |
-| voronoi, boustrophedon, aco | the three planning algorithms |
-| mission_planner | zones, Voronoi regions, sweep sectors, ACO tour |
-| drone, mission_controller | drone movement and safety; re-planning, re-routing blocked drones, route assignment |
+| perimeter | committed fire + sectional perimeter updates; traces the perimeter line into ordered loops |
+| voronoi, boustrophedon, aco | the three planning algorithms (boustrophedon: sweep lanes at right angles to the fire, gap fill, ownership map) |
+| mission_planner | zones, Voronoi regions (ACO points of interest), sweep lanes and sectors, fleet sizing, sector-to-drone matching, ACO tour |
+| drone, mission_controller | drone movement and safety; re-planning, re-routing blocked drones, route assignment; adds and retires drones |
 | renderer | all SFML drawing |
 | main.cpp | window, events, frame loop |
 
@@ -196,6 +200,59 @@ distances they had on the original 30 m cells:
 | SENSOR_RADIUS | 60 m (6 cells) | Sensor swath half-width |
 | DRONE_SPEED_MPS | 16.5 m/s (16.5 cells per 10 s tick) | Drone ground speed |
 | TARGET_REGION_CELLS | 630 x 630 m (4050 cells) | Voronoi region size target |
+| LANE_SPACING | 120 m (12 cells) | Most distance between sweep lanes along the perimeter line |
+| MAX_SWEEP_LAP_S | 20 min | Longest sweep lap (closed route of one sector, incl. the leg back to the start) |
+| SWEEP_LAP_MARGIN | 0.9 | Sectors are first sized to 90 % of the lap limit, leaving room for fire detours |
+| MIN_SWEEP_DRONES, MAX_SWEEP_DRONES | 3, 10 | Range of the sweep fleet |
+| ACO_REVISIT_S | 20 min | Longest wait between visits to any point on the ACO tour |
+| MIN_ACO_DRONES, MAX_ACO_DRONES | 1, 10 | Range of the ACO fleet |
+| SHRINK_MARGIN, SHRINK_REPLANS | 0.85, 3 | A drone is removed only after 3 re-plans in a row on which one fewer would stay within 85 % of the limit |
+| SWEEP_DRONES, ACO_DRONES | 3, 5 | Fleet at the start; it then follows the fire |
+
+## Drone survey
+
+**Zones.** Cells under 1.2 km from the committed fire and at least 300 m from the live fire form the inner band,
+swept by the sweep drones. From 1.2 km out to 2.1 km is the outer zone, covered by the ACO tour through one point
+of interest per Voronoi region.
+
+**Sweep lanes.** The 1.2 km line is traced from the distance field into ordered closed loops (marching squares;
+one loop per separate fire, all anticlockwise round the fire). Lanes are seeded evenly along each loop, at most
+120 m apart, and run straight in down the distance gradient, i.e. at right angles to the nearest fire edge,
+keeping the parts inside the band (normally down to the 300 m standoff). On convex stretches lanes converge as
+they go in; that overlap is accepted. In concave bays they spread apart, so short gap-fill lanes are added
+until every inner cell is within the sensor radius of a lane.
+
+**Sectors.** Each sweep drone owns a contiguous run of lanes along the perimeter line, flown as a closed loop,
+lanes alternately inward and outward. Borders fall halfway between two lanes, so each sector's first lane is
+60 m inside it. Drones may fly across other drones' sectors in transit, on re-routes, on fire detours and on the
+way home; only survey lanes are exclusive. After each re-plan sectors are matched to drones by the land they
+shared before, so a drone keeps its side of the fire, and each drone joins its route at the nearest waypoint.
+
+**Sweep fleet size.** Lap time is the length of the closed fire-safe route divided by the drone speed, which is
+also the longest wait between visits to any lane. At each re-plan the planner finds the fewest sectors whose
+straight-line laps fit in 90 % of 20 minutes, splits the lanes so the longest lap is as short as possible, then
+builds and times the real routes and adds a drone if a lap is still over 20 minutes. Round fires need about:
+
+| Fire across | Perimeter line | Sweep drones |
+|---|---|---|
+| New fire | 7.6 km | 4 |
+| 1 km | 10.7 km | 6 |
+| 2 km | 13.8 km | 8 |
+| 3 km | 17.0 km | 10 (maximum) |
+
+A long, wind-driven fire has a longer perimeter line than a round one of the same width and needs more.
+
+**ACO fleet size.** The ACO drones share one tour, evenly spaced, each flying all of it. Their count is the time
+one drone takes to fly the tour divided by 20 minutes, rounded up, so every point is passed at least every 20
+minutes. One drone covers a new fire's tour (about 17 km); a 2 km fire needs two.
+
+**Growing and shrinking.** New drones launch from the launch point as soon as they are needed. A drone is removed
+only when one fewer would keep every lap (or the revisit time) within 85 % of the limit on 3 re-plans in a row,
+at least 30 simulated minutes; it then flies a fire-safe route back to the launch point and leaves the fleet
+there (or holds if no safe route exists). Which drone retires is chosen in
+`MissionController::chooseDroneToRetire`, ready for battery level to be taken into account. At the maximum of
+10 drones per role, laps may go over the limit and the title bar shows a warning. Collision avoidance between
+drones, batteries and recharging are not modelled yet.
 
 ## Drone safety
 

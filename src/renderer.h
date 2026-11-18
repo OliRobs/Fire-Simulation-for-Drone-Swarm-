@@ -1,6 +1,7 @@
 #pragma once
 #include <SFML/Graphics.hpp>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "distance_transform.h"
 #include "drone.h"
@@ -27,11 +28,16 @@ public:
     // Replaces the cyan perimeter ring (erases the old one first). Pass the new ring even when hidden.
     void setRing(const std::vector<int>& ring, const std::vector<Cell>& grid);
 
-    // Rebuilds the Voronoi / standoff overlay and the route polylines after a re-plan
+    // Rebuilds the sector / Voronoi / standoff overlay, the lanes and the route polylines after a re-plan, and
+    // the fleet status line
     void setMissionVisuals(const MissionPlan& plan, const std::vector<Drone>& drones,
                            const DistanceTransform& liveEdt);
 
     void draw(const MissionPlan& plan, const std::vector<Drone>& drones);
+
+    // Drone counts from the last setMissionVisuals (sweep with longest lap, ACO with revisit time, drones
+    // returning to base) and a warning when the fleet is at its maximum but over a time limit. For the title bar.
+    const std::string& fleetStatus() const { return fleetStatus_; }
 
     // --- Zoom and pan ---
     // Handles mouse wheel (zoom at cursor), right/middle drag (pan), +/- (zoom), arrow keys (pan) and
@@ -56,6 +62,8 @@ private:
     sf::Texture overlayTex_;
     sf::Sprite overlaySprite_;
     std::vector<sf::VertexArray> paths_;
+    sf::VertexArray lanes_;     // Sweep lanes of the current plan (pairs of points)
+    std::string fleetStatus_;
 
     // Rows of pixels_ changed since the last upload, [dirtyY0_, dirtyY1_) (empty when dirtyY1_ <= dirtyY0_).
     // draw() sends only these rows to the GPU instead of the whole 2000 x 2000 x 4 = 16 MB image every frame.
