@@ -51,6 +51,12 @@ namespace {
     constexpr int N = GRID_WIDTH * GRID_HEIGHT;
     int at(int x, int y) { return y * GRID_WIDTH + x; }
 
+    // Centre of the grid. Tests with large fires (whose search area reaches ~2 km past the fire) put them here
+    // rather than at fixed cells, so they fit on any grid size in config.h, square or not (e.g. 2000 x 2000 or
+    // 1200 x 1000 cells).
+    constexpr int CX = GRID_WIDTH / 2;
+    constexpr int CY = GRID_HEIGHT / 2;
+
     // A filled disc of fire cells
     std::vector<std::uint8_t> discFire(int cx, int cy, int r) {
         std::vector<std::uint8_t> m(N, 0);
@@ -472,7 +478,10 @@ TEST(viewport_frames_the_fire) {
     // Frame a 21-cell fire with 10 cells of margin: 41 cells across, centred on the fire
     Viewport v(static_cast<float>(GRID_WIDTH), static_cast<float>(GRID_HEIGHT));   // 1 world unit per cell
     v.frame(230.0f, 240.0f, 251.0f, 261.0f, 10.0f);
-    CHECK(std::fabs(v.width() - 41.0f) < 1e-3f);
+    // The view keeps the map's aspect ratio, so on a non-square map only the tighter side is exactly 41 cells;
+    // the other is wider, and the whole 41 x 41 box is always in view
+    CHECK(std::fabs(std::min(v.width(), v.height()) - 41.0f) < 1e-3f);
+    CHECK(v.width() >= 41.0f - 1e-3f && v.height() >= 41.0f - 1e-3f);
     CHECK(std::fabs(v.centreX() - 240.5f) < 1e-3f && std::fabs(v.centreY() - 250.5f) < 1e-3f);
 }
 
@@ -646,21 +655,24 @@ TEST(fire_never_enters_nonburnable_cells) {
 TEST(roads_are_fuel_breaks_even_diagonally) {
     std::vector<Cell> grid(N);
     for (Cell& c : grid) c.fuelModel = 104;
-    for (int i = 0; i < GRID_WIDTH; ++i) grid[at(i, GRID_HEIGHT - 1 - i)].roadClass = 22;   // Tertiary road, SW-NE
+    // The road runs corner to corner across the largest square in the top-left of the map, from (0, S - 1) to
+    // (S - 1, 0) with S the shorter side, so it meets two map edges and cuts the map in two whatever its shape
+    const int S = std::min(GRID_WIDTH, GRID_HEIGHT);
+    for (int i = 0; i < S; ++i) grid[at(i, S - 1 - i)].roadClass = 22;   // Tertiary road, SW-NE
 
     FireWeather w;
     w.windFromDeg = 315.0f;                          // From the NW, straight at the road
     FireSimulation sim(grid, w);
-    // Positions relative to the map size, so the test holds for any GRID_WIDTH (square grid assumed):
-    // k + k = GRID_WIDTH - 2 is the diagonal just north-west of the road
-    const int k = (GRID_WIDTH - 2) / 2;
-    CHECK(!sim.canBurn(at(k + 1, k)));               // On the road (x + y = GRID_WIDTH - 1)
+    // Positions relative to the map size, so the test holds for any grid in config.h:
+    // k + k = S - 2 is the diagonal just north-west of the road
+    const int k = (S - 2) / 2;
+    CHECK(!sim.canBurn(at(k + 1, k)));               // On the road (x + y = S - 1)
     CHECK(sim.ignite(at(k - 49, k - 49)));           // North-west of the road, ~50 cells from it
     for (int t = 0; t < 4000; ++t) sim.step();
     int beyond = 0;
     for (int y = 0; y < GRID_HEIGHT; ++y)
         for (int x = 0; x < GRID_WIDTH; ++x)
-            if (x + y > GRID_WIDTH - 1 && sim.fireMask()[at(x, y)]) ++beyond;
+            if (x + y > S - 1 && sim.fireMask()[at(x, y)]) ++beyond;
     CHECK(sim.fireMask()[at(k, k)] == 1);           // The fire reached the road...
     CHECK(beyond == 0);                              // ...and didn't cross it
 }
@@ -876,7 +888,7 @@ TEST(perimeter_line_round_fire_is_one_loop) {
 
 TEST(perimeter_line_two_fires_give_two_loops_the_same_way_round) {
     std::vector<std::uint8_t> fire = discFire(400, 400, 20);
-    const auto other = discFire(1200, 900, 35);
+    const auto other = discFire(GRID_WIDTH * 3 / 4, GRID_HEIGHT * 3 / 4, 35);   // Far enough apart on any grid
     for (int i = 0; i < N; ++i) fire[i] |= other[i];
     Perimeter perim(fire);
     const auto loops = tracePerimeterLine(perim.distance());
@@ -1019,7 +1031,7 @@ TEST(sweep_sectors_are_exclusive_and_contiguous) {
 // ============================================================================
 TEST(sweep_laps_stay_within_the_cap) {
     for (int r : { 1, 50, 100 }) {   // New fire, 1 km and 2 km across
-        SweepSetup s(discFire(800, 800, r));
+        SweepSetup s(discFire(CX, CY, r));
         const int sectors = static_cast<int>(s.plan.sweepRoutes.size());
         std::printf("  (fire %d m across: %d sweep drones, laps", 2 * r * static_cast<int>(SIM_CELL_SIZE_M), sectors);
         for (float lap : s.plan.sweepLapS) std::printf(" %.1f", lap / 60.0f);
@@ -1035,7 +1047,7 @@ TEST(sweep_laps_stay_within_the_cap) {
         }
     }
     // Bigger fires need more sweep drones
-    SweepSetup small(discFire(800, 800, 1)), big(discFire(800, 800, 100));
+    SweepSetup small(discFire(CX, CY, 1)), big(discFire(CX, CY, 100));
     CHECK(big.plan.sweepRoutes.size() > small.plan.sweepRoutes.size());
 }
 
@@ -1140,7 +1152,7 @@ TEST(mission_drones_never_fly_over_fire) {
 // Growing a fire makes the controller launch more drones, at once, from the launch point
 TEST(fleet_grows_with_the_fire) {
     const Vec2 base(2.5f, GRID_HEIGHT - 2.5f);
-    std::vector<std::uint8_t> fire = discFire(700, 700, 1);
+    std::vector<std::uint8_t> fire = discFire(CX, CY, 1);
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
     Perimeter perim(fire);
@@ -1151,7 +1163,7 @@ TEST(fleet_grows_with_the_fire) {
     int maxIdBefore = -1;
     for (const Drone& d : mission.drones()) maxIdBefore = std::max(maxIdBefore, d.id);
 
-    fire = discFire(700, 700, 100);   // Now 2 km across
+    fire = discFire(CX, CY, 100);   // Now 2 km across
     live.compute(fire);
     perim.update(fire);
     mission.markFireChanged();
@@ -1175,7 +1187,7 @@ TEST(fleet_grows_with_the_fire) {
 // home without ever crossing the fire and are removed there. Then a growing fire raises both counts at once.
 TEST(fleet_shrinks_slowly_and_retired_drones_fly_home) {
     const Vec2 base(2.5f, GRID_HEIGHT - 2.5f);
-    std::vector<std::uint8_t> fire = discFire(700, 700, 100);   // 2 km across
+    std::vector<std::uint8_t> fire = discFire(CX, CY, 100);   // 2 km across
     // Plain distance fields (rather than a Perimeter, whose committed fire never shrinks) so the test can
     // make the fire smaller. The committed-fire field has the Perimeter's range limit, as the planner expects.
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT), perimDt(GRID_WIDTH, GRID_HEIGHT, SEARCH_DISTANCE + 1);
@@ -1201,7 +1213,7 @@ TEST(fleet_shrinks_slowly_and_retired_drones_fly_home) {
     };
     // One re-plan: mark the plan dirty and run until the controller has re-planned
     auto replan = [&]() { mission.markFireChanged(); frames(REPLAN_INTERVAL); };
-    auto setFire = [&](int r) { fire = discFire(700, 700, r); live.compute(fire); perimDt.compute(fire); };
+    auto setFire = [&](int r) { fire = discFire(CX, CY, r); live.compute(fire); perimDt.compute(fire); };
 
     replan();
     const int sweepBig = mission.activeCount(false);
@@ -1291,7 +1303,7 @@ TEST(aco_drones_are_spread_round_the_tour) {
 // The ACO count follows the one-drone loop time: each point is revisited within ACO_REVISIT_S
 TEST(aco_count_follows_the_revisit_time) {
     for (int r : { 1, 100, 200 }) {
-        SweepSetup s(discFire(800, 800, r));
+        SweepSetup s(discFire(CX, CY, r));
         const MissionPlan& p = s.plan;
         std::printf("  (fire %d m across: tour %.1f km, %.1f min for one drone, %d ACO drones)\n",
                     2 * r * static_cast<int>(SIM_CELL_SIZE_M), closedRouteLength(p.acoTour) * SIM_CELL_SIZE_M / 1000.0f,
