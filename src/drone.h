@@ -18,12 +18,14 @@ struct Drone {
     size_t target = 0;         // Index into route of the waypoint being flown to
     bool isACO = false;
     bool holding = false;      // No safe way to any nearby waypoint: hover in place until a route opens up
+    float speedScale = 1.0f;   // Fraction of DRONE_SPEED flown this frame. Below 1 only for an ACO drone that is
+                               // too close behind the next one, to open the gap back up (MissionController)
     int nextRetryFrame = 0;    // While holding, the frame at which re-routing is next attempted
 };
 
 size_t nearestWaypoint(const std::vector<Vec2>& route, Vec2 p);
 
-// Fly at DRONE_SPEED: first the fire-safe transit path (if any), then round the looping route.
+// Fly at DRONE_SPEED x d.speedScale: first the fire-safe transit path (if any), then round the looping route.
 // If a planner is given, every segment is checked against the live fire before the drone starts along it;
 // the drone stops at the waypoint instead of flying into a segment the fire has since blocked.
 // Returns false if it stopped because of a blocked segment (the caller should re-route the drone).

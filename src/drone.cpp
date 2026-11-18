@@ -41,7 +41,7 @@ size_t nearestWaypoint(const std::vector<Vec2>& route, Vec2 p) {
 bool stepDrone(Drone& d, const SafePlanner* planner) {
     if (d.holding) return true; // Hovering until the controller finds a safe route
 
-    float remaining = DRONE_SPEED; // Remaining movement distance budget for this frame
+    float remaining = DRONE_SPEED * d.speedScale; // Remaining movement distance budget for this frame
     const size_t maxSteps = d.route.size() + d.transit.size() + 1; // Safety guard against infinite loops
 
     for (size_t guard = 0; remaining > 1e-4f && guard <= maxSteps; ++guard) {

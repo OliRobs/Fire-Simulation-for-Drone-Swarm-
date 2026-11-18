@@ -245,7 +245,11 @@ A long, wind-driven fire has a longer perimeter line than a round one of the sam
 **ACO tour.** The tour is always flown anticlockwise. After a re-plan each ACO drone locks back on at the
 nearest node of the new tour (or the next one if it has just passed it) and carries on the same way, so drones
 never turn back. New drones join in the middle of the largest gaps; when the fleet shrinks, the drone in the most
-crowded spot goes home, keeping the rest as evenly spaced as possible.
+crowded spot goes home, keeping the rest as evenly spaced as possible. Because drones carry on from where they
+were, a new tour can leave them bunched up, with several passing the same node close together. They spread back
+out by slowing down: a drone closer than an even share of the tour (tour length / ACO count) behind the drone ahead
+flies slower, in proportion to the gap and never below a quarter of full speed (`ACO_SPACING_MIN_SPEED`), until the
+gaps are even again; then all fly at full speed. In the tests this takes a few simulated minutes.
 
 **ACO fleet size.** The ACO drones share one tour, evenly spaced, each flying all of it. Their count is the time
 one drone takes to fly the tour divided by 20 minutes, rounded up, so every point is passed at least every 20
