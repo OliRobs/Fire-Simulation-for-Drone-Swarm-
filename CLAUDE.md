@@ -15,6 +15,9 @@ surveys round the fire. README.md has the module table and input-data notes.
   directory, PATH to the DLLs) live in the .vcxproj itself, because `.vcxproj.user` is not tracked.
   Adding or removing a source file means updating `CMakeLists.txt`, `UAVFireMap.vcxproj` AND
   `UAVFireMap.vcxproj.filters`.
+- GDAL on Windows is the GISInternals build: DLLs in `C:\gdal\bin`, PROJ's `proj.db` in `C:\gdal\bin\proj9\share`,
+  GDAL data in `C:\gdal\bin\gdal-data`. `registerRasterDrivers` points PROJ and GDAL there when `PROJ_DATA` /
+  `GDAL_DATA` aren't set; without proj.db no LANDFIRE layer can be reprojected onto the DEM grid.
 - CI (`.github/workflows/build.yml`): full build and tests on Ubuntu 24.04, plus an MSVC build of the core and
   tests on Windows. Both must pass.
 

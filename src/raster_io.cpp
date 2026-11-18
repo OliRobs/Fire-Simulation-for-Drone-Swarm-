@@ -2,8 +2,12 @@
 #include <gdal_priv.h>
 #include <gdal_utils.h>
 #include <ogr_spatialref.h>
+#include <ogr_srs_api.h>
+#include <cpl_conv.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -18,8 +22,59 @@
 // all is rejected instead of being silently stretched over it.
 // ============================================================================
 
-// Registers all available GDAL drivers globally (must be called before loading files)
-void registerRasterDrivers() { GDALAllRegister(); }
+namespace {
+    // ------------------------------------------------------------------------
+    // Find PROJ's database (proj.db) and GDAL's data folder
+    // ------------------------------------------------------------------------
+    // Reprojecting the LANDFIRE layers (EPSG:5070 Albers) onto the DEM's grid (EPSG:26911 UTM) needs PROJ's
+    // coordinate system database, proj.db. PROJ looks for it in the folder named by the PROJ_DATA (PROJ 9) or
+    // PROJ_LIB (older) environment variable, and a Windows GDAL unpacked into a plain folder sets neither. Without
+    // it every reprojection fails ("Cannot find proj.db", "Cannot find coordinate operations"), so the fuel,
+    // roads and canopy layers are all dropped. If the variables aren't set, look in the usual places instead:
+    // the GISInternals layout used for this project (C:\gdal\bin\proj9\share, as in UAVFireMap.vcxproj), a
+    // conda-style C:\gdal\share\proj, next to the program, and the Linux system folders.
+    std::string firstFolderWith(std::initializer_list<const char*> folders, const char* file) {
+        for (const char* f : folders) {
+            std::error_code ec;
+            if (f && *f && std::filesystem::exists(std::filesystem::path(f) / file, ec)) return f;
+        }
+        return {};
+    }
+
+    void configureProjAndGdalData() {
+        // --- PROJ database ---
+        std::string projDir = firstFolderWith({ std::getenv("PROJ_DATA"), std::getenv("PROJ_LIB") }, "proj.db");
+        if (projDir.empty()) {
+            projDir = firstFolderWith({ "C:/gdal/bin/proj9/share", "C:/gdal/bin/proj8/share", "C:/gdal/bin/proj7/share",
+                                        "C:/gdal/share/proj", "proj9/share", "proj/share", "share/proj",
+                                        "/usr/share/proj", "/usr/local/share/proj" }, "proj.db");
+            if (!projDir.empty()) {
+                const char* const paths[] = { projDir.c_str(), nullptr };
+                OSRSetPROJSearchPaths(paths);   // Same effect as setting PROJ_DATA, for this program only
+                std::cout << "[GDAL] PROJ database (proj.db) found in " << projDir << "\n";
+            }
+            else {
+                std::cerr << "[GDAL] WARNING: PROJ database (proj.db) not found, so the LANDFIRE layers can't be reprojected\n"
+                             "       onto the terrain grid and will be skipped. Set the PROJ_DATA environment variable to the\n"
+                             "       folder containing proj.db (e.g. C:\\gdal\\bin\\proj9\\share).\n";
+            }
+        }
+
+        // --- GDAL support files (CSV tables, etc.): GDAL_DATA ---
+        if (!CPLGetConfigOption("GDAL_DATA", nullptr)) {
+            const std::string gdalData = firstFolderWith({ "C:/gdal/bin/gdal-data", "C:/gdal/share/gdal", "gdal-data",
+                                                           "/usr/share/gdal", "/usr/local/share/gdal" }, "gdalvrt.xsd");
+            if (!gdalData.empty()) CPLSetConfigOption("GDAL_DATA", gdalData.c_str());
+        }
+    }
+}
+
+// Registers all available GDAL drivers globally (must be called before loading files), after pointing PROJ and
+// GDAL at their data folders (see configureProjAndGdalData)
+void registerRasterDrivers() {
+    configureProjAndGdalData();
+    GDALAllRegister();
+}
 
 namespace {
     // RAII wrapper so datasets are always closed, even on early returns
