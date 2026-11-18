@@ -35,6 +35,9 @@ Renderer::Renderer(const std::vector<std::uint8_t>& terrainShade)
 
     // Create mission overlay texture/sprite (Voronoi borders, boundaries)
     overlayTex_.create(GRID_WIDTH, GRID_HEIGHT);
+    // Start fully transparent (a new texture's contents are undefined). After this, setMissionVisuals()
+    // only re-uploads the rows a plan changes.
+    overlayTex_.update(overlayPixels_.data());
     overlaySprite_.setTexture(overlayTex_);
     overlaySprite_.setScale(static_cast<float>(CELL_SIZE), static_cast<float>(CELL_SIZE));
 
@@ -50,10 +53,16 @@ Renderer::Renderer(const std::vector<std::uint8_t>& terrainShade)
 }
 
 // Helper function to set raw RGBA pixel values in the base texture pixel array
+// and marks its row for upload to the GPU on the next draw()
 void Renderer::setColor(int idx, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
     pixels_[idx * 4 + 0] = r;
     pixels_[idx * 4 + 1] = g;
     pixels_[idx * 4 + 2] = b;
+
+    // Grow the dirty row range to take in this cell's row
+    const int y = idx / GRID_WIDTH;
+    if (dirtyY1_ <= dirtyY0_) { dirtyY0_ = y; dirtyY1_ = y + 1; }
+    else { dirtyY0_ = std::min(dirtyY0_, y); dirtyY1_ = std::max(dirtyY1_, y + 1); }
 }
 
 // ----------------------------------------------------------------------------
@@ -118,7 +127,14 @@ void Renderer::setRing(const std::vector<int>& ring, const std::vector<Cell>& gr
 // 4. Closed flight paths for all drones.
 void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Drone>& drones,
     const DistanceTransform& liveEdt) {
-    std::fill(overlayPixels_.begin(), overlayPixels_.end(), 0); // Reset overlay pixel buffer
+    // Reset only the part of the overlay the previous plan drew on (the rest is still transparent)
+    for (int y = overlayDrawn_.y0; y < overlayDrawn_.y1; ++y) {
+        std::fill(overlayPixels_.begin() + (static_cast<size_t>(y) * GRID_WIDTH + overlayDrawn_.x0) * 4,
+                  overlayPixels_.begin() + (static_cast<size_t>(y) * GRID_WIDTH + overlayDrawn_.x1) * 4, 0);
+    }
+    // Every labelled cell lies inside plan.bounds (mission_types.h), so that is all that needs scanning
+    const GridRect box{ std::max(0, plan.bounds.x0), std::max(0, plan.bounds.y0),
+                        std::min(GRID_WIDTH, plan.bounds.x1), std::min(GRID_HEIGHT, plan.bounds.y1) };
 
     auto labelAt = [&](int x, int y) {
         return (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) ? -1 : plan.label[y * GRID_WIDTH + x];
@@ -129,8 +145,8 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
         };
 
     // Draw lines along cell borders in overlay texture
-    for (int y = 0; y < GRID_HEIGHT; ++y) {
-        for (int x = 0; x < GRID_WIDTH; ++x) {
+    for (int y = box.y0; y < box.y1; ++y) {
+        for (int x = box.x0; x < box.x1; ++x) {
             const int l = labelAt(x, y);
             if (l < 0) continue;
 
@@ -154,7 +170,13 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
             }
         }
     }
-    overlayTex_.update(overlayPixels_.data());
+    // Upload the rows that changed: those of the old drawing (now cleared) and of the new one
+    const GridRect rows = overlayDrawn_.unite(box);
+    if (!rows.empty()) {
+        overlayTex_.update(overlayPixels_.data() + static_cast<size_t>(rows.y0) * GRID_WIDTH * 4,
+                           GRID_WIDTH, rows.y1 - rows.y0, 0, rows.y0);
+    }
+    overlayDrawn_ = box;
 
     // Generate line-strip path polylines for each drone's target route
     paths_.assign(drones.size(), sf::VertexArray(sf::LineStrip));
@@ -181,7 +203,13 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
 // Displays base terrain, fire state updates, mission overlays, POIs, and dynamic 
 // drone entities onto the SFML display window.
 void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
-    texture_.update(pixels_.data());
+    // Send only the rows that changed since the last frame. Whole rows are contiguous in pixels_, so they go
+    // up in one call without copying; most frames only a few rows round the fire front have changed.
+    if (dirtyY1_ > dirtyY0_) {
+        texture_.update(pixels_.data() + static_cast<size_t>(dirtyY0_) * GRID_WIDTH * 4,
+                        GRID_WIDTH, dirtyY1_ - dirtyY0_, 0, dirtyY0_);
+        dirtyY0_ = dirtyY1_ = 0;
+    }
     window_.clear(sf::Color::Black);
     window_.draw(sprite_);
 

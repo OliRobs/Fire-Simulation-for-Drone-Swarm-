@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <set>
@@ -111,6 +112,82 @@ TEST(edt_range_limit_matches_full_transform) {
             if (f <= double(range) * range) CHECK(std::fabs(f - l) < 1e-9);   // Exact inside the range
             else CHECK(l >= double(range) * range);                          // Never nearer than it really is
         }
+    }
+}
+
+// Giving compute() a rectangle that holds the sources (as main.cpp does with the fire's bounding box) must give
+// the same answer as letting it scan for them, including when the rectangle is looser than the sources
+TEST(edt_with_source_bounds_matches_scan) {
+    const int w = 300, h = 200, range = 25;
+    DistanceTransform scanned(w, h, range), hinted(w, h, range), full(w, h);
+    std::mt19937 rng(12);
+    for (int round = 0; round < 3; ++round) {
+        std::vector<std::uint8_t> src(w * h, 0);
+        GridRect box;   // Exact bounding box of the sources
+        const int ox = round == 0 ? 180 : 20, oy = round == 0 ? 120 : 10;
+        if (round < 2) for (int k = 0; k < 8; ++k) {
+            const int x = ox + rng() % 60, y = oy + rng() % 40;
+            src[y * w + x] = 1;
+            box.include(x, y);
+        }
+        // Loosen the box by a few cells (and let it run off the grid on round 1) to stand in for a bigger fire
+        const GridRect loose{ box.x0 - 30, box.y0 - 15, box.x1 + 7, box.y1 + 3 };
+        scanned.compute(src);
+        hinted.compute(src, round == 2 ? GridRect{} : loose);   // Round 2: no sources, empty rectangle
+        full.compute(src);
+        const GridRect win = hinted.window();
+        for (int i = 0; i < w * h; ++i) {
+            const double f = full.squaredDistance(i), s = scanned.squaredDistance(i), l = hinted.squaredDistance(i);
+            if (f <= double(range) * range) {
+                CHECK(std::fabs(f - l) < 1e-9 && std::fabs(s - l) < 1e-9);   // Exact inside the range
+                const int x = i % w, y = i / w;
+                CHECK(x >= win.x0 && x < win.x1 && y >= win.y0 && y < win.y1); // ...and inside window()
+            }
+            else CHECK(l >= double(range) * range);                          // Never nearer than it really is
+        }
+    }
+}
+
+// The fire simulation's bounding box must always be exactly the box of its fire mask
+TEST(fire_bounds_track_the_fire_mask) {
+    std::vector<Cell> grid(N);
+    FireSimulation sim(grid);
+    CHECK(sim.fireBounds().empty());
+    sim.ignite(at(300, 400));
+    for (int t = 0; t < 900; ++t) {
+        sim.step();
+        if (t == 300) sim.ignite(at(900, 120));   // A second fire, as a mouse click would start
+        if (t % 150 != 0) continue;
+        int x0, y0, x1, y1;
+        CHECK(maskBounds(sim.fireMask(), GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1));
+        const GridRect b = sim.fireBounds();
+        CHECK(b.x0 == x0 && b.y0 == y0 && b.x1 == x1 + 1 && b.y1 == y1 + 1);
+    }
+}
+
+// Perimeter::update with the fire's rectangle (main.cpp) and without it (scanning) must move the perimeter
+// identically: same ring, same distances everywhere the mission planner reads them
+TEST(perimeter_update_with_bounds_matches_scan) {
+    std::vector<Cell> grid(N);
+    FireSimulation sim(grid);
+    sim.ignite(at(400, 400));
+    for (int t = 0; t < 200; ++t) sim.step();
+    Perimeter withBounds(sim.fireMask()), scanned(sim.fireMask());
+    int moves = 0;
+    for (int t = 0; t < 1500; ++t) {
+        sim.step();
+        if (!sim.takeFireGrew()) continue;
+        const bool a = withBounds.update(sim.fireMask(), sim.fireBounds());
+        const bool b = scanned.update(sim.fireMask());
+        CHECK(a == b);
+        moves += a ? 1 : 0;
+    }
+    CHECK(moves > 0);   // The test must actually exercise the perimeter moving
+    CHECK(withBounds.ringCells() == scanned.ringCells());
+    constexpr double reach = (SEARCH_DISTANCE + 0.5) * (SEARCH_DISTANCE + 0.5);
+    for (int i = 0; i < N; ++i) {
+        const double a = withBounds.distance().squaredDistance(i), b = scanned.distance().squaredDistance(i);
+        if (a < reach || b < reach) CHECK(std::fabs(a - b) < 1e-9);
     }
 }
 
@@ -639,6 +716,36 @@ TEST(voronoi_assigns_every_cell) {
     for (int c : counts) CHECK(c > static_cast<int>(cells.size()) / 18 && c < static_cast<int>(cells.size()) * 2 / 9);
 }
 
+// The bucketed nearest-site search inside buildVoronoi must give exactly what testing every site gives
+// (lowest site index on a tie), on an awkward shape: a ring with a gap plus scattered islands of cells
+TEST(voronoi_bucketed_assignment_matches_brute_force) {
+    std::vector<int> cells;
+    std::mt19937 shape(8);
+    for (int y = 300; y < 700; ++y)
+        for (int x = 300; x < 700; ++x) {
+            const int r2 = (x - 500) * (x - 500) + (y - 500) * (y - 500);
+            const bool ring = r2 > 120 * 120 && r2 < 190 * 190 && !(x > 480 && x < 530 && y < 500);
+            if (ring || shape() % 97 == 0) cells.push_back(at(x, y));
+        }
+    for (int sites : { 1, 7, 64 }) {
+        std::mt19937 rng(4);
+        const Voronoi v = buildVoronoi(cells, sites, rng);
+        CHECK(static_cast<int>(v.sites.size()) == sites);
+        int wrong = 0;
+        for (size_t i = 0; i < cells.size(); ++i) {
+            const Vec2 p = cellCentre(cells[i]);
+            int best = 0;
+            float bd = std::numeric_limits<float>::max();
+            for (int k = 0; k < sites; ++k) {
+                const float dd = sqDist(p, v.sites[k]);
+                if (dd < bd) { bd = dd; best = k; }
+            }
+            wrong += v.assign[i] != best ? 1 : 0;
+        }
+        CHECK(wrong == 0);
+    }
+}
+
 // Plans a mission around a fire with two lobes, so straight legs between sweep lanes often cross fire
 TEST(planned_routes_never_cross_the_hard_no_fly_zone) {
     std::vector<std::uint8_t> fire = discFire(220, 250, 25);
@@ -702,8 +809,8 @@ TEST(mission_drones_never_fly_over_fire) {
     for (int frame = 0; frame < 1500; ++frame) {
         sim.step();
         if (sim.takeFireGrew()) {
-            live.compute(sim.fireMask());
-            perim.update(sim.fireMask());
+            live.compute(sim.fireMask(), sim.fireBounds());   // As main.cpp: the fire's box saves a grid scan
+            perim.update(sim.fireMask(), sim.fireBounds());
             mission.markFireChanged();
         }
         std::vector<Vec2> before;

@@ -49,6 +49,10 @@ public:
 
     const std::vector<Cell>& grid() const { return grid_; }
     const std::vector<std::uint8_t>& fireMask() const { return fireMask_; } // 1 = Burning or Burned
+    // Bounding box of the fire mask (every cell that is Burning or Burned), kept up to date as cells ignite.
+    // The fire never shrinks, so neither does this. Lets the distance transforms and the perimeter skip
+    // the whole-grid scan they would otherwise need to find the fire.
+    const GridRect& fireBounds() const { return fireBounds_; }
 
     std::vector<int> takeDirtyCells(); // Cells whose state changed since the last call (for repainting)
     bool takeFireGrew();               // True if any cell ignited since the last call
@@ -70,6 +74,7 @@ private:
 
     std::vector<int> burning_;         // Cells currently Burning
     std::vector<std::uint8_t> fireMask_;
+    GridRect fireBounds_;              // Bounding box of fireMask_ (empty until the first ignition)
     std::vector<int> dirty_;
     bool fireGrew_ = false;
     double now_ = 0.0;
