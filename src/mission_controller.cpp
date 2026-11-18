@@ -14,15 +14,43 @@
 // 3. Handles path execution, transit routing, and emergency fire-avoidance safety steps.
 // ============================================================================
 
-// Constructor: Initializes grid EDT handles, planner state, and launches drones at base station
+// Constructor: Initializes grid EDT handles, planner state, and launches the starting fleet at the base
+// station: SWEEP_DRONES sweep drones and ACO_DRONES ACO drones, each with its own stable id.
 MissionController::MissionController(const DistanceTransform& liveEdt, const DistanceTransform& perimEdt,
     Vec2 launchPoint)
-    : live_(liveEdt), perim_(perimEdt), planner_(liveEdt), drones_(SWEEP_DRONES + ACO_DRONES) {
-    for (int i = 0; i < SWEEP_DRONES + ACO_DRONES; ++i) {
-        drones_[i].pos = launchPoint;          // Spawn all drones at base station coordinates
-        drones_[i].isACO = i >= SWEEP_DRONES; // First 'SWEEP_DRONES' are sector sweepers, remainder are ACO perimeter monitors
-    }
+    : live_(liveEdt), perim_(perimEdt), planner_(liveEdt), launch_(launchPoint) {
+    for (int i = 0; i < SWEEP_DRONES; ++i) launchDrone(false);
+    for (int i = 0; i < ACO_DRONES; ++i) launchDrone(true);
 }
+
+// ----------------------------------------------------------------------------
+// Launch One Drone
+// ----------------------------------------------------------------------------
+// Adds a new active drone of the given role at the launch point, with the next unused id. It has no route
+// yet: the caller gives it one. Returns its id (not a reference, which the next launch could invalidate).
+int MissionController::launchDrone(bool aco) {
+    Drone d;
+    d.id = nextId_++;
+    d.isACO = aco;
+    d.pos = launch_;
+    drones_.push_back(d);
+    return d.id;
+}
+
+// ----------------------------------------------------------------------------
+// Drones by Role
+// ----------------------------------------------------------------------------
+// Indices into drones_ of the ACTIVE drones of one role (sweep or ACO), in launch order. Planning code goes
+// through this instead of assuming the first SWEEP_DRONES entries are the sweepers.
+std::vector<size_t> MissionController::activeIndices(bool aco) const {
+    std::vector<size_t> out;
+    for (size_t i = 0; i < drones_.size(); ++i) {
+        if (drones_[i].isACO == aco && drones_[i].state == DroneState::Active) out.push_back(i);
+    }
+    return out;
+}
+
+int MissionController::activeCount(bool aco) const { return static_cast<int>(activeIndices(aco).size()); }
 
 // ----------------------------------------------------------------------------
 // Plan State Query
@@ -113,17 +141,21 @@ void MissionController::replan() {
     planChanged_ = true;
 
     // --- Sweep drones: one boustrophedon route each, joined at the waypoint nearest the drone ---
-    for (int k = 0; k < SWEEP_DRONES; ++k) {
-        drones_[k].route = plan_.sweepRoutes[k];
-        drones_[k].target = nearestWaypoint(drones_[k].route, drones_[k].pos);
+    const std::vector<size_t> sweep = activeIndices(false);
+    for (size_t k = 0; k < sweep.size() && k < plan_.sweepRoutes.size(); ++k) {
+        Drone& d = drones_[sweep[k]];
+        d.route = plan_.sweepRoutes[k];
+        d.target = nearestWaypoint(d.route, d.pos);
     }
 
     // --- ACO drones: all share the same closed tour, flown in the same direction, evenly spaced ---
     // Spacing them by tour length (rather than each grabbing its nearest waypoint) stops them flying in a
-    // bunch, so any point on the tour is revisited every (tour length / ACO_DRONES) instead of in bursts.
+    // bunch, so any point on the tour is revisited every (tour length / ACO count) instead of in bursts.
+    const std::vector<size_t> aco = activeIndices(true);
+    const int numAco = static_cast<int>(aco.size());
     const std::vector<Vec2>& tour = plan_.acoTour;
     const int n = static_cast<int>(tour.size());
-    if (n > 0) {
+    if (n > 0 && numAco > 0) {
         // Arc length from waypoint 0 to each waypoint, and the total closed-loop length
         std::vector<float> arc(n, 0.0f);
         for (int i = 1; i < n; ++i) arc[i] = arc[i - 1] + std::sqrt(sqDist(tour[i - 1], tour[i]));
@@ -132,14 +164,14 @@ void MissionController::replan() {
         // Anchor the spacing at the waypoint closest to the ACO drones' average position, so the group
         // as a whole joins the tour at its closest point
         Vec2 mean(0.0f, 0.0f);
-        for (int k = 0; k < ACO_DRONES; ++k) mean += drones_[SWEEP_DRONES + k].pos;
-        mean = mean / static_cast<float>(ACO_DRONES);
+        for (size_t i : aco) mean += drones_[i].pos;
+        mean = mean / static_cast<float>(numAco);
         const int anchor = static_cast<int>(nearestWaypoint(tour, mean));
 
-        // Slot j is the waypoint closest to (anchor + j/ACO_DRONES of the way round the tour)
-        std::vector<int> slots(ACO_DRONES);
-        for (int j = 0; j < ACO_DRONES; ++j) {
-            const float want = std::fmod(arc[anchor] + total * j / ACO_DRONES, std::max(total, 1e-6f));
+        // Slot j is the waypoint closest to (anchor + j/numAco of the way round the tour)
+        std::vector<int> slots(numAco);
+        for (int j = 0; j < numAco; ++j) {
+            const float want = std::fmod(arc[anchor] + total * j / numAco, std::max(total, 1e-6f));
             int best = 0;
             float bd = std::numeric_limits<float>::max();
             for (int i = 0; i < n; ++i) {
@@ -150,13 +182,13 @@ void MissionController::replan() {
         }
 
         // Each drone takes the closest slot not yet claimed by another drone
-        std::vector<char> claimed(ACO_DRONES, 0);
-        for (int k = 0; k < ACO_DRONES; ++k) {
-            Drone& d = drones_[SWEEP_DRONES + k];
+        std::vector<char> claimed(numAco, 0);
+        for (size_t i : aco) {
+            Drone& d = drones_[i];
             d.route = tour;
             int pick = 0;
             float bd = std::numeric_limits<float>::max();
-            for (int j = 0; j < ACO_DRONES; ++j) {
+            for (int j = 0; j < numAco; ++j) {
                 if (claimed[j]) continue;
                 const float dd = sqDist(d.pos, tour[slots[j]]);
                 if (dd < bd) { bd = dd; pick = j; }
@@ -166,7 +198,7 @@ void MissionController::replan() {
         }
     }
     else {
-        for (int k = 0; k < ACO_DRONES; ++k) drones_[SWEEP_DRONES + k].route.clear();
+        for (size_t i : aco) drones_[i].route.clear();
     }
 
     // --- Every drone: fire-safe transit from where it is now onto its route ---

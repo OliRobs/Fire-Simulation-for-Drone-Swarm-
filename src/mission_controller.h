@@ -19,9 +19,13 @@ public:
     bool takePlanChanged();     // True once after each re-plan (renderer rebuilds its overlay)
     const MissionPlan& plan() const { return plan_; }
     const std::vector<Drone>& drones() const { return drones_; }
+    int activeCount(bool aco) const;   // Active (not returning) drones of one role
 
 private:
     void replan();
+
+    int launchDrone(bool aco);                          // New drone at the launch point; returns its id
+    std::vector<size_t> activeIndices(bool aco) const;  // Positions in drones_ of the active drones of a role
 
     // Give d a fire-safe transit path to its current route target. If that target can't be reached, try
     // the following waypoints along the route. If none can be reached the drone is put into holding.
@@ -32,7 +36,9 @@ private:
     SafePlanner planner_;
     std::mt19937 rng_{ 2024 };
     MissionPlan plan_;
+    Vec2 launch_;                // Where drones launch from (and, later, return to)
     std::vector<Drone> drones_;
+    int nextId_ = 0;             // Id for the next drone launched
     bool planDirty_ = true;
     bool planChanged_ = false;
     int frame_ = 0;

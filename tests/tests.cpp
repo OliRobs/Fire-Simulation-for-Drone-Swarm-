@@ -916,7 +916,7 @@ TEST(aco_drones_are_spread_round_the_tour) {
     // All ACO drones start at the same base, yet must be aiming for different points on the tour
     std::set<size_t> targets;
     for (const Drone& d : mission.drones()) if (d.isACO) targets.insert(d.target);
-    CHECK(static_cast<int>(targets.size()) == ACO_DRONES);
+    CHECK(static_cast<int>(targets.size()) == mission.activeCount(true));
 }
 
 int main() {
