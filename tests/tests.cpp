@@ -846,6 +846,43 @@ TEST(planned_routes_never_cross_the_hard_no_fly_zone) {
 }
 
 // ============================================================================
+// Perimeter line (ordered loops traced from the committed-fire distance field)
+// ============================================================================
+TEST(perimeter_line_round_fire_is_one_loop) {
+    const int r = 30;
+    Perimeter perim(discFire(400, 400, r));
+    const auto loops = tracePerimeterLine(perim.distance());
+    CHECK(loops.size() == 1);
+    if (loops.size() != 1) return;
+    // About 2 pi (r + 1.2 km) long, and every point on it 1.2 km from the fire's edge
+    const float expected = 2.0f * 3.14159265f * (r + PERIMETER_DISTANCE);
+    CHECK(std::fabs(loopLength(loops[0]) - expected) < 0.02f * expected);
+    float worst = 0.0f;
+    for (const Vec2& p : loops[0]) {
+        const float d = std::sqrt(sqDist(p, Vec2(400.5f, 400.5f))) - (r + PERIMETER_DISTANCE);
+        worst = std::max(worst, std::fabs(d));
+    }
+    CHECK(worst < 1.0f);
+    // Anticlockwise on screen = negative signed area in grid coordinates (y down)
+    CHECK(loopSignedArea(loops[0]) < 0.0);
+    // Consecutive points are close together (one square apart at most), i.e. the loop really is ordered
+    bool ordered = true;
+    for (size_t i = 0; i < loops[0].size(); ++i)
+        ordered = ordered && sqDist(loops[0][i], loops[0][(i + 1) % loops[0].size()]) < 2.01f;
+    CHECK(ordered);
+}
+
+TEST(perimeter_line_two_fires_give_two_loops_the_same_way_round) {
+    std::vector<std::uint8_t> fire = discFire(400, 400, 20);
+    const auto other = discFire(1200, 900, 35);
+    for (int i = 0; i < N; ++i) fire[i] |= other[i];
+    Perimeter perim(fire);
+    const auto loops = tracePerimeterLine(perim.distance());
+    CHECK(loops.size() == 2);
+    for (const auto& l : loops) CHECK(loopSignedArea(l) < 0.0);
+}
+
+// ============================================================================
 // Drones
 // ============================================================================
 TEST(drone_moves_at_drone_speed) {

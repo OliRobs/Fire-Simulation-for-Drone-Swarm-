@@ -1,4 +1,8 @@
 #include "perimeter.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <unordered_map>
 #include "viewport.h"   // maskBounds
 
 // ============================================================================
@@ -109,4 +113,164 @@ std::vector<int> Perimeter::ringCells() const {
         }
     }
     return ring;
+}
+
+// ============================================================================
+// Perimeter Line Tracing (marching squares)
+// ============================================================================
+// The distance field is sampled at cell centres. For every square of four neighbouring centres, the level
+// line crosses each side whose two corners lie on opposite sides of the level; the crossing point is found by
+// linear interpolation. Each crossing is identified by the side it is on, so the pieces from neighbouring
+// squares join up exactly and can be chained into closed loops.
+//
+// Orientation: walking round a square's corners in a fixed order, the sides where the line crosses alternate
+// between "leaving the fire side" and "entering the fire side". Every piece is drawn from a leaving crossing
+// to an entering crossing, which keeps the fire side on the same hand for every piece of every loop. The
+// result is flipped once at the end if needed so the loops run anticlockwise on screen.
+namespace {
+    // Corner offsets of a square, in walking order: top-left, top-right, bottom-right, bottom-left
+    constexpr int SQ_DX[4] = { 0, 1, 1, 0 };
+    constexpr int SQ_DY[4] = { 0, 0, 1, 1 };
+
+    // Id of the square side from corner c to corner c+1 (mod 4) of the square whose top-left sample is (x, y).
+    // Horizontal sides and vertical sides get even and odd ids, keyed by the side's top / left sample, so the
+    // side shared by two squares gets the same id from both. Samples run from -1 to GRID_WIDTH (one ring of
+    // padding round the grid), hence the +1 offsets.
+    std::int64_t sideId(int x, int y, int c) {
+        const std::int64_t W = GRID_WIDTH + 2;
+        auto key = [&](int sx, int sy, int vertical) {
+            return ((static_cast<std::int64_t>(sy) + 1) * W + (sx + 1)) * 2 + vertical;
+        };
+        switch (c) {
+        case 0:  return key(x, y, 0);         // Top side
+        case 1:  return key(x + 1, y, 1);     // Right side
+        case 2:  return key(x, y + 1, 0);     // Bottom side
+        default: return key(x, y, 1);         // Left side
+        }
+    }
+
+    // One traced piece of line inside a square, from one side crossing to another
+    struct Piece {
+        Vec2 from, to;
+        std::int64_t toSide;   // Side the piece ends on, i.e. where the next piece starts
+        bool used = false;
+    };
+}
+
+std::vector<std::vector<Vec2>> tracePerimeterLine(const DistanceTransform& perimEdt, float level) {
+    // Only the transform's window holds finite distances; the level line lies well inside it, so squares
+    // from one sample outside the window to its far edge are enough
+    const GridRect win = perimEdt.window();
+    std::vector<std::vector<Vec2>> loops;
+    if (win.empty()) return loops;
+
+    // Level-line function at sample (x, y): negative on the fire side of the line (nearer than `level`).
+    // Samples off the grid count as far from the fire, so a loop that would leave the map closes along its edge.
+    auto f = [&](int x, int y) -> double {
+        if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) return 1e9;
+        return std::sqrt(perimEdt.squaredDistance(y * GRID_WIDTH + x)) - level;
+    };
+
+    // Pieces keyed by the side they start on (each side crossing starts exactly one piece)
+    std::unordered_map<std::int64_t, Piece> pieces;
+    std::vector<std::int64_t> order;   // Start sides in scan order, so tracing is deterministic
+
+    for (int y = win.y0 - 1; y < win.y1; ++y) {
+        for (int x = win.x0 - 1; x < win.x1; ++x) {
+            double v[4];
+            bool in[4];
+            int nIn = 0;
+            for (int c = 0; c < 4; ++c) {
+                v[c] = f(x + SQ_DX[c], y + SQ_DY[c]);
+                in[c] = v[c] < 0.0;
+                nIn += in[c];
+            }
+            if (nIn == 0 || nIn == 4) continue;   // The line doesn't pass through this square
+
+            // Crossing point on side c (corner c -> c+1), and whether the walk leaves the fire side there
+            Vec2 at[4];
+            bool leaving[4], crosses[4];
+            for (int c = 0; c < 4; ++c) {
+                const int d = (c + 1) % 4;
+                crosses[c] = in[c] != in[d];
+                leaving[c] = in[c] && !in[d];
+                if (!crosses[c]) continue;
+                const double t = v[c] / (v[c] - v[d]);   // Where the linear interpolation reaches 0
+                const Vec2 a(x + SQ_DX[c] + 0.5f, y + SQ_DY[c] + 0.5f), b(x + SQ_DX[d] + 0.5f, y + SQ_DY[d] + 0.5f);
+                at[c] = a + (b - a) * static_cast<float>(t);
+            }
+
+            // Pair each leaving crossing with an entering one. With two crossings there is only one way. With
+            // four (a saddle: opposite corners on the same side) the centre value decides: if the centre is on
+            // the fire side, the two fire corners are joined, so each leaving crossing pairs with the NEXT
+            // entering crossing round the square (cutting off the far corners); otherwise with the previous one.
+            const bool saddle = nIn == 2 && in[0] == in[2];
+            const bool centreIn = (v[0] + v[1] + v[2] + v[3]) * 0.25 < 0.0;
+            for (int c = 0; c < 4; ++c) {
+                if (!crosses[c] || !leaving[c]) continue;
+                int e = -1;
+                if (saddle && !centreIn) {
+                    for (int k = 1; k < 4 && e < 0; ++k) { const int j = (c + 4 - k) % 4; if (crosses[j] && !leaving[j]) e = j; }
+                }
+                else {
+                    for (int k = 1; k < 4 && e < 0; ++k) { const int j = (c + k) % 4; if (crosses[j] && !leaving[j]) e = j; }
+                }
+                if (e < 0) continue;   // Cannot happen with a consistent sign pattern
+                const std::int64_t start = sideId(x, y, c);
+                pieces[start] = Piece{ at[c], at[e], sideId(x, y, e) };
+                order.push_back(start);
+            }
+        }
+    }
+
+    // Chain pieces into loops: each piece ends on the side where the next one starts
+    for (std::int64_t first : order) {
+        auto it = pieces.find(first);
+        if (it == pieces.end() || it->second.used) continue;
+        std::vector<Vec2> loop;
+        while (it != pieces.end() && !it->second.used) {
+            it->second.used = true;
+            loop.push_back(it->second.from);
+            it = pieces.find(it->second.toSide);
+        }
+        if (loop.size() >= 3) loops.push_back(std::move(loop));
+    }
+
+    // Make every loop run anticlockwise on screen (negative area in y-down grid coordinates). The piece rule
+    // gives every loop the same sense round the fire, so if the first enclosing loop is the wrong way round,
+    // they all are: test the loop with the largest area (always one that encloses fire) and flip all if needed.
+    if (!loops.empty()) {
+        size_t biggest = 0;
+        for (size_t i = 1; i < loops.size(); ++i) {
+            if (std::fabs(loopSignedArea(loops[i])) > std::fabs(loopSignedArea(loops[biggest]))) biggest = i;
+        }
+        if (loopSignedArea(loops[biggest]) > 0.0) {
+            for (auto& l : loops) std::reverse(l.begin(), l.end());
+        }
+    }
+
+    // Start each loop at its topmost point (then leftmost), a stable place for lane numbering to begin
+    for (auto& l : loops) {
+        const auto top = std::min_element(l.begin(), l.end(), [](Vec2 a, Vec2 b) {
+            return a.y < b.y || (a.y == b.y && a.x < b.x);
+        });
+        std::rotate(l.begin(), top, l.end());
+    }
+    return loops;
+}
+
+// Shoelace formula over the closed polyline
+double loopSignedArea(const std::vector<Vec2>& loop) {
+    double a = 0.0;
+    for (size_t i = 0, n = loop.size(); i < n; ++i) {
+        const Vec2 p = loop[i], q = loop[(i + 1) % n];
+        a += static_cast<double>(p.x) * q.y - static_cast<double>(q.x) * p.y;
+    }
+    return 0.5 * a;
+}
+
+float loopLength(const std::vector<Vec2>& loop) {
+    float len = 0.0f;
+    for (size_t i = 0, n = loop.size(); i < n; ++i) len += std::sqrt(sqDist(loop[i], loop[(i + 1) % n]));
+    return len;
 }
