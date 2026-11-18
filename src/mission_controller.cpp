@@ -211,8 +211,8 @@ void MissionController::replan() {
     // bunch, so any point on the tour is revisited every (tour length / ACO count) instead of in bursts.
     // ACO fleet size. Growth: launch new drones at once from the launch point if the tour needs more for the
     // revisit limit (plan.acoNeeded). Shrink: one drone fewer once the remaining drones would have kept the
-    // revisit time within SHRINK_MARGIN of the limit on SHRINK_REPLANS re-plans in a row. Slots are then worked
-    // out for the new count, so the drones are re-spaced evenly.
+    // revisit time within SHRINK_MARGIN of the limit on SHRINK_REPLANS re-plans in a row. Drones already on the
+    // tour keep their progress; new drones fill the largest gaps between them.
     int numAco = activeCount(true);
     if (plan_.acoNeeded > numAco) {
         for (int k = numAco; k < plan_.acoNeeded; ++k) launchDrone(true);
@@ -221,7 +221,7 @@ void MissionController::replan() {
     }
     else if (numAco > MIN_ACO_DRONES && plan_.acoLoopS / (numAco - 1) <= SHRINK_MARGIN * ACO_REVISIT_S) {
         if (++acoShrinkStreak_ >= SHRINK_REPLANS) {
-            --numAco;              // The drone left without a slot below is retired
+            --numAco;              // The drone in the most crowded spot below is retired
             acoShrinkStreak_ = 0;
         }
     }
@@ -232,49 +232,106 @@ void MissionController::replan() {
     const std::vector<size_t> aco = activeIndices(true);
     const std::vector<Vec2>& tour = plan_.acoTour;
     const int n = static_cast<int>(tour.size());
-    std::vector<int> spareAco;   // ACO drones left without a slot (fleet shrinking)
+    std::vector<int> spareAco;   // ACO drones to retire (fleet shrinking)
     if (n > 0 && numAco > 0) {
         // Arc length from waypoint 0 to each waypoint, and the total closed-loop length
         std::vector<float> arc(n, 0.0f);
         for (int i = 1; i < n; ++i) arc[i] = arc[i - 1] + std::sqrt(sqDist(tour[i - 1], tour[i]));
-        const float total = arc[n - 1] + std::sqrt(sqDist(tour[n - 1], tour[0]));
+        const float total = std::max(arc[n - 1] + std::sqrt(sqDist(tour[n - 1], tour[0])), 1e-6f);
 
-        // Anchor the spacing at the waypoint closest to the ACO drones' average position, so the group
-        // as a whole joins the tour at its closest point
-        Vec2 mean(0.0f, 0.0f);
-        for (size_t i : aco) mean += drones_[i].pos;
-        mean = mean / static_cast<float>(aco.size());
-        const int anchor = static_cast<int>(nearestWaypoint(tour, mean));
-
-        // Slot j is the waypoint closest to (anchor + j/numAco of the way round the tour)
-        std::vector<int> slots(numAco);
-        for (int j = 0; j < numAco; ++j) {
-            const float want = std::fmod(arc[anchor] + total * j / numAco, std::max(total, 1e-6f));
+        // Waypoint whose arc position is closest to `want` (taken round the loop)
+        auto waypointAt = [&](float want) {
+            want = std::fmod(std::fmod(want, total) + total, total);
             int best = 0;
             float bd = std::numeric_limits<float>::max();
             for (int i = 0; i < n; ++i) {
-                const float dd = std::fabs(arc[i] - want);
+                const float dd = std::min(std::fabs(arc[i] - want), total - std::fabs(arc[i] - want));
                 if (dd < bd) { bd = dd; best = i; }
             }
-            slots[j] = best;
+            return best;
+        };
+
+        // --- Drones already flying the tour keep their progress ---
+        // A drone that had a route before this re-plan locks back on at the tour node nearest to it and carries on
+        // the same way round (the tour is always anticlockwise, see planMission). If it has already passed that
+        // node (it is beyond it, along the leg to the next node), it goes on to the next node instead, so it
+        // never turns back.
+        std::vector<size_t> onTour, joining;
+        for (size_t i : aco) (drones_[i].route.empty() ? joining : onTour).push_back(i);
+        for (size_t i : onTour) {
+            Drone& d = drones_[i];
+            const size_t near = nearestWaypoint(tour, d.pos);
+            const size_t next = (near + 1) % n;
+            const Vec2 ahead = tour[next] - tour[near], fromNode = d.pos - tour[near];
+            const bool passed = n > 1 && ahead.x * fromNode.x + ahead.y * fromNode.y > 0.0f;
+            d.route = tour;
+            d.target = passed ? next : near;
         }
 
-        // Each drone takes the closest slot not yet claimed by another drone. When the fleet is shrinking there
-        // is one slot fewer than drones, and the drone left without one is retired.
-        std::vector<char> claimed(numAco, 0);
-        for (size_t i : aco) {
-            Drone& d = drones_[i];
-            int pick = -1;
-            float bd = std::numeric_limits<float>::max();
-            for (int j = 0; j < numAco; ++j) {
-                if (claimed[j]) continue;
-                const float dd = sqDist(d.pos, tour[slots[j]]);
-                if (dd < bd) { bd = dd; pick = j; }
+        // --- Shrinking: retire the drone in the most crowded spot ---
+        // Its two neighbours' gaps merge, so removing the drone with the shortest gap behind plus ahead of it
+        // leaves the remaining drones as evenly spaced as possible. (chooseDroneToRetire may still pick another.)
+        while (static_cast<int>(onTour.size() + joining.size()) > numAco) {
+            if (!joining.empty()) { spareAco.push_back(drones_[joining.back()].id); joining.pop_back(); continue; }
+            std::vector<size_t> order = onTour;
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                return arc[drones_[a].target] < arc[drones_[b].target];
+            });
+            const size_t m = order.size();
+            size_t crowded = 0;
+            float smallest = std::numeric_limits<float>::max();
+            for (size_t k = 0; k < m; ++k) {
+                const float prev = arc[drones_[order[(k + m - 1) % m]].target];
+                const float next = arc[drones_[order[(k + 1) % m]].target];
+                const float span = m == 1 ? total : std::fmod(next - prev + 2.0f * total, total);
+                if (span < smallest) { smallest = span; crowded = k; }
             }
-            if (pick < 0) { spareAco.push_back(d.id); continue; }
-            claimed[pick] = 1;
-            d.route = tour;
-            d.target = static_cast<size_t>(slots[pick]);
+            spareAco.push_back(drones_[order[crowded]].id);
+            onTour.erase(std::find(onTour.begin(), onTour.end(), order[crowded]));
+        }
+
+        // --- Drones joining the tour (just launched) ---
+        if (onTour.empty()) {
+            // Nobody on the tour yet (first plan): space them evenly, anchored at the node nearest the group's
+            // average position, each taking the closest free slot
+            Vec2 mean(0.0f, 0.0f);
+            for (size_t i : joining) mean += drones_[i].pos;
+            mean = mean / static_cast<float>(std::max<size_t>(joining.size(), 1));
+            const float anchorArc = arc[nearestWaypoint(tour, mean)];
+            const int count = static_cast<int>(joining.size());
+            std::vector<char> claimed(count, 0);
+            for (size_t i : joining) {
+                Drone& d = drones_[i];
+                int pick = 0;
+                float bd = std::numeric_limits<float>::max();
+                for (int j = 0; j < count; ++j) {
+                    if (claimed[j]) continue;
+                    const float dd = sqDist(d.pos, tour[waypointAt(anchorArc + total * j / count)]);
+                    if (dd < bd) { bd = dd; pick = j; }
+                }
+                claimed[pick] = 1;
+                d.route = tour;
+                d.target = static_cast<size_t>(waypointAt(anchorArc + total * pick / count));
+            }
+        }
+        else {
+            // Others are already flying: each new drone takes the middle of the largest gap between drones, so
+            // the drones already on the tour don't have to move to make room
+            std::vector<float> taken;
+            for (size_t i : onTour) taken.push_back(arc[drones_[i].target]);
+            for (size_t i : joining) {
+                std::sort(taken.begin(), taken.end());
+                float bestGap = -1.0f, mid = 0.0f;
+                for (size_t k = 0; k < taken.size(); ++k) {
+                    const float from = taken[k];
+                    const float gap = k + 1 < taken.size() ? taken[k + 1] - from : taken[0] + total - from;
+                    if (gap > bestGap) { bestGap = gap; mid = from + gap * 0.5f; }
+                }
+                Drone& d = drones_[i];
+                d.route = tour;
+                d.target = static_cast<size_t>(waypointAt(mid));
+                taken.push_back(arc[d.target]);
+            }
         }
     }
     else {

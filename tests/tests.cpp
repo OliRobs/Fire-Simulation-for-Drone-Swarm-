@@ -1347,6 +1347,83 @@ TEST(aco_drones_are_spread_round_the_tour) {
     }
 }
 
+// After a re-plan, ACO drones already on the tour lock back on at the nearest node (or the next one, if they
+// have just passed it) and keep going the same way round: anticlockwise, never back the way they came
+TEST(aco_drones_rejoin_at_the_nearest_node_going_forward) {
+    const int cx = GRID_WIDTH / 2, cy = GRID_HEIGHT / 2;
+    std::vector<std::uint8_t> fire = discFire(cx, cy, 25);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    live.compute(fire);
+    Perimeter perim(fire);
+    MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
+    mission.markFireChanged();
+
+    // Anticlockwise on screen = the angle about the fire's centre goes down (y points down the grid)
+    auto angle = [&](Vec2 p) { return std::atan2(p.y - (cy + 0.5f), p.x - (cx + 0.5f)); };
+    auto turn = [](float from, float to) {   // Signed change of angle, wrapped into (-pi, pi]
+        float d = to - from;
+        while (d > 3.14159265f) d -= 2.0f * 3.14159265f;
+        while (d <= -3.14159265f) d += 2.0f * 3.14159265f;
+        return d;
+    };
+
+    // Fly long enough for every ACO drone to be out on the tour, then grow the fire so the tour is re-planned
+    for (int f = 0; f < 3 * REPLAN_INTERVAL; ++f) mission.update();
+    CHECK(loopSignedArea(mission.plan().acoTour) < 0.0);   // Tour handed out anticlockwise
+    fire = discFire(cx, cy, 40);
+    live.compute(fire);
+    perim.update(fire);
+    mission.markFireChanged();
+
+    // Run up to and through the re-plan, remembering where each ACO drone was just before it
+    std::vector<std::pair<int, Vec2>> before;
+    bool replanned = false;
+    for (int f = 0; f < REPLAN_INTERVAL + 1 && !replanned; ++f) {
+        before.clear();
+        for (const Drone& d : mission.drones()) if (d.isACO) before.emplace_back(d.id, d.pos);
+        mission.update();
+        replanned = mission.takePlanChanged();
+    }
+    CHECK(replanned);
+    const std::vector<Vec2>& tour = mission.plan().acoTour;
+    CHECK(loopSignedArea(tour) < 0.0);
+    const size_t n = tour.size();
+
+    // Where each drone was sent at the re-plan: the node nearest where it was, or the next one or two (it had
+    // passed that node, or reached it during the re-plan frame)
+    int checked = 0, wrongNode = 0, backwards = 0;
+    std::vector<std::pair<int, float>> followed;   // Drone id, angle at the re-plan
+    for (const auto& [id, was] : before) {
+        for (const Drone& d : mission.drones()) {
+            if (d.id != id || d.state != DroneState::Active) continue;   // Not found: retired on this re-plan
+            ++checked;
+            const size_t near = nearestWaypoint(tour, was);
+            bool ok = false;
+            for (size_t k = 0; k <= 2; ++k) ok = ok || d.target == (near + k) % n;
+            wrongNode += !ok;
+            followed.emplace_back(id, angle(d.pos));
+        }
+    }
+
+    // Follow them all for a while: each must keep turning anticlockwise round the fire overall
+    std::vector<float> total(followed.size(), 0.0f), last(followed.size());
+    for (size_t k = 0; k < followed.size(); ++k) last[k] = followed[k].second;
+    for (int f = 0; f < 30; ++f) {
+        mission.update();
+        for (size_t k = 0; k < followed.size(); ++k)
+            for (const Drone& d : mission.drones())
+                if (d.id == followed[k].first) {
+                    total[k] += turn(last[k], angle(d.pos));
+                    last[k] = angle(d.pos);
+                }
+    }
+    for (float t : total) backwards += t > 0.0f;
+    std::printf("  (%d ACO drones checked: %d sent to another node, %d went backwards)\n", checked, wrongNode, backwards);
+    CHECK(checked > 0);
+    CHECK(wrongNode == 0);
+    CHECK(backwards == 0);
+}
+
 // The ACO count follows the one-drone loop time: each point is revisited within ACO_REVISIT_S
 TEST(aco_count_follows_the_revisit_time) {
     for (int r : { 1, 100, 200 }) {
