@@ -34,22 +34,29 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     std::vector<std::uint8_t> zone(N, 0); // 1 = inner zone, 2 = outer zone, 0 = unmapped / no-fly
     std::vector<int> cells;
 
-    for (int i = 0; i < N; ++i) {
-        // Exclude cells inside the no-fly standoff zone around the active fire
-        if (liveEdt.squaredDistance(i) < NO_FLY_SQ) continue;
+    // Only the perimeter transform's window can hold search-area cells: outside it every cell reads INF (for
+    // the Perimeter's transform, more than SEARCH_DISTANCE + 1 from the committed fire), so beyond outerHi.
+    // Scanning just the window, row by row, finds the same cells in the same order as scanning the whole grid.
+    const GridRect win = perimEdt.window();
+    plan.bounds = win;
+    for (int y = win.y0; y < win.y1; ++y) {
+        for (int i = y * GRID_WIDTH + win.x0, end = y * GRID_WIDTH + win.x1; i < end; ++i) {
+            // Exclude cells inside the no-fly standoff zone around the active fire
+            if (liveEdt.squaredDistance(i) < NO_FLY_SQ) continue;
 
-        // Categorize valid cells based on squared distance from committed perimeter
-        const double d2 = perimEdt.squaredDistance(i);
-        if (d2 < innerHi) {
-            zone[i] = 1; // Inner zone cell
+            // Categorize valid cells based on squared distance from committed perimeter
+            const double d2 = perimEdt.squaredDistance(i);
+            if (d2 < innerHi) {
+                zone[i] = 1; // Inner zone cell
+            }
+            else if (d2 < outerHi) {
+                zone[i] = 2; // Outer zone cell
+            }
+            else {
+                continue;    // Beyond max search boundary
+            }
+            cells.push_back(i);
         }
-        else if (d2 < outerHi) {
-            zone[i] = 2; // Outer zone cell
-        }
-        else {
-            continue;    // Beyond max search boundary
-        }
-        cells.push_back(i);
     }
 
     // Return empty plan if no surveyable cells exist

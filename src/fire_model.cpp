@@ -149,6 +149,7 @@ void FireSimulation::igniteAt(int idx, double t) {
     burning_.push_back(idx);
 
     const int x = idx % GRID_WIDTH, y = idx / GRID_WIDTH;
+    fireBounds_.include(x, y);   // Keep the fire's bounding box current (readers use it to skip grid scans)
     for (int d = 0; d < NUM_DIRS; ++d) {
         const int nx = x + DX[d], ny = y + DY[d];
         if (nx < 0 || nx >= GRID_WIDTH || ny < 0 || ny >= GRID_HEIGHT) continue;

@@ -15,6 +15,7 @@ struct Region {
 
 struct MissionPlan {
     std::vector<int> label;                        // Voronoi region per cell (-1 = outside search area)
+    GridRect bounds;                               // Every cell with label >= 0 lies inside this rectangle
     std::vector<Region> regions;
     std::vector<std::vector<Vec2>> sweepRoutes;    // One boustrophedon route per sweep drone
     std::vector<Vec2> acoTour;                     // Closed tour through the outer points of interest

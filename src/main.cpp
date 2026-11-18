@@ -231,10 +231,11 @@ int main(int argc, char** argv) {
         // --- 3c. Handle Dynamic Fire Growth & Spatial Updates ---
         if (sim.takeFireGrew()) {
             // Recalculate dynamic Euclidean distance field for no-fly safety zones
-            liveEdt.compute(sim.fireMask());
+            // (fireBounds() tells it where the fire is, so it needn't scan the grid to find it)
+            liveEdt.compute(sim.fireMask(), sim.fireBounds());
 
-            // Advance containment perimeter sections if encroached upon
-            if (perimeter.update(sim.fireMask())) {
+            // Advance containment perimeter sections if encroached upon (only looks inside the fire's box)
+            if (perimeter.update(sim.fireMask(), sim.fireBounds())) {
                 ringDirty = true;
             }
 

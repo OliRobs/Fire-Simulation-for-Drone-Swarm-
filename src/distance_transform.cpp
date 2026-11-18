@@ -24,27 +24,50 @@ DistanceTransform::DistanceTransform(int w, int h, int maxDistance)
 // Populates internal `sq_` vector with squared Euclidean distance to the nearest source cell.
 // With a range limit (maxDistance_ > 0) only a window round the sources is worked out; see the header.
 void DistanceTransform::compute(const std::vector<std::uint8_t>& sources) {
-    // --- Pass 0: choose the window of cells to work out ---
-    Window win{ 0, 0, w_, h_ };   // No range limit: the whole grid
+    if (maxDistance_ <= 0) {   // No range limit: the bounding box is not needed, the whole grid is worked out
+        computeIn(sources, GridRect{ 0, 0, w_, h_ });
+        return;
+    }
+    // --- Pass 0: bounding box of the sources ---
+    // A row with no source is skipped with one std::find_if over its bytes. Callers that already know the
+    // box (the fire simulation tracks it) use the other overload and skip this 4 MB scan.
+    GridRect box;
+    for (int y = 0; y < h_; ++y) {
+        const std::uint8_t* row = sources.data() + static_cast<size_t>(y) * w_;
+        const std::uint8_t* first = std::find_if(row, row + w_, [](std::uint8_t v) { return v != 0; });
+        if (first == row + w_) continue;
+        const std::uint8_t* last = row + w_ - 1;
+        while (*last == 0) --last;   // Stops at 'first' at the latest
+        box.include(static_cast<int>(first - row), y);
+        box.include(static_cast<int>(last - row), y);
+    }
+    computeIn(sources, box);
+}
+
+// ----------------------------------------------------------------------------
+// Compute with a known source rectangle
+// ----------------------------------------------------------------------------
+// The caller promises every source lies inside sourceBounds (see the header).
+void DistanceTransform::compute(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds) {
+    // Clip to the grid, in case the caller's rectangle runs off it
+    const GridRect clipped{ std::max(0, sourceBounds.x0), std::max(0, sourceBounds.y0),
+                            std::min(w_, sourceBounds.x1), std::min(h_, sourceBounds.y1) };
+    computeIn(sources, maxDistance_ > 0 ? clipped : GridRect{ 0, 0, w_, h_ });
+}
+
+// ----------------------------------------------------------------------------
+// Shared body of both compute() overloads
+// ----------------------------------------------------------------------------
+// sourceBounds: a rectangle holding every source cell (the whole grid when there is no range limit).
+void DistanceTransform::computeIn(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds) {
+    // --- Choose the window of cells to work out ---
+    GridRect win{ 0, 0, w_, h_ };   // No range limit: the whole grid
     if (maxDistance_ > 0) {
-        // Bounding box of the sources. A row with no source is skipped with one std::find over its bytes.
-        int bx0 = w_, by0 = h_, bx1 = -1, by1 = -1;
-        for (int y = 0; y < h_; ++y) {
-            const std::uint8_t* row = sources.data() + static_cast<size_t>(y) * w_;
-            const std::uint8_t* first = std::find_if(row, row + w_, [](std::uint8_t v) { return v != 0; });
-            if (first == row + w_) continue;
-            const std::uint8_t* last = row + w_ - 1;
-            while (*last == 0) --last;   // Stops at 'first' at the latest
-            bx0 = std::min(bx0, static_cast<int>(first - row));
-            bx1 = std::max(bx1, static_cast<int>(last - row));
-            by0 = std::min(by0, y);
-            by1 = y;
-        }
         // Grow the box by the range (+1 so a threshold of exactly maxDistance is still exact) and clip to the grid
         const int r = maxDistance_ + 1;
-        win = bx1 < 0 ? Window{}   // No sources at all: nothing to work out, everything is INF
-                      : Window{ std::max(0, bx0 - r), std::max(0, by0 - r),
-                                std::min(w_, bx1 + 1 + r), std::min(h_, by1 + 1 + r) };
+        win = sourceBounds.empty() ? GridRect{}   // No sources at all: nothing to work out, everything is INF
+                                   : GridRect{ std::max(0, sourceBounds.x0 - r), std::max(0, sourceBounds.y0 - r),
+                                               std::min(w_, sourceBounds.x1 + r), std::min(h_, sourceBounds.y1 + r) };
 
         // Cells the previous window wrote but this one may not: back to INF. (The fire only grows, so the new
         // window normally contains the old one and this just rewrites cells that are about to be overwritten.)
