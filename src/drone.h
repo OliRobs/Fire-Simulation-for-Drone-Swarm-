@@ -4,7 +4,14 @@
 #include "safe_planner.h"
 #include "types.h"
 
+// What a drone is doing. Active drones fly their assigned route; a Returning drone has been retired (the fleet
+// shrank) and is flying a fire-safe path back to the launch point, where the controller removes it.
+enum class DroneState { Active, Returning };
+
 struct Drone {
+    int id = -1;               // Stable identity, unique for the whole run (the fleet grows and shrinks, so a
+                               // drone's position in the controller's list is not a stable way to refer to it)
+    DroneState state = DroneState::Active;
     Vec2 pos{ 0.0f, 0.0f };
     std::vector<Vec2> route;   // Closed loop of waypoints (grid units, cell centres)
     std::vector<Vec2> transit; // Fire-safe path flown first, to reach the loop after a re-plan or re-route
