@@ -135,27 +135,35 @@ void MissionController::replan() {
     // Re-seed so the same fire state always gives the same plan (stable, reproducible routes)
     rng_.seed(2024);
 
-    // The sweep drones the lanes are split between
+    // The sweep drones the lanes are split between, and the last plan (for stable ownership)
     const std::vector<size_t> sweep = activeIndices(false);
     SweepFleet fleet;
     for (size_t i : sweep) {
         fleet.ids.push_back(drones_[i].id);
         fleet.positions.push_back(drones_[i].pos);
     }
+    fleet.previous = &plan_;
 
+    // (The new plan is built while the old one is still in plan_, then replaces it)
     plan_ = planMission(live_, perim_, planner_, rng_, fleet);
     lastPlanFrame_ = frame_;
     planDirty_ = false;
     planChanged_ = true;
 
-    // --- Sweep drones: each flies the sector the plan gave its id, joined at the waypoint nearest it ---
-    for (size_t s = 0; s < plan_.sweepRoutes.size(); ++s) {
-        for (size_t i : sweep) {
-            Drone& d = drones_[i];
-            if (d.id != plan_.sectorDrone[s]) continue;
-            d.route = plan_.sweepRoutes[s];
-            d.target = nearestWaypoint(d.route, d.pos);
-        }
+    // --- Sweep fleet growth: a sector no existing drone was matched to gets a new drone from the launch point.
+    // Growing takes effect at once (shrinking waits; see the shrink rule). ---
+    for (int& id : plan_.sectorDrone) {
+        if (id < 0) id = launchDrone(false);
+    }
+
+    // --- Sweep drones: each flies the sector the plan gave its id, joined at the waypoint nearest it. A drone
+    // left without a sector (fewer lanes than drones) waits in place with no route. ---
+    for (size_t i : activeIndices(false)) {
+        Drone& d = drones_[i];
+        const auto it = std::find(plan_.sectorDrone.begin(), plan_.sectorDrone.end(), d.id);
+        if (it == plan_.sectorDrone.end()) { d.route.clear(); continue; }
+        d.route = plan_.sweepRoutes[it - plan_.sectorDrone.begin()];
+        d.target = nearestWaypoint(d.route, d.pos);
     }
 
     // --- ACO drones: all share the same closed tour, flown in the same direction, evenly spaced ---

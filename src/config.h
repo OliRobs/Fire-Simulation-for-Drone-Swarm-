@@ -63,8 +63,19 @@ constexpr int PERIMETER_SECTION_RADIUS = cellsFromMetres(300.0f);  // How far al
 // needed and the transform only works out a window this far round the fire (distance_transform.h).
 // Derived from the settings above, not a design value of its own.
 constexpr int LIVE_EDT_RANGE = MIN_FIRE_DISTANCE + 1;
-constexpr int SWEEP_DRONES = 3;           // Boustrophedon drones (inside the perimeter)
-constexpr int ACO_DRONES = 5;             // ACO-routed drones (perimeter out to SEARCH_DISTANCE)
+constexpr int SWEEP_DRONES = 3;           // Boustrophedon drones at the start (the fleet then follows the fire)
+constexpr int ACO_DRONES = 5;             // ACO-routed drones at the start (perimeter out to SEARCH_DISTANCE)
+
+// --- Sweep fleet sizing ---
+// Each sweep drone owns one sector of the inner band (a contiguous run of lanes along the perimeter line) and
+// flies it as a closed loop. Lap time = length of that closed route (lanes, steps between lanes, fire detours
+// and the closing leg back to the start) / DRONE_SPEED_MPS. Because the route is a closed loop, the lap time
+// is also the longest wait between visits to any lane. The fleet is sized so no lap is over the limit.
+constexpr float MAX_SWEEP_LAP_S = 20.0f * 60.0f;  // Longest allowed sweep lap: 20 minutes
+constexpr float SWEEP_LAP_MARGIN = 0.9f;          // Sectors are first sized to 90 % of the limit (straight-line
+                                                  // estimate), leaving 10 % for fire detours
+constexpr int MIN_SWEEP_DRONES = 3;               // Fewest sweep drones, even for a small fire
+constexpr int MAX_SWEEP_DRONES = 10;              // Most sweep drones; above this, sectors may go over the limit
 constexpr float SENSOR_RADIUS = 60.0f / SIM_CELL_SIZE_M;   // Cells; 60 m, so the swath is 120 m wide
 constexpr int LANE_SPACING = static_cast<int>(2.0f * SENSOR_RADIUS);
 constexpr float DRONE_SPEED_MPS = 16.5f;  // Drone ground speed, m/s

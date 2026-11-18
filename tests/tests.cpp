@@ -1015,6 +1015,69 @@ TEST(sweep_sectors_are_exclusive_and_contiguous) {
 }
 
 // ============================================================================
+// Sweep fleet sizing
+// ============================================================================
+TEST(sweep_laps_stay_within_the_cap) {
+    for (int r : { 1, 50, 100 }) {   // New fire, 1 km and 2 km across
+        SweepSetup s(discFire(800, 800, r));
+        const int sectors = static_cast<int>(s.plan.sweepRoutes.size());
+        std::printf("  (fire %d m across: %d sweep drones, laps", 2 * r * static_cast<int>(SIM_CELL_SIZE_M), sectors);
+        for (float lap : s.plan.sweepLapS) std::printf(" %.1f", lap / 60.0f);
+        std::printf(" min)\n");
+        CHECK(sectors >= MIN_SWEEP_DRONES && sectors <= MAX_SWEEP_DRONES);
+        CHECK(sectors < MAX_SWEEP_DRONES);   // These fires are small enough not to need the maximum
+        CHECK(s.plan.sweepNeeded == sectors);
+        CHECK(!s.plan.sweepOverLimit);
+        for (int k = 0; k < sectors; ++k) {
+            // The lap includes the closing leg back to the start
+            CHECK(std::fabs(s.plan.sweepLapS[k] - flightSeconds(closedRouteLength(s.plan.sweepRoutes[k]))) < 1e-3f);
+            CHECK(s.plan.sweepLapS[k] <= MAX_SWEEP_LAP_S);
+        }
+    }
+    // Bigger fires need more sweep drones
+    SweepSetup small(discFire(800, 800, 1)), big(discFire(800, 800, 100));
+    CHECK(big.plan.sweepRoutes.size() > small.plan.sweepRoutes.size());
+}
+
+// Two re-plans with a small change to the fire keep most cells with the same drone
+TEST(sweep_ownership_is_stable) {
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    std::vector<std::uint8_t> fire = discFire(600, 600, 60);
+    live.compute(fire);
+    Perimeter perim(fire);
+    SafePlanner sp(live);
+    std::mt19937 rng(2024);
+    MissionPlan first = planMission(live, perim.distance(), sp, rng);
+    // As the controller does: new drones (sectorDrone -1) get fresh ids
+    int nextId = 100;
+    for (int& id : first.sectorDrone) if (id < 0) id = nextId++;
+
+    // The fire grows a little on one side
+    const auto lobe = discFire(665, 600, 12);
+    for (int i = 0; i < N; ++i) fire[i] |= lobe[i];
+    live.compute(fire);
+    perim.update(fire);
+    SweepFleet fleet;
+    for (size_t k = 0; k < first.sectorDrone.size(); ++k) {
+        fleet.ids.push_back(first.sectorDrone[k]);
+        fleet.positions.push_back(first.sweepRoutes[k].empty() ? Vec2(0.5f, 0.5f) : first.sweepRoutes[k].front());
+    }
+    fleet.previous = &first;
+    rng.seed(2024);
+    const MissionPlan second = planMission(live, perim.distance(), sp, rng, fleet);
+
+    long long both = 0, same = 0;
+    for (int i = 0; i < N; ++i) {
+        if (first.owner[i] < 0 || second.owner[i] < 0) continue;
+        ++both;
+        same += first.sectorDrone[first.owner[i]] == second.sectorDrone[second.owner[i]];
+    }
+    std::printf("  (%.1f %% of %lld cells kept their drone)\n", 100.0 * same / std::max(1LL, both), both);
+    CHECK(both > 0);
+    CHECK(same >= 0.8 * both);
+}
+
+// ============================================================================
 // Drones
 // ============================================================================
 TEST(drone_moves_at_drone_speed) {
@@ -1071,6 +1134,40 @@ TEST(mission_drones_never_fly_over_fire) {
     std::printf("  (drone moves over fire: %d, frames ending inside hard zone: %d)\n", crossings, insideHardZone);
     CHECK(crossings == 0);
     CHECK(insideHardZone == 0);
+}
+
+// Growing a fire makes the controller launch more drones, at once, from the launch point
+TEST(fleet_grows_with_the_fire) {
+    const Vec2 base(2.5f, GRID_HEIGHT - 2.5f);
+    std::vector<std::uint8_t> fire = discFire(700, 700, 1);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    live.compute(fire);
+    Perimeter perim(fire);
+    MissionController mission(live, perim.distance(), base);
+    mission.markFireChanged();
+    mission.update();
+    const int sweepBefore = mission.activeCount(false);
+    int maxIdBefore = -1;
+    for (const Drone& d : mission.drones()) maxIdBefore = std::max(maxIdBefore, d.id);
+
+    fire = discFire(700, 700, 100);   // Now 2 km across
+    live.compute(fire);
+    perim.update(fire);
+    mission.markFireChanged();
+    for (int f = 0; f < REPLAN_INTERVAL; ++f) mission.update();
+    const int sweepAfter = mission.activeCount(false);
+    std::printf("  (sweep drones %d -> %d)\n", sweepBefore, sweepAfter);
+    CHECK(sweepAfter > sweepBefore);
+    CHECK(sweepAfter == mission.plan().sweepNeeded);
+    // Every sector has exactly one active drone flying it
+    std::set<int> flying;
+    for (const Drone& d : mission.drones()) if (!d.isACO && d.state == DroneState::Active) flying.insert(d.id);
+    CHECK(static_cast<int>(flying.size()) == static_cast<int>(mission.plan().sweepRoutes.size()));
+    for (int id : mission.plan().sectorDrone) CHECK(flying.count(id) == 1);
+    // The new drones have new ids
+    int newOnes = 0;
+    for (const Drone& d : mission.drones()) newOnes += d.id > maxIdBefore;
+    CHECK(newOnes == sweepAfter - sweepBefore);
 }
 
 TEST(aco_drones_are_spread_round_the_tour) {

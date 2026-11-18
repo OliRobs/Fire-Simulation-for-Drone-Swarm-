@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <utility>
 #include "aco.h"
 #include "boustrophedon.h"
@@ -210,6 +211,91 @@ namespace {
         }
         return out;
     }
+
+    // ------------------------------------------------------------------------
+    // Drones Needed for One Lane Group
+    // ------------------------------------------------------------------------
+    // Fewest sectors this group can be split into with every estimated lap within `limit` cells (capped at
+    // `most`, or the number of lanes if smaller)
+    int dronesNeeded(const std::vector<SweepLane>& lanes, LaneRange group, float limit, int most) {
+        const int n = group.second - group.first + 1;
+        most = std::max(1, std::min(most, n));
+        for (int k = 1; k < most; ++k) {
+            if (longestEstimate(lanes, splitGroup(lanes, group.first, group.second, k)) <= limit) return k;
+        }
+        return most;
+    }
+
+    // ------------------------------------------------------------------------
+    // Match Sectors to Drones (stable ownership)
+    // ------------------------------------------------------------------------
+    // Returns, for each sector, the id of the drone that should fly it, or -1 if no drone is left for it (a new
+    // drone must be launched). First by shared land: count the band cells each new sector shares with each
+    // drone's land in the previous plan, then repeatedly give the pair with the most shared cells to each other
+    // (greedy). Sectors are cut along the perimeter line in a fixed direction, so a drone that keeps its side of
+    // the fire keeps most of its sector. Sectors and drones still unmatched after that (first plan, new land) are
+    // paired by distance: each drone to the nearest unclaimed sector start, nearest pairs first.
+    std::vector<int> matchSectors(const MissionPlan& plan, const std::vector<std::vector<Vec2>>& routes,
+                                  const SweepFleet& fleet, const GridRect& area) {
+        const int S = static_cast<int>(routes.size()), D = static_cast<int>(fleet.ids.size());
+        std::vector<int> result(S, -1);
+        std::vector<char> droneUsed(D, 0);
+
+        struct Pair { double score; int sector, drone; };
+        std::vector<Pair> pairs;
+
+        // --- By shared cells with the previous plan ---
+        const MissionPlan* prev = fleet.previous;
+        if (prev && !prev->owner.empty() && !prev->sectorDrone.empty()) {
+            std::vector<long long> shared(static_cast<size_t>(S) * D, 0);
+            for (int y = area.y0; y < area.y1; ++y) {
+                for (int i = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; i < end; ++i) {
+                    const int s = plan.owner[i], ps = prev->owner[i];
+                    if (s < 0 || ps < 0 || ps >= static_cast<int>(prev->sectorDrone.size())) continue;
+                    const int id = prev->sectorDrone[ps];
+                    for (int d = 0; d < D; ++d) if (fleet.ids[d] == id) { ++shared[static_cast<size_t>(s) * D + d]; break; }
+                }
+            }
+            for (int s = 0; s < S; ++s)
+                for (int d = 0; d < D; ++d)
+                    if (shared[static_cast<size_t>(s) * D + d] > 0) pairs.push_back({ static_cast<double>(shared[static_cast<size_t>(s) * D + d]), s, d });
+            std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) {
+                return a.score > b.score || (a.score == b.score && (a.sector < b.sector || (a.sector == b.sector && a.drone < b.drone)));
+            });
+            for (const Pair& p : pairs) {
+                if (result[p.sector] >= 0 || droneUsed[p.drone]) continue;
+                result[p.sector] = fleet.ids[p.drone];
+                droneUsed[p.drone] = 1;
+            }
+        }
+
+        // --- The rest by distance from each drone to the nearest waypoint of each sector ---
+        pairs.clear();
+        for (int s = 0; s < S; ++s) {
+            if (result[s] >= 0 || routes[s].empty()) continue;
+            for (int d = 0; d < D; ++d) {
+                if (droneUsed[d]) continue;
+                float best = std::numeric_limits<float>::max();
+                for (const Vec2& p : routes[s]) best = std::min(best, sqDist(p, fleet.positions[d]));
+                pairs.push_back({ best, s, d });
+            }
+        }
+        std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) {
+            return a.score < b.score || (a.score == b.score && (a.sector < b.sector || (a.sector == b.sector && a.drone < b.drone)));
+        });
+        for (const Pair& p : pairs) {
+            if (result[p.sector] >= 0 || droneUsed[p.drone]) continue;
+            result[p.sector] = fleet.ids[p.drone];
+            droneUsed[p.drone] = 1;
+        }
+
+        // --- Sectors without a route (no lanes at all): any drone still free ---
+        for (int s = 0; s < S; ++s) {
+            if (result[s] >= 0) continue;
+            for (int d = 0; d < D; ++d) if (!droneUsed[d]) { result[s] = fleet.ids[d]; droneUsed[d] = 1; break; }
+        }
+        return result;
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -236,7 +322,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     plan.label.assign(N, -1);
     plan.zone.assign(N, 0);   // 1 = inner zone, 2 = outer zone, 0 = unmapped / no-fly
     plan.sweepRoutes.assign(numSweep, {});
-    plan.sectorDrone = fleet.ids;
+    plan.sectorDrone = fleet.ids;   // Until sectors are made (empty search area: each drone keeps an empty one)
 
     // ------------------------------------------------------------------------
     // Step 1: Classify Grid Cells into Inner, Outer, or Invalid Zones
@@ -321,19 +407,74 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     fillCoverageGaps(plan.lanes, perimEdt, zone, win);
 
     // ------------------------------------------------------------------------
-    // Step 5: Contiguous Sectors of Lanes, one per Sweep Drone
+    // Step 5: Size the Sweep Fleet and Split the Lanes into Sectors
     // ------------------------------------------------------------------------
+    // Lap limits in cells of flying: the hard cap, and the 90 % target the straight-line estimates are sized to
+    // (the other 10 % allows for fire detours, which only show up once the routes are built)
+    const float cellsPerSecond = DRONE_SPEED_MPS / SIM_CELL_SIZE_M;
+    const float capCells = MAX_SWEEP_LAP_S * cellsPerSecond;
+    const float targetCells = capCells * SWEEP_LAP_MARGIN;
+
     std::vector<LaneRange> sectors;
-    if (!plan.lanes.empty() && numSweep > 0) {
-        joinSmallLoops(plan.lanes, numSweep);
-        const std::vector<LaneRange> groups = laneGroups(plan.lanes);
-        sectors = sectorsFor(plan.lanes, groups, shareDrones(plan.lanes, groups, numSweep));
+    if (!plan.lanes.empty()) {
+        // 1-2. Estimate: per loop, the fewest contiguous sectors whose estimated laps (lanes, steps between
+        //      lanes, straight return leg) all fit in the target; their sum is the drones needed
+        std::vector<LaneRange> groups = laneGroups(plan.lanes);
+        int needed = 0;
+        for (const LaneRange& g : groups) needed += dronesNeeded(plan.lanes, g, targetCells, MAX_SWEEP_DRONES);
+
+        // Drones to plan for: never fewer than the fleet has now (shrinking is the controller's call, made
+        // slowly) and within the configured range
+        int k = std::clamp(std::max(needed, numSweep), MIN_SWEEP_DRONES, MAX_SWEEP_DRONES);
+
+        // A sector never spans two loops; with more loops than drones, join the smallest onto their neighbours
+        if (static_cast<int>(groups.size()) > k) {
+            joinSmallLoops(plan.lanes, k);
+            groups = laneGroups(plan.lanes);
+        }
+
+        // 3. Split: share the k drones between loops (worst loop first) and split each loop min-max
+        std::vector<int> share = shareDrones(plan.lanes, groups, k);
+
+        // 4. Check: build the real fire-safe routes and time them. If a lap is over the cap, add a drone to that
+        //    lap's loop and split again (at most 3 extra passes)
+        for (int pass = 0; ; ++pass) {
+            sectors = sectorsFor(plan.lanes, groups, share);
+            plan.sweepRoutes.assign(sectors.size(), {});
+            plan.sweepLapS.assign(sectors.size(), 0.0f);
+            int worst = -1;
+            for (int s = 0; s < static_cast<int>(sectors.size()); ++s) {
+                plan.sweepRoutes[s] = safeLoop(planner, sectorWaypoints(plan.lanes, sectors[s].first, sectors[s].second));
+                plan.sweepLapS[s] = flightSeconds(closedRouteLength(plan.sweepRoutes[s]));
+                if (plan.sweepLapS[s] > MAX_SWEEP_LAP_S && (worst < 0 || plan.sweepLapS[s] > plan.sweepLapS[worst])) worst = s;
+            }
+            const int total = std::accumulate(share.begin(), share.end(), 0);
+            if (worst < 0 || total >= MAX_SWEEP_DRONES || pass >= 3) break;
+
+            // Which loop the worst lap belongs to (groups and sectors are both in sequence order)
+            int g = 0;
+            while (sectors[worst].first > groups[g].second) ++g;
+            if (share[g] >= groups[g].second - groups[g].first + 1) break;   // Already one lane per drone
+            ++share[g];
+            needed = std::max(needed, total + 1);
+        }
+        plan.sweepNeeded = std::clamp(needed, MIN_SWEEP_DRONES, MAX_SWEEP_DRONES);
+        for (float lap : plan.sweepLapS) plan.sweepOverLimit = plan.sweepOverLimit || lap > MAX_SWEEP_LAP_S;
+    }
+    else {
+        // No lanes (the fire covers the whole band): one empty sector per drone, so each keeps its place
+        sectors.assign(std::max(numSweep, 0), LaneRange(0, -1));
+        plan.sweepRoutes.assign(sectors.size(), {});
+        plan.sweepLapS.assign(sectors.size(), 0.0f);
+        plan.sweepNeeded = std::clamp(numSweep, MIN_SWEEP_DRONES, MAX_SWEEP_DRONES);
     }
     for (int s = 0; s < static_cast<int>(sectors.size()); ++s) {
         for (int i = sectors[s].first; i <= sectors[s].second; ++i) plan.lanes[i].sector = s;
-        plan.sweepRoutes[s] = safeLoop(planner, sectorWaypoints(plan.lanes, sectors[s].first, sectors[s].second));
     }
+
+    // Ownership: each band cell to its nearest lane's sector, then sectors to drones by shared land
     plan.owner = buildOwnerMap(plan.lanes, zone, win);
+    plan.sectorDrone = matchSectors(plan, plan.sweepRoutes, fleet, win);
 
     // ------------------------------------------------------------------------
     // Step 6: Plan Outer Zone Ant Colony Optimization (ACO) Tour

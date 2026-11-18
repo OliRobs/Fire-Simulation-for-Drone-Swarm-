@@ -33,6 +33,16 @@ struct SweepLane {
     }
 };
 
+// Seconds to fly `cells` cells at DRONE_SPEED_MPS
+inline float flightSeconds(float cells) { return cells * SIM_CELL_SIZE_M / DRONE_SPEED_MPS; }
+
+// Length of a closed route (including the wrap from the last waypoint back to the first), cells
+inline float closedRouteLength(const std::vector<Vec2>& route) {
+    float len = 0.0f;
+    for (size_t i = 0, n = route.size(); n > 1 && i < n; ++i) len += std::sqrt(sqDist(route[i], route[(i + 1) % n]));
+    return len;
+}
+
 struct MissionPlan {
     std::vector<int> label;                        // Voronoi region per cell (-1 = outside search area)
     std::vector<std::uint8_t> zone;                // Per cell: 1 inner band (sweep), 2 outer zone (ACO), 0 neither
@@ -44,7 +54,11 @@ struct MissionPlan {
     std::vector<SweepLane> lanes;                  // Every lane, in sequence order along the perimeter line
     std::vector<int> owner;                        // Per cell: sector whose lane is nearest (-1 outside the band)
     std::vector<std::vector<Vec2>> sweepRoutes;    // One closed route per sector
-    std::vector<int> sectorDrone;                  // Id of the drone flying each sector (-1: not yet assigned)
+    std::vector<int> sectorDrone;                  // Id of the drone flying each sector (-1: a new drone is needed)
+    std::vector<float> sweepLapS;                  // Lap time of each sector's closed route, seconds
+    int sweepNeeded = 0;                           // Sweep drones needed to keep every lap within MAX_SWEEP_LAP_S
+                                                   // (clamped to MIN_SWEEP_DRONES .. MAX_SWEEP_DRONES)
+    bool sweepOverLimit = false;                   // Some lap is over MAX_SWEEP_LAP_S (only at MAX_SWEEP_DRONES)
 
     // --- ACO ---
     std::vector<Vec2> acoTour;                     // Closed tour through the outer points of interest
