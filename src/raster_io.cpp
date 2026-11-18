@@ -33,6 +33,25 @@ namespace {
     // roads and canopy layers are all dropped. If the variables aren't set, look in the usual places instead:
     // the GISInternals layout used for this project (C:\gdal\bin\proj9\share, as in UAVFireMap.vcxproj), a
     // conda-style C:\gdal\share\proj, next to the program, and the Linux system folders.
+    // ------------------------------------------------------------------------
+    // Value of an environment variable, or "" if it isn't set.
+    // MSVC flags std::getenv as unsafe (warning C4996, an error with the project's SDL checks on), so on MSVC
+    // this uses _dupenv_s, which returns a copy the caller must free; elsewhere plain std::getenv.
+    // ------------------------------------------------------------------------
+    std::string envVar(const char* name) {
+#ifdef _MSC_VER
+        char* value = nullptr;
+        size_t len = 0;
+        std::string out;
+        if (_dupenv_s(&value, &len, name) == 0 && value) out = value;
+        std::free(value);
+        return out;
+#else
+        const char* value = std::getenv(name);
+        return value ? value : "";
+#endif
+    }
+
     std::string firstFolderWith(std::initializer_list<const char*> folders, const char* file) {
         for (const char* f : folders) {
             std::error_code ec;
@@ -43,7 +62,8 @@ namespace {
 
     void configureProjAndGdalData() {
         // --- PROJ database ---
-        std::string projDir = firstFolderWith({ std::getenv("PROJ_DATA"), std::getenv("PROJ_LIB") }, "proj.db");
+        const std::string projData = envVar("PROJ_DATA"), projLib = envVar("PROJ_LIB");
+        std::string projDir = firstFolderWith({ projData.c_str(), projLib.c_str() }, "proj.db");
         if (projDir.empty()) {
             projDir = firstFolderWith({ "C:/gdal/bin/proj9/share", "C:/gdal/bin/proj8/share", "C:/gdal/bin/proj7/share",
                                         "C:/gdal/share/proj", "proj9/share", "proj/share", "share/proj",
