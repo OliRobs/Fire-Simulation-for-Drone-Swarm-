@@ -242,6 +242,11 @@ builds and times the real routes and adds a drone if a lap is still over 20 minu
 
 A long, wind-driven fire has a longer perimeter line than a round one of the same width and needs more.
 
+**ACO tour.** The tour is always flown anticlockwise. After a re-plan each ACO drone locks back on at the
+nearest node of the new tour (or the next one if it has just passed it) and carries on the same way, so drones
+never turn back. New drones join in the middle of the largest gaps; when the fleet shrinks, the drone in the most
+crowded spot goes home, keeping the rest as evenly spaced as possible.
+
 **ACO fleet size.** The ACO drones share one tour, evenly spaced, each flying all of it. Their count is the time
 one drone takes to fly the tour divided by 20 minutes, rounded up, so every point is passed at least every 20
 minutes. One drone covers a new fire's tour (about 17 km); a 2 km fire needs two.

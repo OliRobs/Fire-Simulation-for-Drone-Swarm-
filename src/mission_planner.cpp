@@ -535,6 +535,14 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     for (int i : solveACO(pois, rng)) tour.push_back(pois[i]);
     plan.acoTour = safeLoop(planner, tour);
 
+    // Always fly the tour anticlockwise on screen (negative signed area in y-down grid coordinates, the same
+    // sense as the perimeter line). The ant colony returns the cycle in either direction, so without this a
+    // re-plan could reverse the tour and send every ACO drone back the way it came. Reversing the waypoint
+    // order keeps the same fire-safe legs, flown the other way.
+    if (plan.acoTour.size() >= 3 && loopSignedArea(plan.acoTour) > 0.0) {
+        std::reverse(plan.acoTour.begin() + 1, plan.acoTour.end());   // Keep the same start point
+    }
+
     // ACO drone count: one drone takes acoLoopS to fly the safe tour; n evenly spaced drones pass each point
     // every acoLoopS / n, so n = ceil(acoLoopS / ACO_REVISIT_S) keeps that within the revisit limit
     plan.acoLoopS = flightSeconds(closedRouteLength(plan.acoTour));
