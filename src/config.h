@@ -7,8 +7,8 @@
 // onto the same cells. 1 m cells would be 400 million cells (~16 GB) and are finer than the Rothermel model
 // is meant for (a uniform fuel bed), so the DEM detail goes into the slope instead.
 // The window is centred on the DEM (or the LANDFIRE raster without one) unless --centre <lon> <lat> is given.
-constexpr int GRID_WIDTH = 2000;
-constexpr int GRID_HEIGHT = 2000;
+constexpr int GRID_WIDTH = 1200;
+constexpr int GRID_HEIGHT = 1000;
 constexpr int CELL_SIZE = 1;            // Pixel size per grid cell
 constexpr float SIM_CELL_SIZE_M = 10.0f;
 constexpr float DEFAULT_CELL_SIZE_M = SIM_CELL_SIZE_M; // Ground size of a cell when no DEM is loaded (metres)
@@ -25,7 +25,7 @@ constexpr bool ALIGN_NORTH_UP = true;
 // --- Fire spread (Rothermel surface fire model, see rothermel.h) ---
 // Simulated time per frame (10 s). With DRONE_SPEED_MPS below, drones fly 16.5 m/s, a realistic survey-drone
 // speed, so fire and drones move at the right speeds relative to each other.
-constexpr float SIM_MINUTES_PER_TICK = 10.0f / 60.0f;
+constexpr float SIM_MINUTES_PER_TICK = 20.0f / 60.0f;
 // Fuel model for cells with no fuel map (synthetic terrain, tests): GR2, low load dry climate grass
 constexpr int DEFAULT_FUEL_MODEL = 102;
 // Weather. NOT in the LANDFIRE data: these should come from a weather station or forecast (README,
