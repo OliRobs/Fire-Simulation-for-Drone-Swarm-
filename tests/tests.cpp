@@ -1029,6 +1029,53 @@ TEST(sweep_sectors_are_exclusive_and_contiguous) {
 // ============================================================================
 // Sweep fleet sizing
 // ============================================================================
+// The incremental lap builder used by the sector split gives exactly (bit for bit) the lap the plain
+// lane-by-lane sum gives, for every sector of a random set of lanes, whether built with addNext() or
+// asked ahead with lapWithNext(). Exactness matters: the sector split compares these laps with a limit,
+// so any rounding difference could move a sector border and change the plan.
+TEST(sector_lap_builder_matches_plain_sum) {
+    // Reference: the original estimateSectorLength loop, kept here unchanged
+    auto plain = [](const std::vector<SweepLane>& lanes, int first, int last) {
+        float len = 0.0f;
+        Vec2 start, end;
+        for (int i = first; i <= last; ++i) {
+            const std::vector<Vec2>& p = lanes[i].pts;
+            const bool inward = (i - first) % 2 == 0;
+            const Vec2 a = inward ? p.front() : p.back(), b = inward ? p.back() : p.front();
+            if (i == first) start = a;
+            else len += std::sqrt(sqDist(end, a));
+            len += lanes[i].length();
+            end = b;
+        }
+        return len + std::sqrt(sqDist(end, start));
+    };
+
+    // Random lanes of 1 to 3 runs (2 to 6 points, single-cell runs included), scattered over the map
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> coord(0.0f, 1000.0f);
+    std::vector<SweepLane> lanes(40);
+    for (SweepLane& l : lanes) {
+        const int pts = 2 * (1 + static_cast<int>(rng() % 3));
+        for (int k = 0; k < pts; ++k) l.pts.push_back(Vec2(coord(rng), coord(rng)));
+        if (rng() % 5 == 0) l.pts[1] = l.pts[0];                     // A single-cell run
+    }
+
+    int mismatches = 0;
+    for (int first = 0; first < static_cast<int>(lanes.size()); ++first) {
+        SectorLapBuilder b(lanes, first);
+        for (int last = first;; ++last) {
+            const float want = plain(lanes, first, last);
+            if (b.lap() != want || estimateSectorLength(lanes, first, last) != want) ++mismatches;
+            if (last + 1 >= static_cast<int>(lanes.size())) break;
+            const float ahead = b.lapWithNext();
+            if (ahead != plain(lanes, first, last + 1)) ++mismatches;
+            b.addNext();
+            if (b.last() != last + 1 || b.lap() != ahead) ++mismatches;
+        }
+    }
+    CHECK(mismatches == 0);
+}
+
 TEST(sweep_laps_stay_within_the_cap) {
     for (int r : { 1, 50, 100 }) {   // New fire, 1 km and 2 km across
         SweepSetup s(discFire(CX, CY, r));
