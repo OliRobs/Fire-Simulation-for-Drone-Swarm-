@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "aco.h"
+#include "boustrophedon.h"
 #include "distance_transform.h"
 #include "drone.h"
 #include "fire_model.h"
@@ -841,7 +842,8 @@ TEST(planned_routes_never_cross_the_hard_no_fly_zone) {
     int nonEmpty = 0;
     for (const auto& r : plan.sweepRoutes) { checkLoop(r); nonEmpty += r.empty() ? 0 : 1; }
     checkLoop(plan.acoTour);
-    CHECK(nonEmpty == SWEEP_DRONES);
+    CHECK(nonEmpty == static_cast<int>(plan.sweepRoutes.size()));   // Every sector has a route
+    CHECK(nonEmpty >= SWEEP_DRONES);
     CHECK(plan.acoTour.size() >= 3);
 }
 
@@ -880,6 +882,136 @@ TEST(perimeter_line_two_fires_give_two_loops_the_same_way_round) {
     const auto loops = tracePerimeterLine(perim.distance());
     CHECK(loops.size() == 2);
     for (const auto& l : loops) CHECK(loopSignedArea(l) < 0.0);
+}
+
+// ============================================================================
+// Sweep lanes and sectors
+// ============================================================================
+namespace {
+    // Everything a sweep test needs for one fire: the distance fields, the planner and the plan
+    struct SweepSetup {
+        DistanceTransform live{ GRID_WIDTH, GRID_HEIGHT };
+        Perimeter perim;
+        SafePlanner sp;
+        MissionPlan plan;
+        explicit SweepSetup(const std::vector<std::uint8_t>& fire) : perim(fire), sp(live) {
+            live.compute(fire);
+            std::mt19937 rng(2024);
+            plan = planMission(live, perim.distance(), sp, rng);
+        }
+    };
+
+    // Distance from p to the nearest run of any lane
+    float nearestLane(const std::vector<SweepLane>& lanes, Vec2 p) {
+        float best = std::numeric_limits<float>::max();
+        for (const SweepLane& l : lanes)
+            for (size_t i = 0; i + 1 < l.pts.size(); i += 2) {
+                const Vec2 a = l.pts[i], ab = l.pts[i + 1] - a, ap = p - a;
+                const float l2 = ab.x * ab.x + ab.y * ab.y;
+                const float t = l2 > 1e-9f ? std::clamp((ap.x * ab.x + ap.y * ab.y) / l2, 0.0f, 1.0f) : 0.0f;
+                best = std::min(best, std::sqrt(sqDist(p, a + ab * t)));
+            }
+        return best;
+    }
+
+    // Count of inner-band cells that no lane sees (further than LANE_COVER_RADIUS from every lane)
+    int unseenInnerCells(const MissionPlan& plan) {
+        int unseen = 0;
+        for (int y = plan.bounds.y0; y < plan.bounds.y1; ++y)
+            for (int x = plan.bounds.x0; x < plan.bounds.x1; ++x)
+                if (plan.zone[at(x, y)] == 1 && nearestLane(plan.lanes, Vec2(x + 0.5f, y + 0.5f)) > LANE_COVER_RADIUS + 1e-3f)
+                    ++unseen;
+        return unseen;
+    }
+
+    // A fire with a concave bay: a disc with a bite taken out of its east side
+    std::vector<std::uint8_t> bayFire() {
+        std::vector<std::uint8_t> fire = discFire(500, 500, 90);
+        const auto bite = discFire(575, 500, 60);
+        for (int i = 0; i < N; ++i) if (bite[i]) fire[i] = 0;
+        return fire;
+    }
+}
+
+TEST(sweep_lanes_point_at_a_round_fire) {
+    const int r = 30;
+    const Vec2 c(400.5f, 400.5f);
+    SweepSetup s(discFire(400, 400, r));
+    int mainLanes = 0, badDir = 0, badStart = 0, badEnd = 0;
+    for (const SweepLane& l : s.plan.lanes) {
+        if (l.gapFill) continue;
+        ++mainLanes;
+        // Direction: from the lane's outer end straight at the fire's centre, to within 3 degrees
+        const Vec2 along = l.pts.back() - l.pts.front(), toC = c - l.pts.front();
+        const float cosA = (along.x * toC.x + along.y * toC.y)
+            / (std::sqrt(along.x * along.x + along.y * along.y) * std::sqrt(toC.x * toC.x + toC.y * toC.y));
+        if (cosA < std::cos(3.0f * 3.14159265f / 180.0f)) ++badDir;
+        // Runs from the perimeter line (band's outer edge) to the 300 m standoff
+        const float rOut = std::sqrt(sqDist(l.pts.front(), c)), rIn = std::sqrt(sqDist(l.pts.back(), c));
+        if (std::fabs(rOut - (r + PERIMETER_DISTANCE)) > 2.0f) ++badStart;
+        if (std::fabs(rIn - (r + MIN_FIRE_DISTANCE)) > 2.0f) ++badEnd;
+    }
+    std::printf("  (%d main lanes; off direction %d, off start %d, off end %d)\n", mainLanes, badDir, badStart, badEnd);
+    // One lane per 120 m (at most) of perimeter line
+    CHECK(mainLanes == static_cast<int>(std::ceil(loopLength(s.plan.perimeterLoops[0]) / LANE_SPACING)));
+    CHECK(badDir == 0);
+    CHECK(badStart == 0);
+    CHECK(badEnd == 0);
+}
+
+TEST(sweep_lanes_cover_the_whole_band) {
+    SweepSetup round(discFire(400, 400, 30));
+    int gapLanes = 0;
+    for (const SweepLane& l : round.plan.lanes) gapLanes += l.gapFill;
+    CHECK(gapLanes == 0);                      // Convex fire: the main lanes alone see everything
+    CHECK(unseenInnerCells(round.plan) == 0);
+
+    SweepSetup bay(bayFire());
+    gapLanes = 0;
+    for (const SweepLane& l : bay.plan.lanes) gapLanes += l.gapFill;
+    std::printf("  (bay: %zu lanes, %d of them gap fill)\n", bay.plan.lanes.size(), gapLanes);
+    CHECK(gapLanes > 0);                       // Lanes spread apart in the bay, so gap fill had work to do
+    CHECK(unseenInnerCells(bay.plan) == 0);
+}
+
+TEST(sweep_sectors_are_exclusive_and_contiguous) {
+    SweepSetup s(bayFire());
+    const MissionPlan& plan = s.plan;
+    const int sectors = static_cast<int>(plan.sweepRoutes.size());
+
+    // Every inner cell has exactly one owner (a valid sector); no cell outside the band has one
+    int unowned = 0, strayOwner = 0;
+    for (int i = 0; i < N; ++i) {
+        if (plan.zone[i] == 1) unowned += plan.owner[i] < 0 || plan.owner[i] >= sectors;
+        else strayOwner += plan.owner[i] >= 0;
+    }
+    CHECK(unowned == 0);
+    CHECK(strayOwner == 0);
+
+    // Each sector is one contiguous run of the lane sequence
+    std::vector<int> runsOf(sectors, 0);
+    for (size_t i = 0; i < plan.lanes.size(); ++i) {
+        CHECK(plan.lanes[i].sector >= 0 && plan.lanes[i].sector < sectors);
+        if (i == 0 || plan.lanes[i].sector != plan.lanes[i - 1].sector) ++runsOf[plan.lanes[i].sector];
+    }
+    for (int r : runsOf) CHECK(r == 1);
+
+    // At the perimeter line, the edge lanes of neighbouring sectors are one lane spacing apart (+- 1 cell),
+    // i.e. the border is halfway between them and each edge lane is 60 m inside it. Measured on a round fire,
+    // where the straight distance between seeds equals the distance along the line (the bay puts a sharp
+    // corner in the perimeter line, where the straight distance is shorter).
+    SweepSetup round(discFire(400, 400, 30));
+    std::vector<const SweepLane*> mainLanes;
+    for (const SweepLane& l : round.plan.lanes) if (!l.gapFill) mainLanes.push_back(&l);
+    int borders = 0;
+    for (size_t i = 0; i < mainLanes.size(); ++i) {
+        const SweepLane& a = *mainLanes[i];
+        const SweepLane& b = *mainLanes[(i + 1) % mainLanes.size()];
+        if (a.sector == b.sector) continue;
+        ++borders;
+        CHECK(std::fabs(std::sqrt(sqDist(a.seed, b.seed)) - LANE_SPACING) <= 1.0f);
+    }
+    CHECK(borders == static_cast<int>(round.plan.sweepRoutes.size()));   // One loop: a border per sector
 }
 
 // ============================================================================

@@ -3,8 +3,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include "aco.h"
 #include "boustrophedon.h"
+#include "perimeter.h"
 #include "voronoi.h"
 
 // ============================================================================
@@ -13,25 +15,233 @@
 // Builds the complete multi-drone survey plan based on:
 // 1. Live Fire Standoff (Dynamic No-Fly Safety Zone around active fire).
 // 2. Committed Perimeter Zones:
-//    - Inner Zone (Between standoff and perimeter) -> Boustrophedon Lawn-mower Sweep.
+//    - Inner band (between the standoff and the perimeter line) -> sweep lanes at right angles to the fire,
+//      split into contiguous sectors along the perimeter line, one per sweep drone.
 //    - Outer Zone (Between perimeter and search distance bound) -> ACO Perimeter Loop.
-// 3. Voronoi Spatial Partitioning (k-means / Lloyd relaxation) to split the domain
-//    into sub-regions and extract Points of Interest (POIs).
+// 3. Voronoi Spatial Partitioning (k-means / Lloyd relaxation) to split the search area into regions that
+//    give the ACO points of interest (POIs).
 // ============================================================================
+
+namespace {
+    // ------------------------------------------------------------------------
+    // Fire-Safe Closed Loop
+    // ------------------------------------------------------------------------
+    // Connects waypoints using A* pathfinding whenever straight-line flight intersects the active fire no-fly
+    // zone. Waypoints that can only be reached by crossing the fire are dropped, so a route never contains an
+    // unsafe leg. The last leg back to the start closes the loop.
+    std::vector<Vec2> safeLoop(SafePlanner& planner, const std::vector<Vec2>& wp) {
+        if (wp.size() < 2) return wp;
+        std::vector<Vec2> out{ wp[0] };
+
+        for (size_t i = 1; i < wp.size(); ++i) {
+            // Plan from where the route actually got to (out.back()), which can differ from wp[i - 1]
+            // if that waypoint was dropped or the leg stopped short of it
+            const std::vector<Vec2> l = planner.leg(out.back(), wp[i]);
+            if (l.empty()) continue;   // Cut off by fire: skip this waypoint
+            out.insert(out.end(), l.begin(), l.end());
+        }
+        if (out.size() < 2) return out;
+
+        // Connect route end back to start point to complete the closed loop. The final point of the
+        // closing leg is out.front() itself, so it is left off (the drone wraps round to index 0).
+        const std::vector<Vec2> closing = planner.leg(out.back(), out.front());
+        if (!closing.empty()) {
+            out.insert(out.end(), closing.begin(), closing.end() - 1);
+        }
+        else {
+            // No safe way back to the start: fly back along the same route instead (out-and-back), so the
+            // wrap from the last waypoint to the first is always a leg that was already checked as safe
+            for (size_t i = out.size() - 1; i-- > 1;) out.push_back(out[i]);
+        }
+        return out;
+    }
+
+    // A contiguous run [first, last] of plan.lanes (inclusive)
+    using LaneRange = std::pair<int, int>;
+
+    // ------------------------------------------------------------------------
+    // Split One Lane Group into Sectors
+    // ------------------------------------------------------------------------
+    // Splits lanes[first..last] into at most `parts` contiguous sectors so that the longest estimated lap is as
+    // short as possible: binary-search the lap length, filling sectors greedily (each takes lanes while its
+    // estimated lap still fits). A sector's estimate only grows as lanes are added (triangle inequality on the
+    // return leg), so the greedy fill is exact for a given limit. Always returns exactly
+    // min(parts, number of lanes) sectors: if the best split needs fewer, the largest ones are cut in two.
+    std::vector<LaneRange> splitGroup(const std::vector<SweepLane>& lanes, int first, int last, int parts) {
+        const int n = last - first + 1;
+        parts = std::max(1, std::min(parts, n));
+
+        // Greedy fill for limit T; returns the sectors (may be more than `parts` if T is too small)
+        auto fill = [&](float T) {
+            std::vector<LaneRange> out;
+            int s = first;
+            while (s <= last) {
+                int e = s;
+                while (e + 1 <= last && estimateSectorLength(lanes, s, e + 1) <= T) ++e;
+                out.emplace_back(s, e);
+                s = e + 1;
+            }
+            return out;
+        };
+
+        // The lap can't be shorter than the longest single-lane sector, nor longer than the whole group
+        float lo = 0.0f;
+        for (int i = first; i <= last; ++i) lo = std::max(lo, estimateSectorLength(lanes, i, i));
+        float hi = std::max(lo, estimateSectorLength(lanes, first, last));
+        for (int it = 0; it < 40 && hi - lo > 0.5f; ++it) {
+            const float mid = 0.5f * (lo + hi);
+            if (static_cast<int>(fill(mid).size()) <= parts) hi = mid; else lo = mid;
+        }
+        std::vector<LaneRange> out = fill(hi);
+
+        // Too few sectors (spare drones): cut the longest multi-lane sector in two until there are `parts`
+        while (static_cast<int>(out.size()) < parts) {
+            int pick = -1;
+            float worst = -1.0f;
+            for (int i = 0; i < static_cast<int>(out.size()); ++i) {
+                if (out[i].second == out[i].first) continue;
+                const float l = estimateSectorLength(lanes, out[i].first, out[i].second);
+                if (l > worst) { worst = l; pick = i; }
+            }
+            if (pick < 0) break;
+            const LaneRange r = out[pick];
+            const int mid = (r.first + r.second) / 2;
+            out[pick] = LaneRange(r.first, mid);
+            out.insert(out.begin() + pick + 1, LaneRange(mid + 1, r.second));
+        }
+        return out;
+    }
+
+    // Longest estimated lap among some sectors (cells)
+    float longestEstimate(const std::vector<SweepLane>& lanes, const std::vector<LaneRange>& sectors) {
+        float worst = 0.0f;
+        for (const LaneRange& r : sectors) worst = std::max(worst, estimateSectorLength(lanes, r.first, r.second));
+        return worst;
+    }
+
+    // ------------------------------------------------------------------------
+    // Lane Groups
+    // ------------------------------------------------------------------------
+    // The contiguous ranges of plan.lanes that share a loop id (lanes are kept grouped by loop)
+    std::vector<LaneRange> laneGroups(const std::vector<SweepLane>& lanes) {
+        std::vector<LaneRange> groups;
+        for (int i = 0; i < static_cast<int>(lanes.size()); ++i) {
+            if (groups.empty() || lanes[i].loop != lanes[groups.back().first].loop) groups.emplace_back(i, i);
+            else groups.back().second = i;
+        }
+        return groups;
+    }
+
+    // ------------------------------------------------------------------------
+    // Join Small Loops onto Others
+    // ------------------------------------------------------------------------
+    // A sector never spans two loops, so with more loops than sweep drones (several spot fires, say) the smallest
+    // loops are joined to their nearest neighbour: the small loop's lanes are moved, as one block, to just after
+    // the lane of another loop nearest to it. The transit between them then counts towards that sector's lap
+    // (as the step between two lanes). Repeats until there are at most maxGroups groups.
+    void joinSmallLoops(std::vector<SweepLane>& lanes, int maxGroups) {
+        maxGroups = std::max(1, maxGroups);
+        for (;;) {
+            const std::vector<LaneRange> groups = laneGroups(lanes);
+            if (static_cast<int>(groups.size()) <= maxGroups) return;
+
+            // Smallest loop by estimated length of flying it all
+            int small = 0;
+            float smallLen = std::numeric_limits<float>::max();
+            for (int g = 0; g < static_cast<int>(groups.size()); ++g) {
+                const float l = estimateSectorLength(lanes, groups[g].first, groups[g].second);
+                if (l < smallLen) { smallLen = l; small = g; }
+            }
+            const LaneRange sr = groups[small];
+
+            // Nearest lane in any other loop (seed to seed)
+            int host = -1;
+            float hd = std::numeric_limits<float>::max();
+            for (int i = 0; i < static_cast<int>(lanes.size()); ++i) {
+                if (i >= sr.first && i <= sr.second) continue;
+                for (int j = sr.first; j <= sr.second; ++j) {
+                    const float d = sqDist(lanes[i].seed, lanes[j].seed);
+                    if (d < hd) { hd = d; host = i; }
+                }
+            }
+            const int hostLoop = lanes[host].loop;
+
+            // Move the block after the host lane (and after any gap-fill lanes attached to it)
+            std::vector<SweepLane> block(lanes.begin() + sr.first, lanes.begin() + sr.second + 1);
+            for (SweepLane& l : block) l.loop = hostLoop;
+            lanes.erase(lanes.begin() + sr.first, lanes.begin() + sr.second + 1);
+            int at = host < sr.first ? host + 1 : host - (sr.second - sr.first + 1) + 1;
+            while (at < static_cast<int>(lanes.size()) && lanes[at].gapFill) ++at;
+            lanes.insert(lanes.begin() + at, block.begin(), block.end());
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Share Drones Between Lane Groups
+    // ------------------------------------------------------------------------
+    // Gives each group one drone, then each further drone to the group whose longest sector is currently the
+    // longest. For a min-max goal with laps that only shrink as drones are added, this greedy is optimal.
+    // A group never gets more drones than it has lanes.
+    std::vector<int> shareDrones(const std::vector<SweepLane>& lanes, const std::vector<LaneRange>& groups, int k) {
+        const int g = static_cast<int>(groups.size());
+        std::vector<int> share(g, 1);
+        std::vector<float> worst(g);
+        for (int i = 0; i < g; ++i) worst[i] = longestEstimate(lanes, splitGroup(lanes, groups[i].first, groups[i].second, 1));
+        for (int left = k - g; left > 0; --left) {
+            int pick = -1;
+            for (int i = 0; i < g; ++i) {
+                if (share[i] >= groups[i].second - groups[i].first + 1) continue;   // One lane each already
+                if (pick < 0 || worst[i] > worst[pick]) pick = i;
+            }
+            if (pick < 0) break;
+            ++share[pick];
+            worst[pick] = longestEstimate(lanes, splitGroup(lanes, groups[pick].first, groups[pick].second, share[pick]));
+        }
+        return share;
+    }
+
+    // The sectors for a given share of drones per group, in sequence order
+    std::vector<LaneRange> sectorsFor(const std::vector<SweepLane>& lanes, const std::vector<LaneRange>& groups,
+                                      const std::vector<int>& share) {
+        std::vector<LaneRange> out;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            const std::vector<LaneRange> s = splitGroup(lanes, groups[i].first, groups[i].second, share[i]);
+            out.insert(out.end(), s.begin(), s.end());
+        }
+        return out;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Plan for the starting fleet
+// ----------------------------------------------------------------------------
 MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransform& perimEdt,
     SafePlanner& planner, std::mt19937& rng) {
+    SweepFleet fleet;
+    for (int i = 0; i < SWEEP_DRONES; ++i) {
+        fleet.ids.push_back(i);
+        fleet.positions.push_back(Vec2(0.5f, GRID_HEIGHT - 0.5f));
+    }
+    return planMission(liveEdt, perimEdt, planner, rng, fleet);
+}
+
+MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransform& perimEdt,
+    SafePlanner& planner, std::mt19937& rng, const SweepFleet& fleet) {
     constexpr int N = GRID_WIDTH * GRID_HEIGHT;
     constexpr double innerHi = (PERIMETER_DISTANCE + 0.5) * (PERIMETER_DISTANCE + 0.5);
     constexpr double outerHi = (SEARCH_DISTANCE + 0.5) * (SEARCH_DISTANCE + 0.5);
+    const int numSweep = static_cast<int>(fleet.ids.size());
 
     MissionPlan plan;
     plan.label.assign(N, -1);
-    plan.sweepRoutes.assign(SWEEP_DRONES, {});
+    plan.zone.assign(N, 0);   // 1 = inner zone, 2 = outer zone, 0 = unmapped / no-fly
+    plan.sweepRoutes.assign(numSweep, {});
+    plan.sectorDrone = fleet.ids;
 
     // ------------------------------------------------------------------------
     // Step 1: Classify Grid Cells into Inner, Outer, or Invalid Zones
     // ------------------------------------------------------------------------
-    std::vector<std::uint8_t> zone(N, 0); // 1 = inner zone, 2 = outer zone, 0 = unmapped / no-fly
+    std::vector<std::uint8_t>& zone = plan.zone;
     std::vector<int> cells;
 
     // Only the perimeter transform's window can hold search-area cells: outside it every cell reads INF (for
@@ -77,35 +287,16 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     }
 
     // ------------------------------------------------------------------------
-    // Step 3: Compute Per-Region Statistics and Extract Outer POIs
+    // Step 3: Outer-Zone Statistics per Region and their Points of Interest
     // ------------------------------------------------------------------------
     plan.regions.assign(S, Region());
-    Vec2 innerSumAll(0.0f, 0.0f);
-    int innerAll = 0;
-
-    // Accumulate cell coordinates per region split by zone type
     for (int idx : cells) {
+        if (zone[idx] != 2) continue;
         Region& rg = plan.regions[plan.label[idx]];
-        const int x = idx % GRID_WIDTH, y = idx / GRID_WIDTH;
-        const Vec2 p = cellCentre(idx);
-
-        if (zone[idx] == 1) { // Inner zone stats & bounding boxes
-            ++rg.innerCount;
-            rg.innerSum += p;
-            rg.minX = std::min(rg.minX, x); rg.maxX = std::max(rg.maxX, x);
-            rg.minY = std::min(rg.minY, y); rg.maxY = std::max(rg.maxY, y);
-            innerSumAll += p;
-            ++innerAll;
-        }
-        else {              // Outer zone stats
-            ++rg.outerCount;
-            rg.outerSum += p;
-        }
+        ++rg.outerCount;
+        rg.outerSum += cellCentre(idx);
     }
-
-    // Calculate centroids for inner and outer region components
     for (Region& rg : plan.regions) {
-        if (rg.innerCount > 0) rg.innerCentroid = rg.innerSum / static_cast<float>(rg.innerCount);
         if (rg.outerCount > 0) rg.outerCentroid = rg.outerSum / static_cast<float>(rg.outerCount);
     }
 
@@ -121,88 +312,41 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     }
 
     // ------------------------------------------------------------------------
-    // Step 4: Plan Inner Zone Boustrophedon Sweep Routes
+    // Step 4: Sweep Lanes along the Perimeter Line
     // ------------------------------------------------------------------------
-    // Order regions angularly around the global fire center and partition them
-    // into balanced workload sectors assigned across available sweep drones.
-    std::vector<int> innerRegions;
-    int totalInner = 0;
-    for (int r = 0; r < S; ++r) {
-        if (plan.regions[r].innerCount > 0) {
-            innerRegions.push_back(r);
-            totalInner += plan.regions[r].innerCount;
-        }
-    }
-
-    const Vec2 fireCentre = innerAll > 0 ? innerSumAll / static_cast<float>(innerAll) : Vec2(0.0f, 0.0f);
-
-    auto angleOf = [&](int r) {
-        const Vec2 c = plan.regions[r].innerCentroid;
-        return std::atan2(c.y - fireCentre.y, c.x - fireCentre.x);
-        };
-
-    // Sort inner regions by polar angle relative to fire center
-    std::sort(innerRegions.begin(), innerRegions.end(), [&](int a, int b) {
-        return angleOf(a) < angleOf(b);
-        });
-
-    // Partition sorted sectors and append boustrophedon sweep paths per drone
-    int cumulative = 0;
-    for (int r : innerRegions) {
-        const Region& rg = plan.regions[r];
-        const double mid = cumulative + rg.innerCount * 0.5;
-        const int chunk = std::min(SWEEP_DRONES - 1, static_cast<int>(mid * SWEEP_DRONES / totalInner));
-        cumulative += rg.innerCount;
-        appendBoustrophedon(r, rg, plan.label, zone, plan.sweepRoutes[chunk]);
-    }
+    // Trace the 1.2 km line into loops, seed a lane at most every 120 m along each, run each lane straight in
+    // towards the fire, then add short gap-fill lanes where lanes spread apart in concave bays.
+    plan.perimeterLoops = tracePerimeterLine(perimEdt);
+    plan.lanes = layLanes(plan.perimeterLoops, perimEdt, zone);
+    fillCoverageGaps(plan.lanes, perimEdt, zone, win);
 
     // ------------------------------------------------------------------------
-    // Step 5: Plan Outer Zone Ant Colony Optimization (ACO) Tour
+    // Step 5: Contiguous Sectors of Lanes, one per Sweep Drone
+    // ------------------------------------------------------------------------
+    std::vector<LaneRange> sectors;
+    if (!plan.lanes.empty() && numSweep > 0) {
+        joinSmallLoops(plan.lanes, numSweep);
+        const std::vector<LaneRange> groups = laneGroups(plan.lanes);
+        sectors = sectorsFor(plan.lanes, groups, shareDrones(plan.lanes, groups, numSweep));
+    }
+    for (int s = 0; s < static_cast<int>(sectors.size()); ++s) {
+        for (int i = sectors[s].first; i <= sectors[s].second; ++i) plan.lanes[i].sector = s;
+        plan.sweepRoutes[s] = safeLoop(planner, sectorWaypoints(plan.lanes, sectors[s].first, sectors[s].second));
+    }
+    plan.owner = buildOwnerMap(plan.lanes, zone, win);
+
+    // ------------------------------------------------------------------------
+    // Step 6: Plan Outer Zone Ant Colony Optimization (ACO) Tour
     // ------------------------------------------------------------------------
     std::vector<Vec2> pois;
     for (const Region& rg : plan.regions) {
         if (rg.outerCount > 0) pois.push_back(rg.poi);
     }
 
-    // Solve TSP over outer POIs using Elitist Ant System
+    // Solve TSP over outer POIs using Elitist Ant System, then make it fire-safe
     std::vector<Vec2> tour;
     for (int i : solveACO(pois, rng)) tour.push_back(pois[i]);
-
-    // ------------------------------------------------------------------------
-    // Step 6: Convert All Flight Paths into Fire-Safe Routes
-    // ------------------------------------------------------------------------
-    // Connects waypoints using A* pathfinding whenever straight-line flight
-    // intersects the active fire no-fly zone. Waypoints that can only be reached by
-    // crossing the fire are dropped, so a route never contains an unsafe leg.
-    auto safeLoop = [&](const std::vector<Vec2>& wp) -> std::vector<Vec2> {
-        if (wp.size() < 2) return wp;
-        std::vector<Vec2> out{ wp[0] };
-
-        for (size_t i = 1; i < wp.size(); ++i) {
-            // Plan from where the route actually got to (out.back()), which can differ from wp[i - 1]
-            // if that waypoint was dropped or the leg stopped short of it
-            const std::vector<Vec2> l = planner.leg(out.back(), wp[i]);
-            if (l.empty()) continue;   // Cut off by fire: skip this waypoint
-            out.insert(out.end(), l.begin(), l.end());
-        }
-        if (out.size() < 2) return out;
-
-        // Connect route end back to start point to complete the closed loop. The final point of the
-        // closing leg is out.front() itself, so it is left off (the drone wraps round to index 0).
-        const std::vector<Vec2> closing = planner.leg(out.back(), out.front());
-        if (!closing.empty()) {
-            out.insert(out.end(), closing.begin(), closing.end() - 1);
-        }
-        else {
-            // No safe way back to the start: fly back along the same route instead (out-and-back), so the
-            // wrap from the last waypoint to the first is always a leg that was already checked as safe
-            for (size_t i = out.size() - 1; i-- > 1;) out.push_back(out[i]);
-        }
-        return out;
-        };
-
-    for (auto& route : plan.sweepRoutes) route = safeLoop(route);
-    plan.acoTour = safeLoop(tour);
+    plan.acoTour = safeLoop(planner, tour);
 
     return plan;
 }

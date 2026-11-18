@@ -135,17 +135,27 @@ void MissionController::replan() {
     // Re-seed so the same fire state always gives the same plan (stable, reproducible routes)
     rng_.seed(2024);
 
-    plan_ = planMission(live_, perim_, planner_, rng_);
+    // The sweep drones the lanes are split between
+    const std::vector<size_t> sweep = activeIndices(false);
+    SweepFleet fleet;
+    for (size_t i : sweep) {
+        fleet.ids.push_back(drones_[i].id);
+        fleet.positions.push_back(drones_[i].pos);
+    }
+
+    plan_ = planMission(live_, perim_, planner_, rng_, fleet);
     lastPlanFrame_ = frame_;
     planDirty_ = false;
     planChanged_ = true;
 
-    // --- Sweep drones: one boustrophedon route each, joined at the waypoint nearest the drone ---
-    const std::vector<size_t> sweep = activeIndices(false);
-    for (size_t k = 0; k < sweep.size() && k < plan_.sweepRoutes.size(); ++k) {
-        Drone& d = drones_[sweep[k]];
-        d.route = plan_.sweepRoutes[k];
-        d.target = nearestWaypoint(d.route, d.pos);
+    // --- Sweep drones: each flies the sector the plan gave its id, joined at the waypoint nearest it ---
+    for (size_t s = 0; s < plan_.sweepRoutes.size(); ++s) {
+        for (size_t i : sweep) {
+            Drone& d = drones_[i];
+            if (d.id != plan_.sectorDrone[s]) continue;
+            d.route = plan_.sweepRoutes[s];
+            d.target = nearestWaypoint(d.route, d.pos);
+        }
     }
 
     // --- ACO drones: all share the same closed tour, flown in the same direction, evenly spaced ---

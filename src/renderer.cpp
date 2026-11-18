@@ -244,13 +244,8 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
         window_.draw(overlaySprite_);
         for (const sf::VertexArray& path : paths_) window_.draw(path);
 
-        // Draw region POI markers (White = Inner sector centroid, Yellow = Outer ACO tour POI)
+        // Draw the ACO points of interest (yellow), one in the outer zone of each Voronoi region
         for (const Region& rg : plan.regions) {
-            if (rg.innerCount > 0) {
-                marker_.setFillColor(sf::Color::White);
-                marker_.setPosition(rg.innerCentroid.x * cs, rg.innerCentroid.y * cs);
-                window_.draw(marker_);
-            }
             if (rg.outerCount > 0) {
                 marker_.setFillColor(sf::Color(255, 220, 0));
                 marker_.setPosition(rg.poi.x * cs, rg.poi.y * cs);
