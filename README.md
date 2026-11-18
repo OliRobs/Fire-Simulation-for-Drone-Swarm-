@@ -26,6 +26,10 @@ Windows: CMake looks for SFML in `C:\SFML-2.6.1` and GDAL in `C:\gdal` (the same
     cmake -S . -B build -DWF_SFML_ROOT=D:/libs/SFML-2.6.1 -DWF_GDAL_ROOT=D:/libs/gdal
 
 The SFML DLLs are copied next to `wildfire.exe` after each build; GDAL's `bin` folder needs to be on `PATH`.
+GDAL also needs PROJ's database, `proj.db`, to reproject the LANDFIRE layers onto the DEM grid. If the
+`PROJ_DATA` environment variable isn't set, the program looks in `C:\gdal\bin\proj9\share` (the GISInternals
+layout) and a few other usual places, and says at startup where it found it. Without it you get
+"Cannot find proj.db" and every LANDFIRE layer is skipped (fuel model GR2 everywhere, no roads or canopy).
 
 Controls:
 
