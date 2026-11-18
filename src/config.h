@@ -25,7 +25,7 @@ constexpr bool ALIGN_NORTH_UP = true;
 // --- Fire spread (Rothermel surface fire model, see rothermel.h) ---
 // Simulated time per frame (10 s). With DRONE_SPEED_MPS below, drones fly 16.5 m/s, a realistic survey-drone
 // speed, so fire and drones move at the right speeds relative to each other.
-constexpr float SIM_MINUTES_PER_TICK = 20.0f / 60.0f;
+constexpr float SIM_MINUTES_PER_TICK = 5.0f / 60.0f;
 // Fuel model for cells with no fuel map (synthetic terrain, tests): GR2, low load dry climate grass
 constexpr int DEFAULT_FUEL_MODEL = 102;
 // Weather. NOT in the LANDFIRE data: these should come from a weather station or forecast (README,
