@@ -746,6 +746,82 @@ TEST(voronoi_bucketed_assignment_matches_brute_force) {
     }
 }
 
+// The bucketed farthest-point seeding inside buildVoronoi must pick exactly the seeds the plain method picks
+// (update every cell's nearest-seed distance per seed, take the first farthest cell). The reference below is
+// the whole algorithm done the plain way: plain seeding, then Lloyd passes testing every site for every cell.
+// Sites and labels must match bit for bit, on shapes with many equal distances (a solid square, where ties
+// between cells are common) and with gaps (a ring with a gap plus scattered islands).
+TEST(voronoi_bucketed_seeding_matches_plain_method) {
+    // Plain reference implementation of buildVoronoi, written as simply as possible
+    auto plainVoronoi = [](const std::vector<int>& cells, int S, std::mt19937& rng) {
+        const size_t n = cells.size();
+        std::vector<Vec2> pts(n), sites;
+        for (size_t i = 0; i < n; ++i) pts[i] = cellCentre(cells[i]);
+        // Farthest-point seeding: first seed random, then the first cell farthest from all seeds so far
+        std::vector<float> minD(n, std::numeric_limits<float>::max());
+        sites.push_back(pts[rng() % n]);
+        while (static_cast<int>(sites.size()) < S) {
+            size_t far = 0;
+            float farD = -1.0f;
+            for (size_t i = 0; i < n; ++i) {
+                minD[i] = std::min(minD[i], sqDist(pts[i], sites.back()));
+                if (minD[i] > farD) { farD = minD[i]; far = i; }
+            }
+            sites.push_back(pts[far]);
+        }
+        // Nearest site for every cell (lowest index on a tie), then Lloyd moves each site to its mean
+        std::vector<int> assign(n, 0);
+        auto assignAll = [&]() {
+            for (size_t i = 0; i < n; ++i) {
+                float bd = std::numeric_limits<float>::max();
+                for (int k = 0; k < S; ++k) {
+                    const float dd = sqDist(pts[i], sites[k]);
+                    if (dd < bd) { bd = dd; assign[i] = k; }
+                }
+            }
+        };
+        for (int it = 0; it < LLOYD_ITERATIONS; ++it) {
+            assignAll();
+            std::vector<Vec2> sum(S, Vec2(0.0f, 0.0f));
+            std::vector<int> cnt(S, 0);
+            for (size_t i = 0; i < n; ++i) { sum[assign[i]] += pts[i]; ++cnt[assign[i]]; }
+            for (int k = 0; k < S; ++k) if (cnt[k] > 0) sites[k] = sum[k] / static_cast<float>(cnt[k]);
+        }
+        assignAll();
+        Voronoi v;
+        v.sites = sites;
+        v.assign = assign;
+        return v;
+    };
+
+    // Shape 1: solid square (lots of exactly equal distances, so the tie-break matters)
+    std::vector<int> square;
+    for (int y = 400; y < 520; ++y) for (int x = 600; x < 720; ++x) square.push_back(at(x, y));
+    // Shape 2: ring with a gap plus scattered islands, spread over many mostly empty blocks
+    std::vector<int> ring;
+    std::mt19937 shape(11);
+    for (int y = 200; y < 800; ++y)
+        for (int x = 200; x < 800; ++x) {
+            const int r2 = (x - 500) * (x - 500) + (y - 500) * (y - 500);
+            const bool onRing = r2 > 200 * 200 && r2 < 280 * 280 && !(y > 480 && y < 540 && x > 500);
+            if (onRing || shape() % 131 == 0) ring.push_back(at(x, y));
+        }
+
+    for (const auto* cells : { &square, &ring }) {
+        for (int sites : { 1, 2, 9, 64 }) {
+            std::mt19937 rngA(77), rngB(77);
+            const Voronoi fast = buildVoronoi(*cells, sites, rngA);
+            const Voronoi ref = plainVoronoi(*cells, sites, rngB);
+            CHECK(fast.sites.size() == ref.sites.size());
+            bool sameSites = fast.sites.size() == ref.sites.size();
+            for (size_t k = 0; sameSites && k < ref.sites.size(); ++k)
+                sameSites = fast.sites[k].x == ref.sites[k].x && fast.sites[k].y == ref.sites[k].y;
+            CHECK(sameSites);
+            CHECK(fast.assign == ref.assign);
+        }
+    }
+}
+
 // Plans a mission around a fire with two lobes, so straight legs between sweep lanes often cross fire
 TEST(planned_routes_never_cross_the_hard_no_fly_zone) {
     std::vector<std::uint8_t> fire = discFire(220, 250, 25);
