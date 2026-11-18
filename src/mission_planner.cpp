@@ -77,10 +77,13 @@ namespace {
             std::vector<LaneRange> out;
             int s = first;
             while (s <= last) {
-                int e = s;
-                while (e + 1 <= last && estimateSectorLength(lanes, s, e + 1) <= T) ++e;
-                out.emplace_back(s, e);
-                s = e + 1;
+                // Grow the sector one lane at a time while its lap still fits. The builder keeps the running
+                // length, so each test costs one lane rather than re-adding the whole sector (same result
+                // as estimateSectorLength(lanes, s, e + 1), bit for bit)
+                SectorLapBuilder b(lanes, s);
+                while (b.last() + 1 <= last && b.lapWithNext() <= T) b.addNext();
+                out.emplace_back(s, b.last());
+                s = b.last() + 1;
             }
             return out;
         };

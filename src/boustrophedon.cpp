@@ -284,19 +284,46 @@ std::vector<Vec2> sectorWaypoints(const std::vector<SweepLane>& lanes, int first
 }
 
 float estimateSectorLength(const std::vector<SweepLane>& lanes, int first, int last) {
-    float len = 0.0f;
-    Vec2 start, end;
-    for (int i = first; i <= last; ++i) {
-        const std::vector<Vec2>& p = lanes[i].pts;
-        const bool inward = (i - first) % 2 == 0;
-        const Vec2 a = inward ? p.front() : p.back(), b = inward ? p.back() : p.front();
-        if (i == first) start = a;
-        else len += std::sqrt(sqDist(end, a));   // Step from the previous lane
-        len += lanes[i].length();
-        end = b;
-    }
-    return len + std::sqrt(sqDist(end, start));   // Return leg to close the loop
+    // One builder walk over the lanes; SectorLapBuilder holds the arithmetic so the two can never disagree
+    SectorLapBuilder b(lanes, first);
+    while (b.last() < last) b.addNext();
+    return b.lap();
 }
+
+// ----------------------------------------------------------------------------
+// Incremental Sector Lap (SectorLapBuilder)
+// ----------------------------------------------------------------------------
+// The lap is: first lane's length, then for each further lane the straight step from the previous lane's end
+// to its entry plus its length, then the straight return leg to the first lane's entry. Lanes alternate
+// direction (inward, outward, ...) counted from the sector's first lane. Keeping the running open length means
+// adding a lane, or asking what the lap would be with one more, costs one lane's worth of work.
+SectorLapBuilder::SectorLapBuilder(const std::vector<SweepLane>& lanes, int first)
+    : lanes_(lanes), first_(first), last_(first) {
+    const std::vector<Vec2>& p = lanes[first].pts;
+    start_ = p.front();                      // The first lane is flown inward
+    end_ = p.back();
+    len_ += lanes[first].length();           // 0 + length, as estimateSectorLength always did
+}
+
+void SectorLapBuilder::extended(int i, float& len, Vec2& end) const {
+    const std::vector<Vec2>& p = lanes_[i].pts;
+    const bool inward = (i - first_) % 2 == 0;
+    const Vec2 a = inward ? p.front() : p.back(), b = inward ? p.back() : p.front();
+    len += std::sqrt(sqDist(end, a));        // Step from the previous lane (kept as two separate additions,
+    len += lanes_[i].length();               // in this order, so results match the old loop bit for bit)
+    end = b;
+}
+
+float SectorLapBuilder::lap() const { return len_ + std::sqrt(sqDist(end_, start_)); }
+
+float SectorLapBuilder::lapWithNext() const {
+    float len = len_;
+    Vec2 end = end_;
+    extended(last_ + 1, len, end);
+    return len + std::sqrt(sqDist(end, start_));   // Return leg to close the loop
+}
+
+void SectorLapBuilder::addNext() { extended(++last_, len_, end_); }
 
 // ----------------------------------------------------------------------------
 // Ownership Map

@@ -42,6 +42,30 @@ std::vector<Vec2> sectorWaypoints(const std::vector<SweepLane>& lanes, int first
 // the straight return leg from the last lane's end to the first lane's start. Fire detours are not included.
 float estimateSectorLength(const std::vector<SweepLane>& lanes, int first, int last);
 
+// Builds the estimated lap of a sector one lane at a time, so code that grows a sector lane by lane (the greedy
+// sector fill in mission_planner.cpp) pays O(1) per added lane instead of re-adding every lane each time.
+// It does exactly the same floating-point additions, in the same order, as estimateSectorLength, so
+// lap() == estimateSectorLength(lanes, first, last()) bit for bit.
+class SectorLapBuilder {
+public:
+    // Starts a sector holding lanes[first] alone
+    SectorLapBuilder(const std::vector<SweepLane>& lanes, int first);
+    int last() const { return last_; }                    // Last lane in the sector so far
+    float lap() const;                                    // Estimated closed lap of lanes[first..last()]
+    float lapWithNext() const;                            // Same, if lanes[last() + 1] were added (it must exist)
+    void addNext();                                       // Adds lanes[last() + 1] to the sector
+
+private:
+    // Open length (no return leg) and end point after adding lanes[i] to a sector whose open length is `len`
+    // and which ends at `end`
+    void extended(int i, float& len, Vec2& end) const;
+
+    const std::vector<SweepLane>& lanes_;
+    int first_, last_;
+    float len_ = 0.0f;        // Lanes plus the steps between them, without the return leg (cells)
+    Vec2 start_, end_;        // Where the lap starts (first lane's entry) and where it currently ends
+};
+
 // Sector of the nearest lane for every inner-band cell (inside `area`), -1 elsewhere. Found by a breadth-first
 // search through the band from every lane's cells, so each cell goes to the lane it can be reached from first.
 std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
