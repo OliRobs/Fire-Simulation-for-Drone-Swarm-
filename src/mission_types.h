@@ -59,6 +59,10 @@ struct MissionPlan {
     int sweepNeeded = 0;                           // Sweep drones needed to keep every lap within MAX_SWEEP_LAP_S
                                                    // (clamped to MIN_SWEEP_DRONES .. MAX_SWEEP_DRONES)
     bool sweepOverLimit = false;                   // Some lap is over MAX_SWEEP_LAP_S (only at MAX_SWEEP_DRONES)
+    bool sweepShrinkOk = false;                    // One drone fewer (split built and timed) would keep every
+                                                   // lap within SHRINK_MARGIN of the cap on this re-plan
+    bool sweepShrank = false;                      // This plan has one sector fewer than the fleet had drones:
+                                                   // the drone left without a sector is retired
 
     // --- ACO ---
     std::vector<Vec2> acoTour;                     // Closed tour through the outer points of interest

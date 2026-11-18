@@ -9,6 +9,9 @@
 // Owns the drones and their current mission plan. Re-plans (at most every REPLAN_INTERVAL frames) when the
 // fire changes, and between re-plans keeps every drone on fire-safe legs: if the fire grows across the leg a
 // drone is flying, that drone is re-routed straight away (or holds position if nothing is reachable).
+// The fleet follows the fire: each re-plan launches new sweep / ACO drones at once when more are needed, and
+// retires one (flown home to the launch point, then removed) only after SHRINK_REPLANS re-plans in a row on
+// which one fewer would have done (config.h, "Shrinking the fleet").
 class MissionController {
 public:
     MissionController(const DistanceTransform& liveEdt, const DistanceTransform& perimEdt, Vec2 launchPoint);
@@ -25,6 +28,9 @@ private:
     void replan();
 
     int launchDrone(bool aco);                          // New drone at the launch point; returns its id
+    int chooseDroneToRetire(bool aco, int spareId) const; // Which drone leaves when the fleet shrinks
+    void retire(int id);                                // Send a drone home; removed when it gets there
+    Drone* findDrone(int id);                           // nullptr if there is no such drone
     std::vector<size_t> activeIndices(bool aco) const;  // Positions in drones_ of the active drones of a role
 
     // Give d a fire-safe transit path to its current route target. If that target can't be reached, try
@@ -39,6 +45,8 @@ private:
     Vec2 launch_;                // Where drones launch from (and, later, return to)
     std::vector<Drone> drones_;
     int nextId_ = 0;             // Id for the next drone launched
+    int sweepShrinkStreak_ = 0;  // Re-plans in a row on which one sweep drone fewer would have done
+    int acoShrinkStreak_ = 0;    // Re-plans in a row on which one ACO drone fewer would have done
     bool planDirty_ = true;
     bool planChanged_ = false;
     int frame_ = 0;

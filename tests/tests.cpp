@@ -1121,13 +1121,14 @@ TEST(mission_drones_never_fly_over_fire) {
             perim.update(sim.fireMask(), sim.fireBounds());
             mission.markFireChanged();
         }
-        std::vector<Vec2> before;
-        for (const Drone& d : mission.drones()) before.push_back(d.pos);
+        // Positions by drone id: the fleet grows and shrinks, so list positions don't stay with one drone
+        std::vector<std::pair<int, Vec2>> before;
+        for (const Drone& d : mission.drones()) before.emplace_back(d.id, d.pos);
         mission.update();
-        for (size_t i = 0; i < before.size(); ++i) {
-            const Vec2 p = mission.drones()[i].pos;
-            if (crossesFire(sim.fireMask(), before[i], p)) ++crossings;
-            const int x = static_cast<int>(p.x), y = static_cast<int>(p.y);
+        for (const Drone& d : mission.drones()) {
+            for (const auto& [id, was] : before)
+                if (id == d.id && crossesFire(sim.fireMask(), was, d.pos)) ++crossings;
+            const int x = static_cast<int>(d.pos.x), y = static_cast<int>(d.pos.y);
             if (live.squaredDistance(at(x, y)) < HARD_NO_FLY_SQ - 1e-6) ++insideHardZone;
         }
     }
@@ -1168,6 +1169,87 @@ TEST(fleet_grows_with_the_fire) {
     int newOnes = 0;
     for (const Drone& d : mission.drones()) newOnes += d.id > maxIdBefore;
     CHECK(newOnes == sweepAfter - sweepBefore);
+}
+
+// A shrinking fire lowers each count by one only after SHRINK_REPLANS re-plans in a row; retired drones fly
+// home without ever crossing the fire and are removed there. Then a growing fire raises both counts at once.
+TEST(fleet_shrinks_slowly_and_retired_drones_fly_home) {
+    const Vec2 base(2.5f, GRID_HEIGHT - 2.5f);
+    std::vector<std::uint8_t> fire = discFire(700, 700, 100);   // 2 km across
+    // Plain distance fields (rather than a Perimeter, whose committed fire never shrinks) so the test can
+    // make the fire smaller. The committed-fire field has the Perimeter's range limit, as the planner expects.
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT), perimDt(GRID_WIDTH, GRID_HEIGHT, SEARCH_DISTANCE + 1);
+    live.compute(fire);
+    perimDt.compute(fire);
+    MissionController mission(live, perimDt, base);
+
+    int crossings = 0, insideHardZone = 0;
+    std::set<int> retired;          // Every drone ever seen returning
+    auto frames = [&](int count) {
+        for (int f = 0; f < count; ++f) {
+            std::vector<std::pair<int, Vec2>> before;
+            for (const Drone& d : mission.drones()) before.emplace_back(d.id, d.pos);
+            mission.update();
+            for (const Drone& d : mission.drones()) {
+                if (d.state == DroneState::Returning) retired.insert(d.id);
+                for (const auto& [id, was] : before)
+                    if (id == d.id && crossesFire(fire, was, d.pos)) ++crossings;
+                if (live.squaredDistance(at(static_cast<int>(d.pos.x), static_cast<int>(d.pos.y))) < HARD_NO_FLY_SQ - 1e-6)
+                    ++insideHardZone;
+            }
+        }
+    };
+    // One re-plan: mark the plan dirty and run until the controller has re-planned
+    auto replan = [&]() { mission.markFireChanged(); frames(REPLAN_INTERVAL); };
+    auto setFire = [&](int r) { fire = discFire(700, 700, r); live.compute(fire); perimDt.compute(fire); };
+
+    replan();
+    const int sweepBig = mission.activeCount(false);
+    CHECK(sweepBig == 8);
+    // Bring the ACO fleet down to what the big fire needs, so the counts below start from a settled fleet
+    for (int k = 0; k < 3 * SHRINK_REPLANS && mission.activeCount(true) > mission.plan().acoNeeded; ++k) replan();
+    const int acoBig = mission.activeCount(true);
+    CHECK(acoBig == mission.plan().acoNeeded);
+
+    // --- Shrink the fire to a new fire: each count falls by one only on the SHRINK_REPLANS-th re-plan ---
+    setFire(1);
+    for (int k = 1; k <= SHRINK_REPLANS; ++k) {
+        replan();
+        const int expectSweep = k < SHRINK_REPLANS ? sweepBig : sweepBig - 1;
+        CHECK(mission.activeCount(false) == expectSweep);
+        CHECK(mission.activeCount(true) == (k < SHRINK_REPLANS ? acoBig : std::max(MIN_ACO_DRONES, acoBig - 1)));
+    }
+    std::printf("  (after %d re-plans on a small fire: sweep %d -> %d, ACO %d -> %d)\n", SHRINK_REPLANS, sweepBig,
+                mission.activeCount(false), acoBig, mission.activeCount(true));
+    CHECK(!retired.empty());
+
+    // Keep re-planning: both fleets settle. The sweep fleet stops one above the bare minimum needed when one
+    // fewer drone would push a lap past SHRINK_MARGIN of the cap (that margin is the point of the rule).
+    for (int k = 0; k < 4 * SHRINK_REPLANS; ++k) replan();
+    CHECK(mission.activeCount(false) >= mission.plan().sweepNeeded);
+    CHECK(mission.activeCount(false) == mission.plan().sweepNeeded || !mission.plan().sweepShrinkOk);
+    for (float lap : mission.plan().sweepLapS) CHECK(lap <= MAX_SWEEP_LAP_S);
+    CHECK(mission.activeCount(true) == mission.plan().acoNeeded);
+    CHECK(mission.activeCount(true) == MIN_ACO_DRONES);
+
+    // Every retired drone gets home and is removed (allow time for the last one to fly back)
+    frames(300);
+    int stillHere = 0;
+    for (const Drone& d : mission.drones()) stillHere += retired.count(d.id) > 0;
+    std::printf("  (%zu drones retired, %d not yet removed; moves over fire %d, inside hard zone %d)\n",
+                retired.size(), stillHere, crossings, insideHardZone);
+    CHECK(stillHere == 0);
+    CHECK(crossings == 0);
+    CHECK(insideHardZone == 0);
+
+    // --- Grow the fire again: both counts go up on the very next re-plan ---
+    const int sweepSmall = mission.activeCount(false), acoSmall = mission.activeCount(true);
+    setFire(100);
+    replan();
+    std::printf("  (fire grows back: sweep %d -> %d, ACO %d -> %d)\n", sweepSmall, mission.activeCount(false),
+                acoSmall, mission.activeCount(true));
+    CHECK(mission.activeCount(false) > sweepSmall);
+    CHECK(mission.activeCount(true) > acoSmall);
 }
 
 TEST(aco_drones_are_spread_round_the_tour) {

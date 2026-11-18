@@ -84,6 +84,14 @@ constexpr int MAX_SWEEP_DRONES = 10;              // Most sweep drones; above th
 constexpr float ACO_REVISIT_S = 20.0f * 60.0f;    // Longest allowed wait between visits to a point on the tour
 constexpr int MIN_ACO_DRONES = 1;                 // Fewest ACO drones (one flies the whole tour early on)
 constexpr int MAX_ACO_DRONES = 10;                // Most ACO drones; above this, the revisit time may be exceeded
+
+// --- Shrinking the fleet (both roles) ---
+// Growing takes effect at once; shrinking waits. A drone is removed only when one fewer drone would still keep
+// every sweep lap (built and timed) or the ACO revisit time within SHRINK_MARGIN of its limit, on SHRINK_REPLANS
+// re-plans in a row (re-plans are at least REPLAN_INTERVAL = 10 simulated minutes apart, so 30 minutes or more).
+// The removed drone flies a fire-safe route back to the launch point and is taken out of the fleet there.
+constexpr float SHRINK_MARGIN = 0.85f;
+constexpr int SHRINK_REPLANS = 3;
 constexpr float SENSOR_RADIUS = 60.0f / SIM_CELL_SIZE_M;   // Cells; 60 m, so the swath is 120 m wide
 constexpr int LANE_SPACING = static_cast<int>(2.0f * SENSOR_RADIUS);
 constexpr float DRONE_SPEED_MPS = 16.5f;  // Drone ground speed, m/s

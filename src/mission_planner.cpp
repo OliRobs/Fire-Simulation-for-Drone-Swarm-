@@ -433,31 +433,74 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
             groups = laneGroups(plan.lanes);
         }
 
+        // Builds the real fire-safe routes for one share of drones per loop, and times every lap
+        struct Split {
+            std::vector<LaneRange> sectors;
+            std::vector<std::vector<Vec2>> routes;
+            std::vector<float> laps;
+            int worst = -1;           // Sector with the longest lap
+        };
+        auto build = [&](const std::vector<int>& share) {
+            Split sp;
+            sp.sectors = sectorsFor(plan.lanes, groups, share);
+            for (int s = 0; s < static_cast<int>(sp.sectors.size()); ++s) {
+                sp.routes.push_back(safeLoop(planner, sectorWaypoints(plan.lanes, sp.sectors[s].first, sp.sectors[s].second)));
+                sp.laps.push_back(flightSeconds(closedRouteLength(sp.routes.back())));
+                if (sp.worst < 0 || sp.laps[s] > sp.laps[sp.worst]) sp.worst = s;
+            }
+            return sp;
+        };
+        // Which loop a sector belongs to (groups and sectors are both in sequence order)
+        auto groupOf = [&](const LaneRange& sector) {
+            int g = 0;
+            while (sector.first > groups[g].second) ++g;
+            return g;
+        };
+
         // 3. Split: share the k drones between loops (worst loop first) and split each loop min-max
         std::vector<int> share = shareDrones(plan.lanes, groups, k);
 
         // 4. Check: build the real fire-safe routes and time them. If a lap is over the cap, add a drone to that
         //    lap's loop and split again (at most 3 extra passes)
-        for (int pass = 0; ; ++pass) {
-            sectors = sectorsFor(plan.lanes, groups, share);
-            plan.sweepRoutes.assign(sectors.size(), {});
-            plan.sweepLapS.assign(sectors.size(), 0.0f);
-            int worst = -1;
-            for (int s = 0; s < static_cast<int>(sectors.size()); ++s) {
-                plan.sweepRoutes[s] = safeLoop(planner, sectorWaypoints(plan.lanes, sectors[s].first, sectors[s].second));
-                plan.sweepLapS[s] = flightSeconds(closedRouteLength(plan.sweepRoutes[s]));
-                if (plan.sweepLapS[s] > MAX_SWEEP_LAP_S && (worst < 0 || plan.sweepLapS[s] > plan.sweepLapS[worst])) worst = s;
-            }
+        Split split = build(share);
+        for (int pass = 0; pass < 3; ++pass) {
             const int total = std::accumulate(share.begin(), share.end(), 0);
-            if (worst < 0 || total >= MAX_SWEEP_DRONES || pass >= 3) break;
-
-            // Which loop the worst lap belongs to (groups and sectors are both in sequence order)
-            int g = 0;
-            while (sectors[worst].first > groups[g].second) ++g;
+            if (split.worst < 0 || split.laps[split.worst] <= MAX_SWEEP_LAP_S || total >= MAX_SWEEP_DRONES) break;
+            const int g = groupOf(split.sectors[split.worst]);
             if (share[g] >= groups[g].second - groups[g].first + 1) break;   // Already one lane per drone
             ++share[g];
             needed = std::max(needed, total + 1);
+            split = build(share);
         }
+
+        // 5. Shrink check: only when the plan uses exactly the drones there are (no growth this time) and one
+        //    could go without breaking MIN_SWEEP_DRONES or a loop's own drone. Take the drone from the loop where
+        //    losing it lengthens the estimated laps least, then build and time that k - 1 split for real.
+        const int total = std::accumulate(share.begin(), share.end(), 0);
+        if (total == numSweep && total > MIN_SWEEP_DRONES) {
+            int from = -1;
+            float best = std::numeric_limits<float>::max();
+            for (int g = 0; g < static_cast<int>(groups.size()); ++g) {
+                if (share[g] <= 1) continue;
+                const float l = longestEstimate(plan.lanes, splitGroup(plan.lanes, groups[g].first, groups[g].second, share[g] - 1));
+                if (l < best) { best = l; from = g; }
+            }
+            if (from >= 0) {
+                std::vector<int> fewer = share;
+                --fewer[from];
+                Split smaller = build(fewer);
+                plan.sweepShrinkOk = smaller.worst >= 0 && smaller.laps[smaller.worst] <= SHRINK_MARGIN * MAX_SWEEP_LAP_S;
+                // Third (SHRINK_REPLANS-th) re-plan in a row that passes: use the smaller split
+                if (plan.sweepShrinkOk && fleet.shrinkStreak + 1 >= SHRINK_REPLANS) {
+                    split = std::move(smaller);
+                    plan.sweepShrank = true;
+                }
+            }
+        }
+
+        sectors = split.sectors;
+        plan.sweepRoutes = split.routes;
+        plan.sweepLapS = split.laps;
         plan.sweepNeeded = std::clamp(needed, MIN_SWEEP_DRONES, MAX_SWEEP_DRONES);
         for (float lap : plan.sweepLapS) plan.sweepOverLimit = plan.sweepOverLimit || lap > MAX_SWEEP_LAP_S;
     }
