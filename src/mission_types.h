@@ -62,4 +62,7 @@ struct MissionPlan {
 
     // --- ACO ---
     std::vector<Vec2> acoTour;                     // Closed tour through the outer points of interest
+    float acoLoopS = 0.0f;                         // Time for ONE drone to fly the whole closed tour, seconds
+    int acoNeeded = MIN_ACO_DRONES;                // ceil(acoLoopS / ACO_REVISIT_S), clamped to MIN/MAX_ACO_DRONES
+    bool acoOverLimit = false;                     // Even MAX_ACO_DRONES can't keep the revisit within ACO_REVISIT_S
 };

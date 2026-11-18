@@ -169,6 +169,10 @@ void MissionController::replan() {
     // --- ACO drones: all share the same closed tour, flown in the same direction, evenly spaced ---
     // Spacing them by tour length (rather than each grabbing its nearest waypoint) stops them flying in a
     // bunch, so any point on the tour is revisited every (tour length / ACO count) instead of in bursts.
+    // ACO fleet growth: launch new drones at once from the launch point if the tour needs more for the revisit
+    // limit (plan.acoNeeded). Slots are then worked out for the new count, so the drones are re-spaced evenly.
+    for (int k = activeCount(true); k < plan_.acoNeeded; ++k) launchDrone(true);
+
     const std::vector<size_t> aco = activeIndices(true);
     const int numAco = static_cast<int>(aco.size());
     const std::vector<Vec2>& tour = plan_.acoTour;

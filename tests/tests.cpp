@@ -1183,6 +1183,43 @@ TEST(aco_drones_are_spread_round_the_tour) {
     std::set<size_t> targets;
     for (const Drone& d : mission.drones()) if (d.isACO) targets.insert(d.target);
     CHECK(static_cast<int>(targets.size()) == mission.activeCount(true));
+
+    // ...evenly spaced round it: neighbouring drones are a 1/n share of the tour apart, give or take the
+    // longest gap between two waypoints (slots snap to waypoints)
+    const std::vector<Vec2>& tour = mission.plan().acoTour;
+    const int n = static_cast<int>(tour.size());
+    std::vector<float> arc(n, 0.0f);
+    float maxGap = 0.0f;
+    for (int i = 1; i < n; ++i) {
+        const float g = std::sqrt(sqDist(tour[i - 1], tour[i]));
+        arc[i] = arc[i - 1] + g;
+        maxGap = std::max(maxGap, g);
+    }
+    const float total = closedRouteLength(tour);
+    maxGap = std::max(maxGap, total - arc[n - 1]);
+    std::vector<float> pos;
+    for (size_t t : targets) pos.push_back(arc[t]);
+    const float share = total / pos.size();
+    for (size_t i = 0; i < pos.size(); ++i) {
+        const float gap = i + 1 < pos.size() ? pos[i + 1] - pos[i] : total - pos[i] + pos[0];
+        CHECK(std::fabs(gap - share) <= maxGap + 1e-3f);
+    }
+}
+
+// The ACO count follows the one-drone loop time: each point is revisited within ACO_REVISIT_S
+TEST(aco_count_follows_the_revisit_time) {
+    for (int r : { 1, 100, 200 }) {
+        SweepSetup s(discFire(800, 800, r));
+        const MissionPlan& p = s.plan;
+        std::printf("  (fire %d m across: tour %.1f km, %.1f min for one drone, %d ACO drones)\n",
+                    2 * r * static_cast<int>(SIM_CELL_SIZE_M), closedRouteLength(p.acoTour) * SIM_CELL_SIZE_M / 1000.0f,
+                    p.acoLoopS / 60.0f, p.acoNeeded);
+        CHECK(std::fabs(p.acoLoopS - flightSeconds(closedRouteLength(p.acoTour))) < 1e-3f);
+        CHECK(p.acoNeeded >= MIN_ACO_DRONES && p.acoNeeded <= MAX_ACO_DRONES);
+        CHECK(p.acoLoopS / p.acoNeeded <= ACO_REVISIT_S);                    // Revisit within the limit...
+        CHECK(p.acoNeeded == MIN_ACO_DRONES || p.acoLoopS / (p.acoNeeded - 1) > ACO_REVISIT_S);   // ...with no spare
+        CHECK(!p.acoOverLimit);
+    }
 }
 
 int main() {

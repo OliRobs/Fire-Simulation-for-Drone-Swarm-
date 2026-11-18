@@ -489,5 +489,12 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     for (int i : solveACO(pois, rng)) tour.push_back(pois[i]);
     plan.acoTour = safeLoop(planner, tour);
 
+    // ACO drone count: one drone takes acoLoopS to fly the safe tour; n evenly spaced drones pass each point
+    // every acoLoopS / n, so n = ceil(acoLoopS / ACO_REVISIT_S) keeps that within the revisit limit
+    plan.acoLoopS = flightSeconds(closedRouteLength(plan.acoTour));
+    const int acoWanted = static_cast<int>(std::ceil(plan.acoLoopS / ACO_REVISIT_S - 1e-6f));
+    plan.acoNeeded = std::clamp(acoWanted, MIN_ACO_DRONES, MAX_ACO_DRONES);
+    plan.acoOverLimit = acoWanted > MAX_ACO_DRONES;
+
     return plan;
 }

@@ -76,6 +76,14 @@ constexpr float SWEEP_LAP_MARGIN = 0.9f;          // Sectors are first sized to 
                                                   // estimate), leaving 10 % for fire detours
 constexpr int MIN_SWEEP_DRONES = 3;               // Fewest sweep drones, even for a small fire
 constexpr int MAX_SWEEP_DRONES = 10;              // Most sweep drones; above this, sectors may go over the limit
+
+// --- ACO fleet sizing ---
+// The ACO drones share one closed tour, evenly spaced, each flying the whole tour. With n drones every point on
+// the tour is passed every (one-drone loop time / n), so n = ceil(loop time / ACO_REVISIT_S). Adding drones
+// shortens the wait between visits, not any one drone's loop.
+constexpr float ACO_REVISIT_S = 20.0f * 60.0f;    // Longest allowed wait between visits to a point on the tour
+constexpr int MIN_ACO_DRONES = 1;                 // Fewest ACO drones (one flies the whole tour early on)
+constexpr int MAX_ACO_DRONES = 10;                // Most ACO drones; above this, the revisit time may be exceeded
 constexpr float SENSOR_RADIUS = 60.0f / SIM_CELL_SIZE_M;   // Cells; 60 m, so the swath is 120 m wide
 constexpr int LANE_SPACING = static_cast<int>(2.0f * SENSOR_RADIUS);
 constexpr float DRONE_SPEED_MPS = 16.5f;  // Drone ground speed, m/s
