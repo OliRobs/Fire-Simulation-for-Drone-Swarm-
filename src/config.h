@@ -84,6 +84,12 @@ constexpr int MAX_SWEEP_DRONES = 10;              // Most sweep drones; above th
 constexpr float ACO_REVISIT_S = 20.0f * 60.0f;    // Longest allowed wait between visits to a point on the tour
 constexpr int MIN_ACO_DRONES = 1;                 // Fewest ACO drones (one flies the whole tour early on)
 constexpr int MAX_ACO_DRONES = 10;                // Most ACO drones; above this, the revisit time may be exceeded
+// Keeping ACO drones evenly spaced. Drones never turn back, and can't fly faster than DRONE_SPEED, so a drone
+// closer than one even share of the tour (tour length / ACO count) behind the drone ahead flies slower, in
+// proportion to the gap, until the gap has opened back up. Within ACO_SPACING_TOLERANCE of an even share it
+// flies at full speed, so small differences from waypoint rounding don't keep slowing drones down.
+constexpr float ACO_SPACING_MIN_SPEED = 0.25f;    // Slowest a crowded ACO drone flies, as a fraction of DRONE_SPEED
+constexpr float ACO_SPACING_TOLERANCE = 0.05f;    // Gaps within 5 % of an even share count as evenly spaced
 
 // --- Shrinking the fleet (both roles) ---
 // Growing takes effect at once; shrinking waits. A drone is removed only when one fewer drone would still keep

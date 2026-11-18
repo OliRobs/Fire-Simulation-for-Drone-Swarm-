@@ -82,6 +82,9 @@ void MissionController::update() {
         replan();
     }
 
+    // ACO drones too close behind the drone ahead fly slower this frame, so the spacing evens out
+    updateAcoSpacing();
+
     for (Drone& d : drones_) {
         // Holding drones periodically retry, in case the fire has burnt out or a new plan opened a path
         if (d.holding && frame_ >= d.nextRetryFrame) routeTo(d);
@@ -238,6 +241,8 @@ void MissionController::replan() {
         std::vector<float> arc(n, 0.0f);
         for (int i = 1; i < n; ++i) arc[i] = arc[i - 1] + std::sqrt(sqDist(tour[i - 1], tour[i]));
         const float total = std::max(arc[n - 1] + std::sqrt(sqDist(tour[n - 1], tour[0])), 1e-6f);
+        acoArc_ = arc;          // Kept for the spacing control between re-plans
+        acoTotal_ = total;
 
         // Waypoint whose arc position is closest to `want` (taken round the loop)
         auto waypointAt = [&](float want) {
@@ -335,6 +340,8 @@ void MissionController::replan() {
         }
     }
     else {
+        acoArc_.clear();
+        acoTotal_ = 0.0f;
         // No tour: no slots, but the count still follows the rule (the last drones in launch order are spare)
         for (size_t k = 0; k < aco.size(); ++k) {
             drones_[aco[k]].route.clear();
@@ -390,4 +397,72 @@ void MissionController::retire(int id) {
 Drone* MissionController::findDrone(int id) {
     for (Drone& d : drones_) if (d.id == id) return &d;
     return nullptr;
+}
+
+// ============================================================================
+// ACO Spacing
+//
+// After a re-plan each ACO drone carries on from where it was (it never turns back), and new drones join in the
+// largest gaps, so the drones can end up unevenly spaced round the new tour: several could then pass the same
+// node within a short time and leave other parts unvisited for longer. Drones can't fly faster than DRONE_SPEED,
+// so the spacing is restored by slowing down: a drone closer than an even share of the tour behind the drone
+// ahead flies slower until the gap opens up. As the gaps add up to the whole tour, the drones with too-small
+// gaps opening up is the same as the too-large gaps closing, and the group settles evenly spaced, all at full
+// speed again.
+// ============================================================================
+
+float acoSpacingSpeed(float gap, float even) {
+    if (even <= 0.0f || gap >= even * (1.0f - ACO_SPACING_TOLERANCE)) return 1.0f;
+    return std::clamp(gap / even, ACO_SPACING_MIN_SPEED, 1.0f);
+}
+
+// ----------------------------------------------------------------------------
+// Where each ACO drone is along the tour
+// ----------------------------------------------------------------------------
+// A drone on the tour is flying from waypoint (target - 1) to waypoint target, so its arc position is that
+// waypoint's arc position plus how far it has come from it (capped at the leg's length).
+std::vector<std::pair<size_t, float>> MissionController::acoTourPositions() const {
+    std::vector<std::pair<size_t, float>> out;
+    const std::vector<Vec2>& tour = plan_.acoTour;
+    const size_t n = tour.size();
+    if (n < 2 || acoArc_.size() != n || acoTotal_ <= 0.0f) return out;
+
+    for (size_t i = 0; i < drones_.size(); ++i) {
+        const Drone& d = drones_[i];
+        // Only drones actually flying the tour: not in transit to it, holding, returning or on another route
+        if (!d.isACO || d.state != DroneState::Active || d.holding || !d.transit.empty() || d.route.size() != n) continue;
+        const size_t prev = (d.target + n - 1) % n;
+        const float leg = std::sqrt(sqDist(tour[prev], tour[d.target]));
+        const float along = std::min(std::sqrt(sqDist(tour[prev], d.pos)), leg);
+        out.emplace_back(i, std::fmod(acoArc_[prev] + along, acoTotal_));
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+    return out;
+}
+
+// ----------------------------------------------------------------------------
+// Gap from each ACO drone to the next one ahead (the tour is flown in increasing arc position)
+// ----------------------------------------------------------------------------
+std::vector<float> MissionController::acoGaps() const {
+    const auto pos = acoTourPositions();
+    std::vector<float> gaps;
+    for (size_t k = 0; k < pos.size(); ++k) {
+        const float ahead = pos[(k + 1) % pos.size()].second;
+        float gap = ahead - pos[k].second;
+        if (gap <= 0.0f) gap += acoTotal_;   // The drone ahead is past the tour's start (or it is the only drone)
+        gaps.push_back(gap);
+    }
+    return gaps;
+}
+
+// ----------------------------------------------------------------------------
+// Set this frame's speed of every ACO drone from its gap to the drone ahead
+// ----------------------------------------------------------------------------
+void MissionController::updateAcoSpacing() {
+    for (Drone& d : drones_) d.speedScale = 1.0f;   // Everyone else (and anyone not on the tour) at full speed
+    const auto pos = acoTourPositions();
+    if (pos.size() < 2) return;
+    const std::vector<float> gaps = acoGaps();
+    const float even = acoTotal_ / static_cast<float>(pos.size());
+    for (size_t k = 0; k < pos.size(); ++k) drones_[pos[k].first].speedScale = acoSpacingSpeed(gaps[k], even);
 }

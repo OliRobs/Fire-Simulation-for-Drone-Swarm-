@@ -1424,6 +1424,70 @@ TEST(aco_drones_rejoin_at_the_nearest_node_going_forward) {
     CHECK(backwards == 0);
 }
 
+TEST(aco_spacing_speed_rule) {
+    const float even = 1000.0f;
+    CHECK(acoSpacingSpeed(even, even) == 1.0f);                     // Evenly spaced: full speed
+    CHECK(acoSpacingSpeed(2.0f * even, even) == 1.0f);              // Big gap ahead: full speed (can't go faster)
+    CHECK(acoSpacingSpeed(even * (1.0f - ACO_SPACING_TOLERANCE * 0.5f), even) == 1.0f);   // Within tolerance
+    CHECK(std::fabs(acoSpacingSpeed(0.5f * even, even) - 0.5f) < 1e-6f);                  // Half the gap, half speed
+    CHECK(acoSpacingSpeed(0.0f, even) == ACO_SPACING_MIN_SPEED);    // Right on the next drone: slowest, never stopped
+}
+
+// When a re-plan leaves the ACO drones bunched up, they spread back out to even spacing (without turning back)
+TEST(aco_drones_spread_back_out_after_a_replan) {
+    const int cx = GRID_WIDTH / 2, cy = GRID_HEIGHT / 2;
+    std::vector<std::uint8_t> fire = discFire(cx, cy, 25);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    live.compute(fire);
+    Perimeter perim(fire);
+    MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
+    mission.markFireChanged();
+
+    // Worst gap compared with an even share: 1 = perfectly even, 0 = two drones on top of each other
+    auto evenness = [&]() {
+        const std::vector<float> gaps = mission.acoGaps();
+        if (gaps.size() < 2) return 1.0f;
+        float total = 0.0f, smallest = std::numeric_limits<float>::max();
+        for (float g : gaps) { total += g; smallest = std::min(smallest, g); }
+        return smallest / (total / gaps.size());
+    };
+
+    // Let the drones settle on the first tour, then bunch them up: grow the fire so the tour changes and every
+    // drone rejoins where it happens to be
+    for (int f = 0; f < 6 * REPLAN_INTERVAL; ++f) mission.update();
+    const float settled = evenness();
+    fire = discFire(cx + 30, cy, 45);
+    live.compute(fire);
+    perim.update(fire);
+    mission.markFireChanged();
+    bool replanned = false;
+    for (int f = 0; f <= REPLAN_INTERVAL && !replanned; ++f) {
+        mission.update();
+        replanned = mission.takePlanChanged();
+    }
+    CHECK(replanned);
+    // Wait until every drone has rejoined the tour, then give the spacing time to even out
+    for (int f = 0; f < 2000 && static_cast<int>(mission.acoGaps().size()) < mission.activeCount(true); ++f) mission.update();
+    const float rejoined = evenness();
+    int slowed = 0, framesToEven = -1;
+    for (int f = 0; f < 10 * REPLAN_INTERVAL; ++f) {
+        mission.update();
+        for (const Drone& d : mission.drones()) slowed += d.speedScale < 1.0f;
+        if (framesToEven < 0 && evenness() > 1.0f - 2.0f * ACO_SPACING_TOLERANCE) framesToEven = f + 1;
+    }
+    const float later = evenness();
+    std::printf("  (%d ACO drones; smallest gap / even share: settled %.2f, rejoined after re-plan %.2f, even again "
+                "(> %.2f) after %.0f simulated min, %.2f after %.0f min)\n", mission.activeCount(true), settled,
+                rejoined, 1.0f - 2.0f * ACO_SPACING_TOLERANCE, framesToEven * SIM_MINUTES_PER_TICK, later,
+                10 * REPLAN_INTERVAL * SIM_MINUTES_PER_TICK);
+    CHECK(settled > 1.0f - 2.0f * ACO_SPACING_TOLERANCE);    // Even to begin with
+    CHECK(rejoined < 0.8f);                                  // The re-plan really did bunch them up...
+    CHECK(slowed > 0);                                       // ...the crowded ones slowed down...
+    CHECK(later > 1.0f - 2.0f * ACO_SPACING_TOLERANCE);      // ...and the spacing is even again
+    // Once even, everybody is back to full speed
+    for (const Drone& d : mission.drones()) CHECK(d.speedScale == 1.0f);
+}
+
 // The ACO count follows the one-drone loop time: each point is revisited within ACO_REVISIT_S
 TEST(aco_count_follows_the_revisit_time) {
     for (int r : { 1, 100, 200 }) {

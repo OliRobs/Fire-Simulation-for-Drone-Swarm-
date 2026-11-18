@@ -73,7 +73,9 @@ These behaviours were asked for explicitly. Keep them when changing planning cod
   the tour is always handed out anticlockwise on screen. After a re-plan, a drone already on the tour locks back
   on at the nearest node (the next one if it has just passed it) and carries on anticlockwise; it is never sent
   back or across to another slot. New drones fill the largest gaps; when the fleet shrinks, the drone in the most
-  crowded spot retires.
+  crowded spot retires. Even spacing is restored by slowing down, never by turning back: an ACO drone closer than
+  an even share of the tour behind the drone ahead flies slower (down to `ACO_SPACING_MIN_SPEED`) until the gap
+  has opened up.
 - The perimeter updates in sections, only where the fire front has come within `PERIMETER_UPDATE_DISTANCE`.
 
 ## Conventions
