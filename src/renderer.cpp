@@ -1,11 +1,22 @@
 #include "renderer.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 namespace {
     // Color scheme for different drone mission path types
-    const sf::Color kSweepColour(60, 140, 255); // Soft blue for sector sweep drones
     const sf::Color kAcoColour(255, 80, 255);   // Magenta for ACO outer perimeter tour drones
+    const sf::Color kReturningColour(170, 170, 170); // Grey for retired drones flying home
+
+    // Colour of one sweep drone's sector (tint, sector borders and its route), picked by drone id so a drone
+    // keeps its colour from one plan to the next. Ten well-separated hues; ids beyond that repeat them.
+    sf::Color sectorColour(int droneId) {
+        static const sf::Color palette[10] = {
+            { 66, 133, 244 }, { 52, 168, 83 }, { 251, 188, 5 }, { 171, 71, 188 }, { 0, 172, 193 },
+            { 255, 112, 67 }, { 124, 179, 66 }, { 236, 64, 122 }, { 92, 107, 192 }, { 141, 110, 99 } };
+        return palette[(droneId % 10 + 10) % 10];
+    }
 }
 
 // ============================================================================
@@ -121,10 +132,12 @@ void Renderer::setRing(const std::vector<int>& ring, const std::vector<Cell>& gr
 // Mission Visual Overlay Generator
 // ----------------------------------------------------------------------------
 // Renders:
-// 1. Voronoi sector boundary lines (White).
-// 2. Standoff safety zone edge (Red).
-// 3. Outer search zone limit (Yellow).
-// 4. Closed flight paths for all drones.
+// 1. Each sweep sector of the inner band, tinted in its drone's colour, with a stronger line on its borders.
+// 2. Voronoi region borders in the outer zone (White) - the regions that give the ACO points of interest.
+// 3. Standoff safety zone edge (Red).
+// 4. Outer search zone limit (Yellow).
+// 5. The sweep lanes, and closed flight paths for all drones.
+// Also updates fleetStatus() (drone counts and any over-limit warning) for the window title.
 void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Drone>& drones,
     const DistanceTransform& liveEdt) {
     // Reset only the part of the overlay the previous plan drew on (the rest is still transparent)
@@ -136,15 +149,17 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
     const GridRect box{ std::max(0, plan.bounds.x0), std::max(0, plan.bounds.y0),
                         std::min(GRID_WIDTH, plan.bounds.x1), std::min(GRID_HEIGHT, plan.bounds.y1) };
 
-    auto labelAt = [&](int x, int y) {
-        return (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) ? -1 : plan.label[y * GRID_WIDTH + x];
-        };
-    auto holeAt = [&](int x, int y) {
-        return x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT
-            && liveEdt.squaredDistance(y * GRID_WIDTH + x) < NO_FLY_SQ;
-        };
+    auto inGrid = [](int x, int y) { return x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT; };
+    auto labelAt = [&](int x, int y) { return inGrid(x, y) ? plan.label[y * GRID_WIDTH + x] : -1; };
+    auto zoneAt = [&](int x, int y) { return inGrid(x, y) ? plan.zone[y * GRID_WIDTH + x] : std::uint8_t(0); };
+    auto ownerAt = [&](int x, int y) { return inGrid(x, y) && !plan.owner.empty() ? plan.owner[y * GRID_WIDTH + x] : -1; };
+    auto holeAt = [&](int x, int y) { return inGrid(x, y) && liveEdt.squaredDistance(y * GRID_WIDTH + x) < NO_FLY_SQ; };
+    // Drone id flying a sector (-1 if unknown)
+    auto droneOf = [&](int sector) {
+        return sector >= 0 && sector < static_cast<int>(plan.sectorDrone.size()) ? plan.sectorDrone[sector] : -1;
+    };
 
-    // Draw lines along cell borders in overlay texture
+    // Draw tints and lines along cell borders in overlay texture
     for (int y = box.y0; y < box.y1; ++y) {
         for (int x = box.x0; x < box.x1; ++x) {
             const int l = labelAt(x, y);
@@ -165,7 +180,16 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
                     px[0] = 255; px[1] = 220; px[2] = 0; px[3] = 200;
                 }
             }
-            else if (r != l || dn != l) { // Interior Voronoi region border (White)
+            else if (zoneAt(x, y) == 1 && ownerAt(x, y) >= 0) {
+                // Inner band: tint by the owning drone's colour; stronger on the border with another sector
+                const int o = ownerAt(x, y);
+                const bool border = (zoneAt(x + 1, y) == 1 && ownerAt(x + 1, y) != o)
+                                 || (zoneAt(x, y + 1) == 1 && ownerAt(x, y + 1) != o);
+                const sf::Color c = sectorColour(droneOf(o));
+                px[0] = c.r; px[1] = c.g; px[2] = c.b; px[3] = border ? 200 : 55;
+            }
+            else if (zoneAt(x, y) == 2 && ((zoneAt(x + 1, y) == 2 && r != l) || (zoneAt(x, y + 1) == 2 && dn != l))) {
+                // Voronoi region border in the outer zone (White)
                 px[0] = 255; px[1] = 255; px[2] = 255; px[3] = 110;
             }
         }
@@ -178,14 +202,27 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
     }
     overlayDrawn_ = box;
 
-    // Generate line-strip path polylines for each drone's target route
+    const float cs = static_cast<float>(CELL_SIZE);
+
+    // Sweep lanes: thin white lines along each run (gap-fill lanes a little fainter)
+    lanes_.clear();
+    lanes_.setPrimitiveType(sf::Lines);
+    for (const SweepLane& lane : plan.lanes) {
+        const sf::Color c(255, 255, 255, lane.gapFill ? 60 : 90);
+        for (size_t i = 0; i + 1 < lane.pts.size(); i += 2) {
+            lanes_.append(sf::Vertex(sf::Vector2f(lane.pts[i].x * cs, lane.pts[i].y * cs), c));
+            lanes_.append(sf::Vertex(sf::Vector2f(lane.pts[i + 1].x * cs, lane.pts[i + 1].y * cs), c));
+        }
+    }
+
+    // Generate line-strip path polylines for each drone's route. Sweep routes take their sector's colour.
+    // The fleet changes size, so this is rebuilt from the current drone list every plan.
     paths_.assign(drones.size(), sf::VertexArray(sf::LineStrip));
     for (size_t i = 0; i < drones.size(); ++i) {
         const Drone& d = drones[i];
-        sf::Color c = d.isACO ? kAcoColour : kSweepColour;
+        sf::Color c = d.isACO ? kAcoColour : sectorColour(d.id);
         c.a = 120; // Semi-transparent path line
 
-        const float cs = static_cast<float>(CELL_SIZE);
         for (const Vec2& p : d.route) {
             paths_[i].append(sf::Vertex(sf::Vector2f(p.x * cs, p.y * cs), c));
         }
@@ -195,6 +232,23 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
             paths_[i].append(sf::Vertex(sf::Vector2f(d.route.front().x * cs, d.route.front().y * cs), c));
         }
     }
+
+    // Fleet status for the window title (main.cpp adds it): drone counts, the longest sweep lap and the ACO
+    // revisit time, and a warning if the fleet is at its maximum and still can't keep within a limit
+    int sweep = 0, aco = 0, returning = 0;
+    for (const Drone& d : drones) {
+        if (d.state == DroneState::Returning) ++returning;
+        else if (d.isACO) ++aco;
+        else ++sweep;
+    }
+    float longestLap = 0.0f;
+    for (float lap : plan.sweepLapS) longestLap = std::max(longestLap, lap);
+    char status[256];
+    std::snprintf(status, sizeof(status), "  |  sweep drones %d (lap %.1f min)  ACO drones %d (revisit %.1f min)%s%s%s",
+                  sweep, longestLap / 60.0f, aco, aco > 0 ? plan.acoLoopS / aco / 60.0f : 0.0f,
+                  returning > 0 ? "  returning " : "", returning > 0 ? std::to_string(returning).c_str() : "",
+                  plan.sweepOverLimit || plan.acoOverLimit ? "  |  WARNING: fleet at maximum, over the time limit" : "");
+    fleetStatus_ = status;
 }
 
 // ----------------------------------------------------------------------------
@@ -242,15 +296,11 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
     // Draw mission overlay details if enabled ('V' key toggle)
     if (showMission) {
         window_.draw(overlaySprite_);
+        window_.draw(lanes_);
         for (const sf::VertexArray& path : paths_) window_.draw(path);
 
-        // Draw region POI markers (White = Inner sector centroid, Yellow = Outer ACO tour POI)
+        // Draw the ACO points of interest (yellow), one in the outer zone of each Voronoi region
         for (const Region& rg : plan.regions) {
-            if (rg.innerCount > 0) {
-                marker_.setFillColor(sf::Color::White);
-                marker_.setPosition(rg.innerCentroid.x * cs, rg.innerCentroid.y * cs);
-                window_.draw(marker_);
-            }
             if (rg.outerCount > 0) {
                 marker_.setFillColor(sf::Color(255, 220, 0));
                 marker_.setPosition(rg.poi.x * cs, rg.poi.y * cs);
@@ -261,7 +311,8 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
 
     // Render drone sensor coverage bubbles and physical drone body markers
     for (const Drone& d : drones) {
-        const sf::Color c = d.isACO ? kAcoColour : kSweepColour;
+        const sf::Color c = d.state == DroneState::Returning ? kReturningColour
+                          : d.isACO ? kAcoColour : sectorColour(d.id);
 
         // Render sensor radius circle outline
         sensor_.setOutlineColor(sf::Color(c.r, c.g, c.b, 160));

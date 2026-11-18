@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "aco.h"
+#include "boustrophedon.h"
 #include "distance_transform.h"
 #include "drone.h"
 #include "fire_model.h"
@@ -841,7 +842,8 @@ TEST(planned_routes_never_cross_the_hard_no_fly_zone) {
     int nonEmpty = 0;
     for (const auto& r : plan.sweepRoutes) { checkLoop(r); nonEmpty += r.empty() ? 0 : 1; }
     checkLoop(plan.acoTour);
-    CHECK(nonEmpty == SWEEP_DRONES);
+    CHECK(nonEmpty == static_cast<int>(plan.sweepRoutes.size()));   // Every sector has a route
+    CHECK(nonEmpty >= SWEEP_DRONES);
     CHECK(plan.acoTour.size() >= 3);
 }
 
@@ -880,6 +882,199 @@ TEST(perimeter_line_two_fires_give_two_loops_the_same_way_round) {
     const auto loops = tracePerimeterLine(perim.distance());
     CHECK(loops.size() == 2);
     for (const auto& l : loops) CHECK(loopSignedArea(l) < 0.0);
+}
+
+// ============================================================================
+// Sweep lanes and sectors
+// ============================================================================
+namespace {
+    // Everything a sweep test needs for one fire: the distance fields, the planner and the plan
+    struct SweepSetup {
+        DistanceTransform live{ GRID_WIDTH, GRID_HEIGHT };
+        Perimeter perim;
+        SafePlanner sp;
+        MissionPlan plan;
+        explicit SweepSetup(const std::vector<std::uint8_t>& fire) : perim(fire), sp(live) {
+            live.compute(fire);
+            std::mt19937 rng(2024);
+            plan = planMission(live, perim.distance(), sp, rng);
+        }
+    };
+
+    // Distance from p to the nearest run of any lane
+    float nearestLane(const std::vector<SweepLane>& lanes, Vec2 p) {
+        float best = std::numeric_limits<float>::max();
+        for (const SweepLane& l : lanes)
+            for (size_t i = 0; i + 1 < l.pts.size(); i += 2) {
+                const Vec2 a = l.pts[i], ab = l.pts[i + 1] - a, ap = p - a;
+                const float l2 = ab.x * ab.x + ab.y * ab.y;
+                const float t = l2 > 1e-9f ? std::clamp((ap.x * ab.x + ap.y * ab.y) / l2, 0.0f, 1.0f) : 0.0f;
+                best = std::min(best, std::sqrt(sqDist(p, a + ab * t)));
+            }
+        return best;
+    }
+
+    // Count of inner-band cells that no lane sees (further than LANE_COVER_RADIUS from every lane)
+    int unseenInnerCells(const MissionPlan& plan) {
+        int unseen = 0;
+        for (int y = plan.bounds.y0; y < plan.bounds.y1; ++y)
+            for (int x = plan.bounds.x0; x < plan.bounds.x1; ++x)
+                if (plan.zone[at(x, y)] == 1 && nearestLane(plan.lanes, Vec2(x + 0.5f, y + 0.5f)) > LANE_COVER_RADIUS + 1e-3f)
+                    ++unseen;
+        return unseen;
+    }
+
+    // A fire with a concave bay: a disc with a bite taken out of its east side
+    std::vector<std::uint8_t> bayFire() {
+        std::vector<std::uint8_t> fire = discFire(500, 500, 90);
+        const auto bite = discFire(575, 500, 60);
+        for (int i = 0; i < N; ++i) if (bite[i]) fire[i] = 0;
+        return fire;
+    }
+}
+
+TEST(sweep_lanes_point_at_a_round_fire) {
+    const int r = 30;
+    const Vec2 c(400.5f, 400.5f);
+    SweepSetup s(discFire(400, 400, r));
+    int mainLanes = 0, badDir = 0, badStart = 0, badEnd = 0;
+    for (const SweepLane& l : s.plan.lanes) {
+        if (l.gapFill) continue;
+        ++mainLanes;
+        // Direction: from the lane's outer end straight at the fire's centre, to within 3 degrees
+        const Vec2 along = l.pts.back() - l.pts.front(), toC = c - l.pts.front();
+        const float cosA = (along.x * toC.x + along.y * toC.y)
+            / (std::sqrt(along.x * along.x + along.y * along.y) * std::sqrt(toC.x * toC.x + toC.y * toC.y));
+        if (cosA < std::cos(3.0f * 3.14159265f / 180.0f)) ++badDir;
+        // Runs from the perimeter line (band's outer edge) to the 300 m standoff
+        const float rOut = std::sqrt(sqDist(l.pts.front(), c)), rIn = std::sqrt(sqDist(l.pts.back(), c));
+        if (std::fabs(rOut - (r + PERIMETER_DISTANCE)) > 2.0f) ++badStart;
+        if (std::fabs(rIn - (r + MIN_FIRE_DISTANCE)) > 2.0f) ++badEnd;
+    }
+    std::printf("  (%d main lanes; off direction %d, off start %d, off end %d)\n", mainLanes, badDir, badStart, badEnd);
+    // One lane per 120 m (at most) of perimeter line
+    CHECK(mainLanes == static_cast<int>(std::ceil(loopLength(s.plan.perimeterLoops[0]) / LANE_SPACING)));
+    CHECK(badDir == 0);
+    CHECK(badStart == 0);
+    CHECK(badEnd == 0);
+}
+
+TEST(sweep_lanes_cover_the_whole_band) {
+    SweepSetup round(discFire(400, 400, 30));
+    int gapLanes = 0;
+    for (const SweepLane& l : round.plan.lanes) gapLanes += l.gapFill;
+    CHECK(gapLanes == 0);                      // Convex fire: the main lanes alone see everything
+    CHECK(unseenInnerCells(round.plan) == 0);
+
+    SweepSetup bay(bayFire());
+    gapLanes = 0;
+    for (const SweepLane& l : bay.plan.lanes) gapLanes += l.gapFill;
+    std::printf("  (bay: %zu lanes, %d of them gap fill)\n", bay.plan.lanes.size(), gapLanes);
+    CHECK(gapLanes > 0);                       // Lanes spread apart in the bay, so gap fill had work to do
+    CHECK(unseenInnerCells(bay.plan) == 0);
+}
+
+TEST(sweep_sectors_are_exclusive_and_contiguous) {
+    SweepSetup s(bayFire());
+    const MissionPlan& plan = s.plan;
+    const int sectors = static_cast<int>(plan.sweepRoutes.size());
+
+    // Every inner cell has exactly one owner (a valid sector); no cell outside the band has one
+    int unowned = 0, strayOwner = 0;
+    for (int i = 0; i < N; ++i) {
+        if (plan.zone[i] == 1) unowned += plan.owner[i] < 0 || plan.owner[i] >= sectors;
+        else strayOwner += plan.owner[i] >= 0;
+    }
+    CHECK(unowned == 0);
+    CHECK(strayOwner == 0);
+
+    // Each sector is one contiguous run of the lane sequence
+    std::vector<int> runsOf(sectors, 0);
+    for (size_t i = 0; i < plan.lanes.size(); ++i) {
+        CHECK(plan.lanes[i].sector >= 0 && plan.lanes[i].sector < sectors);
+        if (i == 0 || plan.lanes[i].sector != plan.lanes[i - 1].sector) ++runsOf[plan.lanes[i].sector];
+    }
+    for (int r : runsOf) CHECK(r == 1);
+
+    // At the perimeter line, the edge lanes of neighbouring sectors are one lane spacing apart (+- 1 cell),
+    // i.e. the border is halfway between them and each edge lane is 60 m inside it. Measured on a round fire,
+    // where the straight distance between seeds equals the distance along the line (the bay puts a sharp
+    // corner in the perimeter line, where the straight distance is shorter).
+    SweepSetup round(discFire(400, 400, 30));
+    std::vector<const SweepLane*> mainLanes;
+    for (const SweepLane& l : round.plan.lanes) if (!l.gapFill) mainLanes.push_back(&l);
+    int borders = 0;
+    for (size_t i = 0; i < mainLanes.size(); ++i) {
+        const SweepLane& a = *mainLanes[i];
+        const SweepLane& b = *mainLanes[(i + 1) % mainLanes.size()];
+        if (a.sector == b.sector) continue;
+        ++borders;
+        CHECK(std::fabs(std::sqrt(sqDist(a.seed, b.seed)) - LANE_SPACING) <= 1.0f);
+    }
+    CHECK(borders == static_cast<int>(round.plan.sweepRoutes.size()));   // One loop: a border per sector
+}
+
+// ============================================================================
+// Sweep fleet sizing
+// ============================================================================
+TEST(sweep_laps_stay_within_the_cap) {
+    for (int r : { 1, 50, 100 }) {   // New fire, 1 km and 2 km across
+        SweepSetup s(discFire(800, 800, r));
+        const int sectors = static_cast<int>(s.plan.sweepRoutes.size());
+        std::printf("  (fire %d m across: %d sweep drones, laps", 2 * r * static_cast<int>(SIM_CELL_SIZE_M), sectors);
+        for (float lap : s.plan.sweepLapS) std::printf(" %.1f", lap / 60.0f);
+        std::printf(" min)\n");
+        CHECK(sectors >= MIN_SWEEP_DRONES && sectors <= MAX_SWEEP_DRONES);
+        CHECK(sectors < MAX_SWEEP_DRONES);   // These fires are small enough not to need the maximum
+        CHECK(s.plan.sweepNeeded == sectors);
+        CHECK(!s.plan.sweepOverLimit);
+        for (int k = 0; k < sectors; ++k) {
+            // The lap includes the closing leg back to the start
+            CHECK(std::fabs(s.plan.sweepLapS[k] - flightSeconds(closedRouteLength(s.plan.sweepRoutes[k]))) < 1e-3f);
+            CHECK(s.plan.sweepLapS[k] <= MAX_SWEEP_LAP_S);
+        }
+    }
+    // Bigger fires need more sweep drones
+    SweepSetup small(discFire(800, 800, 1)), big(discFire(800, 800, 100));
+    CHECK(big.plan.sweepRoutes.size() > small.plan.sweepRoutes.size());
+}
+
+// Two re-plans with a small change to the fire keep most cells with the same drone
+TEST(sweep_ownership_is_stable) {
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    std::vector<std::uint8_t> fire = discFire(600, 600, 60);
+    live.compute(fire);
+    Perimeter perim(fire);
+    SafePlanner sp(live);
+    std::mt19937 rng(2024);
+    MissionPlan first = planMission(live, perim.distance(), sp, rng);
+    // As the controller does: new drones (sectorDrone -1) get fresh ids
+    int nextId = 100;
+    for (int& id : first.sectorDrone) if (id < 0) id = nextId++;
+
+    // The fire grows a little on one side
+    const auto lobe = discFire(665, 600, 12);
+    for (int i = 0; i < N; ++i) fire[i] |= lobe[i];
+    live.compute(fire);
+    perim.update(fire);
+    SweepFleet fleet;
+    for (size_t k = 0; k < first.sectorDrone.size(); ++k) {
+        fleet.ids.push_back(first.sectorDrone[k]);
+        fleet.positions.push_back(first.sweepRoutes[k].empty() ? Vec2(0.5f, 0.5f) : first.sweepRoutes[k].front());
+    }
+    fleet.previous = &first;
+    rng.seed(2024);
+    const MissionPlan second = planMission(live, perim.distance(), sp, rng, fleet);
+
+    long long both = 0, same = 0;
+    for (int i = 0; i < N; ++i) {
+        if (first.owner[i] < 0 || second.owner[i] < 0) continue;
+        ++both;
+        same += first.sectorDrone[first.owner[i]] == second.sectorDrone[second.owner[i]];
+    }
+    std::printf("  (%.1f %% of %lld cells kept their drone)\n", 100.0 * same / std::max(1LL, both), both);
+    CHECK(both > 0);
+    CHECK(same >= 0.8 * both);
 }
 
 // ============================================================================
@@ -926,19 +1121,135 @@ TEST(mission_drones_never_fly_over_fire) {
             perim.update(sim.fireMask(), sim.fireBounds());
             mission.markFireChanged();
         }
-        std::vector<Vec2> before;
-        for (const Drone& d : mission.drones()) before.push_back(d.pos);
+        // Positions by drone id: the fleet grows and shrinks, so list positions don't stay with one drone
+        std::vector<std::pair<int, Vec2>> before;
+        for (const Drone& d : mission.drones()) before.emplace_back(d.id, d.pos);
         mission.update();
-        for (size_t i = 0; i < before.size(); ++i) {
-            const Vec2 p = mission.drones()[i].pos;
-            if (crossesFire(sim.fireMask(), before[i], p)) ++crossings;
-            const int x = static_cast<int>(p.x), y = static_cast<int>(p.y);
+        for (const Drone& d : mission.drones()) {
+            for (const auto& [id, was] : before)
+                if (id == d.id && crossesFire(sim.fireMask(), was, d.pos)) ++crossings;
+            const int x = static_cast<int>(d.pos.x), y = static_cast<int>(d.pos.y);
             if (live.squaredDistance(at(x, y)) < HARD_NO_FLY_SQ - 1e-6) ++insideHardZone;
         }
     }
     std::printf("  (drone moves over fire: %d, frames ending inside hard zone: %d)\n", crossings, insideHardZone);
     CHECK(crossings == 0);
     CHECK(insideHardZone == 0);
+}
+
+// Growing a fire makes the controller launch more drones, at once, from the launch point
+TEST(fleet_grows_with_the_fire) {
+    const Vec2 base(2.5f, GRID_HEIGHT - 2.5f);
+    std::vector<std::uint8_t> fire = discFire(700, 700, 1);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    live.compute(fire);
+    Perimeter perim(fire);
+    MissionController mission(live, perim.distance(), base);
+    mission.markFireChanged();
+    mission.update();
+    const int sweepBefore = mission.activeCount(false);
+    int maxIdBefore = -1;
+    for (const Drone& d : mission.drones()) maxIdBefore = std::max(maxIdBefore, d.id);
+
+    fire = discFire(700, 700, 100);   // Now 2 km across
+    live.compute(fire);
+    perim.update(fire);
+    mission.markFireChanged();
+    for (int f = 0; f < REPLAN_INTERVAL; ++f) mission.update();
+    const int sweepAfter = mission.activeCount(false);
+    std::printf("  (sweep drones %d -> %d)\n", sweepBefore, sweepAfter);
+    CHECK(sweepAfter > sweepBefore);
+    CHECK(sweepAfter == mission.plan().sweepNeeded);
+    // Every sector has exactly one active drone flying it
+    std::set<int> flying;
+    for (const Drone& d : mission.drones()) if (!d.isACO && d.state == DroneState::Active) flying.insert(d.id);
+    CHECK(static_cast<int>(flying.size()) == static_cast<int>(mission.plan().sweepRoutes.size()));
+    for (int id : mission.plan().sectorDrone) CHECK(flying.count(id) == 1);
+    // The new drones have new ids
+    int newOnes = 0;
+    for (const Drone& d : mission.drones()) newOnes += d.id > maxIdBefore;
+    CHECK(newOnes == sweepAfter - sweepBefore);
+}
+
+// A shrinking fire lowers each count by one only after SHRINK_REPLANS re-plans in a row; retired drones fly
+// home without ever crossing the fire and are removed there. Then a growing fire raises both counts at once.
+TEST(fleet_shrinks_slowly_and_retired_drones_fly_home) {
+    const Vec2 base(2.5f, GRID_HEIGHT - 2.5f);
+    std::vector<std::uint8_t> fire = discFire(700, 700, 100);   // 2 km across
+    // Plain distance fields (rather than a Perimeter, whose committed fire never shrinks) so the test can
+    // make the fire smaller. The committed-fire field has the Perimeter's range limit, as the planner expects.
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT), perimDt(GRID_WIDTH, GRID_HEIGHT, SEARCH_DISTANCE + 1);
+    live.compute(fire);
+    perimDt.compute(fire);
+    MissionController mission(live, perimDt, base);
+
+    int crossings = 0, insideHardZone = 0;
+    std::set<int> retired;          // Every drone ever seen returning
+    auto frames = [&](int count) {
+        for (int f = 0; f < count; ++f) {
+            std::vector<std::pair<int, Vec2>> before;
+            for (const Drone& d : mission.drones()) before.emplace_back(d.id, d.pos);
+            mission.update();
+            for (const Drone& d : mission.drones()) {
+                if (d.state == DroneState::Returning) retired.insert(d.id);
+                for (const auto& [id, was] : before)
+                    if (id == d.id && crossesFire(fire, was, d.pos)) ++crossings;
+                if (live.squaredDistance(at(static_cast<int>(d.pos.x), static_cast<int>(d.pos.y))) < HARD_NO_FLY_SQ - 1e-6)
+                    ++insideHardZone;
+            }
+        }
+    };
+    // One re-plan: mark the plan dirty and run until the controller has re-planned
+    auto replan = [&]() { mission.markFireChanged(); frames(REPLAN_INTERVAL); };
+    auto setFire = [&](int r) { fire = discFire(700, 700, r); live.compute(fire); perimDt.compute(fire); };
+
+    replan();
+    const int sweepBig = mission.activeCount(false);
+    CHECK(sweepBig == 8);
+    // Bring the ACO fleet down to what the big fire needs, so the counts below start from a settled fleet
+    for (int k = 0; k < 3 * SHRINK_REPLANS && mission.activeCount(true) > mission.plan().acoNeeded; ++k) replan();
+    const int acoBig = mission.activeCount(true);
+    CHECK(acoBig == mission.plan().acoNeeded);
+
+    // --- Shrink the fire to a new fire: each count falls by one only on the SHRINK_REPLANS-th re-plan ---
+    setFire(1);
+    for (int k = 1; k <= SHRINK_REPLANS; ++k) {
+        replan();
+        const int expectSweep = k < SHRINK_REPLANS ? sweepBig : sweepBig - 1;
+        CHECK(mission.activeCount(false) == expectSweep);
+        CHECK(mission.activeCount(true) == (k < SHRINK_REPLANS ? acoBig : std::max(MIN_ACO_DRONES, acoBig - 1)));
+    }
+    std::printf("  (after %d re-plans on a small fire: sweep %d -> %d, ACO %d -> %d)\n", SHRINK_REPLANS, sweepBig,
+                mission.activeCount(false), acoBig, mission.activeCount(true));
+    CHECK(!retired.empty());
+
+    // Keep re-planning: both fleets settle. The sweep fleet stops one above the bare minimum needed when one
+    // fewer drone would push a lap past SHRINK_MARGIN of the cap (that margin is the point of the rule).
+    for (int k = 0; k < 4 * SHRINK_REPLANS; ++k) replan();
+    CHECK(mission.activeCount(false) >= mission.plan().sweepNeeded);
+    CHECK(mission.activeCount(false) == mission.plan().sweepNeeded || !mission.plan().sweepShrinkOk);
+    for (float lap : mission.plan().sweepLapS) CHECK(lap <= MAX_SWEEP_LAP_S);
+    CHECK(mission.activeCount(true) == mission.plan().acoNeeded);
+    CHECK(mission.activeCount(true) == MIN_ACO_DRONES);
+
+    // Every retired drone gets home and is removed (allow time for the last one to fly back)
+    frames(300);
+    int stillHere = 0;
+    for (const Drone& d : mission.drones()) stillHere += retired.count(d.id) > 0;
+    std::printf("  (%zu drones retired, %d not yet removed; moves over fire %d, inside hard zone %d)\n",
+                retired.size(), stillHere, crossings, insideHardZone);
+    CHECK(stillHere == 0);
+    CHECK(crossings == 0);
+    CHECK(insideHardZone == 0);
+
+    // --- Grow the fire again: both counts go up on the very next re-plan ---
+    const int sweepSmall = mission.activeCount(false), acoSmall = mission.activeCount(true);
+    setFire(100);
+    replan();
+    std::printf("  (fire grows back: sweep %d -> %d, ACO %d -> %d)\n", sweepSmall, mission.activeCount(false),
+                acoSmall, mission.activeCount(true));
+    CHECK(mission.activeCount(false) > sweepSmall);
+    CHECK(mission.activeCount(true) > acoSmall);
 }
 
 TEST(aco_drones_are_spread_round_the_tour) {
@@ -954,6 +1265,43 @@ TEST(aco_drones_are_spread_round_the_tour) {
     std::set<size_t> targets;
     for (const Drone& d : mission.drones()) if (d.isACO) targets.insert(d.target);
     CHECK(static_cast<int>(targets.size()) == mission.activeCount(true));
+
+    // ...evenly spaced round it: neighbouring drones are a 1/n share of the tour apart, give or take the
+    // longest gap between two waypoints (slots snap to waypoints)
+    const std::vector<Vec2>& tour = mission.plan().acoTour;
+    const int n = static_cast<int>(tour.size());
+    std::vector<float> arc(n, 0.0f);
+    float maxGap = 0.0f;
+    for (int i = 1; i < n; ++i) {
+        const float g = std::sqrt(sqDist(tour[i - 1], tour[i]));
+        arc[i] = arc[i - 1] + g;
+        maxGap = std::max(maxGap, g);
+    }
+    const float total = closedRouteLength(tour);
+    maxGap = std::max(maxGap, total - arc[n - 1]);
+    std::vector<float> pos;
+    for (size_t t : targets) pos.push_back(arc[t]);
+    const float share = total / pos.size();
+    for (size_t i = 0; i < pos.size(); ++i) {
+        const float gap = i + 1 < pos.size() ? pos[i + 1] - pos[i] : total - pos[i] + pos[0];
+        CHECK(std::fabs(gap - share) <= maxGap + 1e-3f);
+    }
+}
+
+// The ACO count follows the one-drone loop time: each point is revisited within ACO_REVISIT_S
+TEST(aco_count_follows_the_revisit_time) {
+    for (int r : { 1, 100, 200 }) {
+        SweepSetup s(discFire(800, 800, r));
+        const MissionPlan& p = s.plan;
+        std::printf("  (fire %d m across: tour %.1f km, %.1f min for one drone, %d ACO drones)\n",
+                    2 * r * static_cast<int>(SIM_CELL_SIZE_M), closedRouteLength(p.acoTour) * SIM_CELL_SIZE_M / 1000.0f,
+                    p.acoLoopS / 60.0f, p.acoNeeded);
+        CHECK(std::fabs(p.acoLoopS - flightSeconds(closedRouteLength(p.acoTour))) < 1e-3f);
+        CHECK(p.acoNeeded >= MIN_ACO_DRONES && p.acoNeeded <= MAX_ACO_DRONES);
+        CHECK(p.acoLoopS / p.acoNeeded <= ACO_REVISIT_S);                    // Revisit within the limit...
+        CHECK(p.acoNeeded == MIN_ACO_DRONES || p.acoLoopS / (p.acoNeeded - 1) > ACO_REVISIT_S);   // ...with no spare
+        CHECK(!p.acoOverLimit);
+    }
 }
 
 int main() {

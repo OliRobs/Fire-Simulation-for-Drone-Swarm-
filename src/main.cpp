@@ -255,12 +255,14 @@ int main(int argc, char** argv) {
         // Update mission graphics (routes, waypoints, no-fly bounds) if mission plan changed
         if (mission.takePlanChanged()) {
             renderer.setMissionVisuals(mission.plan(), mission.drones(), liveEdt);
+            lastTitleMinute = -1;   // Refresh the title so the new drone counts show straight away
         }
 
         // --- 3e. Render Frame ---
         renderer.draw(mission.plan(), mission.drones());
 
-        // Show the simulated time and zoom in the title bar, refreshed each simulated minute or on zooming
+        // Show the simulated time, zoom and drone counts in the title bar, refreshed each simulated minute, on
+        // zooming, or after a re-plan
         const int simMinute = static_cast<int>(sim.minutes());
         if (simMinute != lastTitleMinute || renderer.zoom() != lastTitleZoom) {
             lastTitleMinute = simMinute;
@@ -269,7 +271,8 @@ int main(int argc, char** argv) {
             std::snprintf(title, sizeof(title),
                           "Wildfire  t = %dh %02dm  zoom %.1fx  |  wheel zoom, right-drag pan, F fire, 0 reset, P V R overlays",
                           simMinute / 60, simMinute % 60, renderer.zoom());
-            renderer.window().setTitle(title);
+            // Followed by the drone counts (and any over-limit warning) from the latest plan
+            renderer.window().setTitle(std::string(title) + renderer.fleetStatus());
         }
     }
 
