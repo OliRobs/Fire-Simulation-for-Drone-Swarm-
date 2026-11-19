@@ -69,7 +69,9 @@ std::vector<int> solveACO(const std::vector<Vec2>& pts, std::mt19937& rng) {
     std::vector<float> tau(static_cast<size_t>(n) * n, ACO_ANTS / std::max(bestLen, 1e-3f));
     std::vector<std::vector<int>> tours(ACO_ANTS, std::vector<int>(n));
     std::vector<float> lens(ACO_ANTS), w(n);
-    std::vector<char> visited(n);
+    std::vector<float> choice(static_cast<size_t>(n) * n);   // tau * heur per edge, refreshed every iteration
+    std::vector<int> todo;                                   // Points the current ant has not visited yet
+    todo.reserve(n);
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
 
     // ------------------------------------------------------------------------
@@ -77,40 +79,56 @@ std::vector<int> solveACO(const std::vector<Vec2>& pts, std::mt19937& rng) {
     // ------------------------------------------------------------------------
     for (int it = 0; it < ACO_ITERATIONS; ++it) {
 
+        // --- Choice table: transition weight of every edge for this iteration ---
+        // Weight = tau^alpha * eta^beta with alpha = 1 and beta = 3 (heur already holds eta^3). Tau only
+        // changes between iterations, so the product is worked out once here (n^2 multiplications) instead of
+        // once per ant step (ACO_ANTS * n^2 / 2). It is the same float multiplication as before, so every
+        // weight is bit-identical. (The "choice info" table of Dorigo & Stuetzle, Ant Colony Optimization,
+        // MIT Press 2004, section 3.8.)
+        for (size_t k = 0; k < choice.size(); ++k) choice[k] = tau[k] * heur[k];
+
         // --- 4a. Construct Tours for All Ants ---
         for (int a = 0; a < ACO_ANTS; ++a) {
-            std::fill(visited.begin(), visited.end(), 0);
+            // Unvisited points, kept in increasing index order. Scanning only these, in that order, gives the
+            // same sum and the same roulette pick as scanning all n points with visited ones weighted 0: adding
+            // 0.0f leaves a float sum unchanged, and the roulette skipped zero weights anyway.
+            todo.resize(n);
+            std::iota(todo.begin(), todo.end(), 0);
 
             // Random starting location for ant 'a'
             int cur = static_cast<int>(rng() % n);
-            tours[a][0] = cur; visited[cur] = 1;
+            tours[a][0] = cur;
+            todo.erase(todo.begin() + cur);   // todo[i] == i before the first removal
 
             // Step through and choose remaining cities
             for (int step = 1; step < n; ++step) {
+                const float* row = &choice[static_cast<size_t>(cur) * n];
+                const int left = static_cast<int>(todo.size());
                 float sum = 0.0f;
 
-                // Transition weights: tau^alpha * eta^beta with alpha = 1 and beta = 3 (heur already holds eta^3)
-                for (int j = 0; j < n; ++j) {
-                    w[j] = visited[j] ? 0.0f : tau[cur * n + j] * heur[cur * n + j];
-                    sum += w[j];
+                // Transition weights of the unvisited points (w[k] belongs to point todo[k])
+                for (int k = 0; k < left; ++k) {
+                    w[k] = row[todo[k]];
+                    sum += w[k];
                 }
 
-                int next = -1;
+                int pos = -1;   // Position in todo of the chosen point
                 // Roulette-Wheel Selection (Stochastic Proportional Selection)
                 if (sum > 0.0f) {
                     float pick = u01(rng) * sum;
-                    for (int j = 0; j < n; ++j) {
-                        if (w[j] <= 0.0f) continue;
-                        next = j; pick -= w[j];
+                    for (int k = 0; k < left; ++k) {
+                        if (w[k] <= 0.0f) continue;
+                        pos = k; pick -= w[k];
                         if (pick <= 0.0f) break;
                     }
                 }
 
-                // Fallback deterministic selection in case of numerical underflow
-                if (next < 0)
-                    for (int j = 0; j < n; ++j) if (!visited[j]) { next = j; break; }
+                // Fallback deterministic selection in case of numerical underflow: the lowest unvisited index
+                if (pos < 0) pos = 0;
 
-                tours[a][step] = next; visited[next] = 1; cur = next;
+                const int next = todo[pos];
+                todo.erase(todo.begin() + pos);   // Keeps the rest in index order
+                tours[a][step] = next; cur = next;
             }
 
             // Evaluate ant's constructed tour and update global best if improved
