@@ -64,7 +64,7 @@ constexpr int PERIMETER_SECTION_RADIUS = cellsFromMetres(300.0f);  // How far al
 // Derived from the settings above, not a design value of its own.
 constexpr int LIVE_EDT_RANGE = MIN_FIRE_DISTANCE + 1;
 constexpr int SWEEP_DRONES = 3;           // Boustrophedon drones at the start (the fleet then follows the fire)
-constexpr int ACO_DRONES = 5;             // ACO-routed drones at the start (perimeter out to SEARCH_DISTANCE)
+constexpr int ACO_DRONES = 2;             // ACO-routed drones at the start (perimeter out to SEARCH_DISTANCE)
 
 // --- Sweep fleet sizing ---
 // Each sweep drone owns one sector of the inner band (a contiguous run of lanes along the perimeter line) and
