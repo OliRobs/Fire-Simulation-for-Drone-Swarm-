@@ -717,6 +717,115 @@ TEST(aco_returns_a_permutation_and_a_good_tour) {
     CHECK(len < optimal * 1.05f);
 }
 
+// solveACO builds each ant's tour from a per-iteration choice table and a list of unvisited points. This
+// checks it against the original version (all n points scanned per step, tau * heur worked out each time),
+// kept here unchanged: the tours and the random numbers drawn must be identical, bit for bit.
+TEST(aco_choice_table_matches_original_scan) {
+    // --- Reference: the original solveACO, copied unchanged (only renamed) ---
+    auto reference = [](const std::vector<Vec2>& pts, std::mt19937& rng) {
+        const int n = static_cast<int>(pts.size());
+        std::vector<int> best(n);
+        std::iota(best.begin(), best.end(), 0);
+        if (n <= 3) return best;
+        std::vector<float> d(static_cast<size_t>(n) * n), heur(static_cast<size_t>(n) * n, 0.0f);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j) {
+                d[i * n + j] = std::sqrt(sqDist(pts[i], pts[j]));
+                if (i != j) { const float h = 1.0f / (d[i * n + j] + 1e-3f); heur[i * n + j] = h * h * h; }
+            }
+        auto tourLength = [&](const std::vector<int>& t) {
+            float len = 0.0f;
+            for (int i = 0; i < n; ++i) len += d[t[i] * n + t[(i + 1) % n]];
+            return len;
+        };
+        {
+            std::vector<char> seen(n, 0);
+            int cur = 0;
+            best[0] = 0; seen[0] = 1;
+            for (int step = 1; step < n; ++step) {
+                int next = -1; float nd = std::numeric_limits<float>::max();
+                for (int j = 0; j < n; ++j) if (!seen[j] && d[cur * n + j] < nd) { nd = d[cur * n + j]; next = j; }
+                best[step] = next; seen[next] = 1; cur = next;
+            }
+        }
+        float bestLen = tourLength(best);
+        std::vector<float> tau(static_cast<size_t>(n) * n, ACO_ANTS / std::max(bestLen, 1e-3f));
+        std::vector<std::vector<int>> tours(ACO_ANTS, std::vector<int>(n));
+        std::vector<float> lens(ACO_ANTS), w(n);
+        std::vector<char> visited(n);
+        std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+        for (int it = 0; it < ACO_ITERATIONS; ++it) {
+            for (int a = 0; a < ACO_ANTS; ++a) {
+                std::fill(visited.begin(), visited.end(), 0);
+                int cur = static_cast<int>(rng() % n);
+                tours[a][0] = cur; visited[cur] = 1;
+                for (int step = 1; step < n; ++step) {
+                    float sum = 0.0f;
+                    for (int j = 0; j < n; ++j) {
+                        w[j] = visited[j] ? 0.0f : tau[cur * n + j] * heur[cur * n + j];
+                        sum += w[j];
+                    }
+                    int next = -1;
+                    if (sum > 0.0f) {
+                        float pick = u01(rng) * sum;
+                        for (int j = 0; j < n; ++j) {
+                            if (w[j] <= 0.0f) continue;
+                            next = j; pick -= w[j];
+                            if (pick <= 0.0f) break;
+                        }
+                    }
+                    if (next < 0) for (int j = 0; j < n; ++j) if (!visited[j]) { next = j; break; }
+                    tours[a][step] = next; visited[next] = 1; cur = next;
+                }
+                lens[a] = tourLength(tours[a]);
+                if (lens[a] < bestLen) { bestLen = lens[a]; best = tours[a]; }
+            }
+            for (float& t : tau) t *= (1.0f - ACO_EVAPORATION);
+            auto deposit = [&](const std::vector<int>& t, float amount) {
+                for (int i = 0; i < n; ++i) {
+                    const int a = t[i], b = t[(i + 1) % n];
+                    tau[a * n + b] += amount;
+                    tau[b * n + a] += amount;
+                }
+            };
+            for (int a = 0; a < ACO_ANTS; ++a) deposit(tours[a], 1.0f / lens[a]);
+            deposit(best, ACO_ELITE_WEIGHT / bestLen);
+        }
+        return best;
+    };
+
+    // --- Point sets: random spreads of many sizes, clusters with repeated points, and points so far apart
+    // that the weights underflow to zero (this exercises the deterministic fallback pick) ---
+    std::mt19937 gen(11);
+    std::uniform_real_distribution<float> coord(0.0f, 2000.0f);
+    std::vector<std::vector<Vec2>> sets;
+    for (int n : { 4, 5, 9, 24, 60, 130 }) {
+        std::vector<Vec2> pts;
+        for (int i = 0; i < n; ++i) pts.emplace_back(coord(gen), coord(gen));
+        sets.push_back(pts);
+    }
+    {
+        std::vector<Vec2> pts;   // Clusters of points, some exactly on top of each other
+        for (int i = 0; i < 40; ++i) pts.emplace_back(100.0f * (i % 4), 100.0f * ((i / 4) % 3));
+        sets.push_back(pts);
+    }
+    {
+        std::vector<Vec2> pts;   // 1e15 cells apart: 1 / d^3 underflows, every weight is 0
+        for (int i = 0; i < 12; ++i) pts.emplace_back(1e15f * i, 1e15f * (i % 3));
+        sets.push_back(pts);
+    }
+
+    // --- Same seed into both: same tour, and the random stream left in the same place ---
+    int mismatches = 0;
+    for (size_t s = 0; s < sets.size(); ++s) {
+        std::mt19937 r1(100 + static_cast<unsigned>(s)), r2(100 + static_cast<unsigned>(s));
+        const std::vector<int> got = solveACO(sets[s], r1);
+        const std::vector<int> want = reference(sets[s], r2);
+        if (got != want || r1() != r2()) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+}
+
 TEST(voronoi_assigns_every_cell) {
     std::vector<int> cells;
     for (int y = 100; y < 200; ++y) for (int x = 100; x < 200; ++x) cells.push_back(at(x, y));
