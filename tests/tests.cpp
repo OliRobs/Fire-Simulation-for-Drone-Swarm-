@@ -2028,6 +2028,36 @@ TEST(aco_drones_spread_back_out_after_a_replan) {
     for (const Drone& d : mission.drones()) CHECK(d.speedScale == 1.0f);
 }
 
+// Only the ACO region (the outer zone, perimeter line out to SEARCH_DISTANCE) is split into Voronoi cells. The
+// inner band, which the sweep lanes cover, gets no Voronoi label, and every point of interest is in the outer zone.
+TEST(voronoi_covers_only_the_aco_region) {
+    for (const auto& fire : { discFire(CX, CY, 30), bayFire() }) {
+        SweepSetup s(fire);
+        const MissionPlan& plan = s.plan;
+        int inner = 0, outer = 0, wrong = 0;
+        for (int i = 0; i < N; ++i) {
+            inner += plan.zone[i] == 1;
+            outer += plan.zone[i] == 2;
+            // Labelled exactly where the cell is in the outer zone, with a valid region index
+            const bool labelled = plan.label[i] >= 0;
+            if (labelled != (plan.zone[i] == 2)) ++wrong;
+            if (labelled && plan.label[i] >= static_cast<int>(plan.regions.size())) ++wrong;
+        }
+        int poisOutside = 0, regionsUsed = 0;
+        for (const Region& rg : plan.regions) {
+            if (rg.outerCount == 0) continue;
+            ++regionsUsed;
+            poisOutside += plan.zone[at(static_cast<int>(rg.poi.x), static_cast<int>(rg.poi.y))] != 2;
+        }
+        std::printf("  (%d inner-band cells unlabelled, %d outer cells in %d Voronoi regions)\n", inner, outer, regionsUsed);
+        CHECK(inner > 0 && outer > 0);    // Both zones are there
+        CHECK(wrong == 0);
+        CHECK(poisOutside == 0);
+        CHECK(regionsUsed >= MIN_SITES);
+        CHECK(plan.acoTour.size() >= 3);
+    }
+}
+
 // The ACO routing only changes when the perimeter does. While the fire grows inside the perimeter (no section
 // has moved) a re-plan keeps the same regions, points of interest and tour; once a section moves, the tour is
 // planned afresh. The kept tour must still be fire-safe.
@@ -2067,15 +2097,15 @@ TEST(aco_tour_changes_only_when_the_perimeter_moves) {
     CHECK(mission.plan().acoKept);    // ...but the ACO side is carried over
     CHECK(sameTour(mission.plan().acoTour, first));
 
-    // Without the carry-over the re-plan would have moved the tour (the Voronoi also covers the inner band,
-    // which the bigger fire has eaten into), so the test really exercises it
+    // Carrying the tour over gives exactly what planning afresh would: the Voronoi only covers the outer zone,
+    // which the fire growing inside the perimeter does not change
     {
         SafePlanner sp(live);
         std::mt19937 rng(2024);
         const MissionPlan fresh = planMission(live, perim.distance(), sp, rng);
-        std::printf("  (tour of %zu waypoints kept; a fresh plan would have %s it)\n", first.size(),
-                    sameTour(fresh.acoTour, first) ? "kept" : "changed");
-        CHECK(!sameTour(fresh.acoTour, first));
+        std::printf("  (tour of %zu waypoints kept; a fresh plan %s it)\n", first.size(),
+                    sameTour(fresh.acoTour, first) ? "matches" : "differs from");
+        CHECK(sameTour(fresh.acoTour, first));
     }
 
     // The kept tour is still fire-safe: every leg, including the wrap back to the start, clears the hard no-fly zone

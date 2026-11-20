@@ -58,8 +58,8 @@ These behaviours were asked for explicitly. Keep them when changing planning cod
 - Legs may cut inside the `MIN_FIRE_DISTANCE` survey standoff when the path allows, but never closer than
   `HARD_MIN_FIRE_DISTANCE`.
 - Boustrophedon sweeps cover inside the perimeter; the ant-colony (ACO) tour covers from the perimeter out to
-  `SEARCH_DISTANCE`. The search area is split into Voronoi regions that give the ACO points of interest (they are
-  no longer used for the sweep).
+  `SEARCH_DISTANCE`. Only the ACO region (the outer zone) is split into Voronoi regions, which give the ACO
+  points of interest; the inner band is not segmented with Voronoi cells.
 - Sweep lanes run straight in from the perimeter line (traced from the committed-fire distance field), at right
   angles to the nearest fire edge, seeded at most `LANE_SPACING` (120 m) apart. Overlap where lanes converge is
   accepted; gap-fill lanes cover the cells lanes miss in concave bays.

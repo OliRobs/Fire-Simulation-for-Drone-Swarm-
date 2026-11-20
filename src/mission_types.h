@@ -5,8 +5,9 @@
 #include <vector>
 #include "types.h"
 
-// One Voronoi region of the search area. Regions now only supply the ACO points of interest (one in the outer
-// zone of each region); the sweep is planned from lanes along the perimeter line instead (SweepLane).
+// One Voronoi region of the outer zone (the ACO region, perimeter line out to SEARCH_DISTANCE). Regions only
+// supply the ACO points of interest, one per region; the inner band is not split into regions at all (the sweep
+// is planned from lanes along the perimeter line instead, SweepLane).
 struct Region {
     int outerCount = 0;                   // Cells of this region outside the perimeter line (outer zone)
     Vec2 outerSum{ 0.0f, 0.0f };
@@ -44,9 +45,10 @@ inline float closedRouteLength(const std::vector<Vec2>& route) {
 }
 
 struct MissionPlan {
-    std::vector<int> label;                        // Voronoi region per cell (-1 = outside search area)
+    std::vector<int> label;                        // Voronoi region per cell of the outer zone (the ACO region);
+                                                   // -1 everywhere else, including the inner band
     std::vector<std::uint8_t> zone;                // Per cell: 1 inner band (sweep), 2 outer zone (ACO), 0 neither
-    GridRect bounds;                               // Every cell with label >= 0 lies inside this rectangle
+    GridRect bounds;                               // Every cell with zone != 0 (so every labelled cell) lies inside
     std::vector<Region> regions;
 
     // --- Sweep ---

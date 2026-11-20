@@ -217,7 +217,8 @@ distances they had on the original 30 m cells:
 
 **Zones.** Cells under 1.2 km from the committed fire and at least 300 m from the live fire form the inner band,
 swept by the sweep drones. From 1.2 km out to 2.1 km is the outer zone, covered by the ACO tour through one point
-of interest per Voronoi region.
+of interest per Voronoi region. Only the outer zone is split into Voronoi regions; the inner band is not
+segmented (the sweep lanes and sectors cover it).
 
 **Sweep lanes.** The 1.2 km line is traced from the distance field into ordered closed loops (marching squares;
 one loop per separate fire, all anticlockwise round the fire). Lanes are seeded evenly along each loop, at most

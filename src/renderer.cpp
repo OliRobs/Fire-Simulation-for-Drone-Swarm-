@@ -145,7 +145,7 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
         std::fill(overlayPixels_.begin() + (static_cast<size_t>(y) * GRID_WIDTH + overlayDrawn_.x0) * 4,
                   overlayPixels_.begin() + (static_cast<size_t>(y) * GRID_WIDTH + overlayDrawn_.x1) * 4, 0);
     }
-    // Every labelled cell lies inside plan.bounds (mission_types.h), so that is all that needs scanning
+    // Every search-area cell (zone != 0) lies inside plan.bounds (mission_types.h), so that is all that needs scanning
     const GridRect box{ std::max(0, plan.bounds.x0), std::max(0, plan.bounds.y0),
                         std::min(GRID_WIDTH, plan.bounds.x1), std::min(GRID_HEIGHT, plan.bounds.y1) };
 
@@ -162,15 +162,16 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
     // Draw tints and lines along cell borders in overlay texture
     for (int y = box.y0; y < box.y1; ++y) {
         for (int x = box.x0; x < box.x1; ++x) {
+            // The search area is every cell with a zone (inner band or outer zone). Only the outer zone has
+            // Voronoi labels, so the zone, not the label, says whether a cell is in the search area.
+            if (zoneAt(x, y) == 0) continue;
             const int l = labelAt(x, y);
-            if (l < 0) continue;
-
-            const int r = labelAt(x + 1, y), dn = labelAt(x, y + 1),
-                lf = labelAt(x - 1, y), up = labelAt(x, y - 1);
+            const int r = labelAt(x + 1, y), dn = labelAt(x, y + 1);
 
             sf::Uint8* px = &overlayPixels_[(y * GRID_WIDTH + x) * 4];
 
-            if (r < 0 || dn < 0 || lf < 0 || up < 0) { // Boundary edge of active search zone
+            if (zoneAt(x + 1, y) == 0 || zoneAt(x, y + 1) == 0 || zoneAt(x - 1, y) == 0 || zoneAt(x, y - 1) == 0) {
+                // Boundary edge of active search zone
                 if (holeAt(x + 1, y) || holeAt(x, y + 1) || holeAt(x - 1, y) || holeAt(x, y - 1)) {
                     // Standoff edge adjacent to fire (Red)
                     px[0] = 255; px[1] = 60; px[2] = 60; px[3] = 220;

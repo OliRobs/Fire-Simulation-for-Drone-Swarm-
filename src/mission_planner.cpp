@@ -19,8 +19,8 @@
 //    - Inner band (between the standoff and the perimeter line) -> sweep lanes at right angles to the fire,
 //      split into contiguous sectors along the perimeter line, one per sweep drone.
 //    - Outer Zone (Between perimeter and search distance bound) -> ACO Perimeter Loop.
-// 3. Voronoi Spatial Partitioning (k-means / Lloyd relaxation) to split the search area into regions that
-//    give the ACO points of interest (POIs).
+// 3. Voronoi Spatial Partitioning (k-means / Lloyd relaxation) to split the outer zone (the ACO region only;
+//    the inner band is left to the sweep) into regions that give the ACO points of interest (POIs).
 // ============================================================================
 
 namespace {
@@ -331,7 +331,8 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     // Step 1: Classify Grid Cells into Inner, Outer, or Invalid Zones
     // ------------------------------------------------------------------------
     std::vector<std::uint8_t>& zone = plan.zone;
-    std::vector<int> cells;
+    bool anyCells = false;     // Any surveyable cell at all (inner band or outer zone)
+    std::vector<int> outer;    // Outer-zone cells (the ACO region), in scan order: the only cells the Voronoi splits
 
     // Only the perimeter transform's window can hold search-area cells: outside it every cell reads INF (for
     // the Perimeter's transform, more than SEARCH_DISTANCE + 1 from the committed fire), so beyond outerHi.
@@ -346,64 +347,66 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
             // Categorize valid cells based on squared distance from committed perimeter
             const double d2 = perimEdt.squaredDistance(i);
             if (d2 < innerHi) {
-                zone[i] = 1; // Inner zone cell
+                zone[i] = 1; // Inner zone cell (swept by lanes, not split into Voronoi regions)
             }
             else if (d2 < outerHi) {
-                zone[i] = 2; // Outer zone cell
+                zone[i] = 2; // Outer zone cell (ACO region)
+                outer.push_back(i);
             }
             else {
                 continue;    // Beyond max search boundary
             }
-            cells.push_back(i);
+            anyCells = true;
         }
     }
 
     // Return empty plan if no surveyable cells exist
-    if (cells.empty()) return plan;
+    if (!anyCells) return plan;
 
     // ------------------------------------------------------------------------
     // Step 2a: Keep the ACO side of the previous plan while the perimeter holds
     // ------------------------------------------------------------------------
-    // The Voronoi regions only supply the ACO points of interest. If the committed perimeter has not moved, the
-    // outer zone (perimeter line out to SEARCH_DISTANCE) is the same land, so the regions, their points of
-    // interest and the tour order are carried over unchanged and the ACO routing stays put. (Re-running the
-    // Voronoi would move them anyway: it also covers the inner band, which shrinks as the live fire grows.)
-    // The live fire can only remove search-area cells while the perimeter holds, so every cell here was
-    // labelled in the previous plan and keeps its label; cells now inside the standoff simply drop out. If
-    // that ever fails (e.g. a caller set the flag wrongly) the regions are rebuilt as normal.
+    // The Voronoi regions only supply the ACO points of interest, and cover only the outer zone (perimeter
+    // line out to SEARCH_DISTANCE). If the committed perimeter has not moved, the outer zone is the same land
+    // (the live fire is still at least PERIMETER_UPDATE_DISTANCE inside the perimeter line, well clear of it),
+    // so the regions, their points of interest and the tour order are carried over unchanged and the ACO
+    // routing stays put. Rebuilding them would give the same result (same cells, same seed); carrying them
+    // over skips the Voronoi and the ant colony, and guarantees the tour holds. Every outer cell must have been
+    // labelled in the previous plan; if not (e.g. a caller set the flag wrongly) the regions are rebuilt.
     const MissionPlan* prev = fleet.previous;
     plan.acoKept = fleet.perimeterUnchanged && prev && !prev->regions.empty()
                    && prev->label.size() == static_cast<size_t>(N);
     if (plan.acoKept) {
-        for (int idx : cells) {
+        for (int idx : outer) {
             if (prev->label[idx] < 0) { plan.acoKept = false; break; }
         }
     }
     if (plan.acoKept) {
-        for (int idx : cells) plan.label[idx] = prev->label[idx];
+        for (int idx : outer) plan.label[idx] = prev->label[idx];
         plan.regions = prev->regions;   // Same outer-zone cells, so the same points of interest
     }
     else {
         // ------------------------------------------------------------------------
         // Step 2: Build Voronoi Spatial Regions (Lloyd's Relaxation)
         // ------------------------------------------------------------------------
-        // Calculate optimal region count 'S' clamped between MIN_SITES and MAX_SITES
-        const int S = std::min(std::clamp(static_cast<int>(cells.size()) / TARGET_REGION_CELLS, MIN_SITES, MAX_SITES),
-            static_cast<int>(cells.size()));
+        // Only the outer zone (the ACO region) is split into regions; the inner band is covered by the sweep
+        // lanes and gets no label. Region count 'S' from the outer zone's area, clamped between MIN_SITES and
+        // MAX_SITES (and never more regions than cells)
+        const int S = std::min(std::clamp(static_cast<int>(outer.size()) / TARGET_REGION_CELLS, MIN_SITES, MAX_SITES),
+            static_cast<int>(outer.size()));
 
-        const Voronoi voronoi = buildVoronoi(cells, S, rng);
+        const Voronoi voronoi = buildVoronoi(outer, S, rng);
 
-        // Label each valid cell with its assigned Voronoi site index
-        for (size_t i = 0; i < cells.size(); ++i) {
-            plan.label[cells[i]] = voronoi.assign[i];
+        // Label each outer-zone cell with its assigned Voronoi site index
+        for (size_t i = 0; i < outer.size(); ++i) {
+            plan.label[outer[i]] = voronoi.assign[i];
         }
 
         // ------------------------------------------------------------------------
         // Step 3: Outer-Zone Statistics per Region and their Points of Interest
         // ------------------------------------------------------------------------
         plan.regions.assign(S, Region());
-        for (int idx : cells) {
-            if (zone[idx] != 2) continue;
+        for (int idx : outer) {
             Region& rg = plan.regions[plan.label[idx]];
             ++rg.outerCount;
             rg.outerSum += cellCentre(idx);
@@ -413,8 +416,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         }
 
         // Snap outer Point of Interest (POI) to the nearest actual cell in the outer region
-        for (int idx : cells) {
-            if (zone[idx] != 2) continue;
+        for (int idx : outer) {
             Region& rg = plan.regions[plan.label[idx]];
             const float dd = sqDist(cellCentre(idx), rg.outerCentroid);
             if (dd < rg.poiDist) {
