@@ -1561,11 +1561,17 @@ TEST(aco_drones_spread_back_out_after_a_replan) {
         return smallest / (total / gaps.size());
     };
 
-    // Let the drones settle on the first tour, then bunch them up: grow the fire so the tour changes and every
-    // drone rejoins where it happens to be
+    // Let the drones settle on the first tour, then bunch them up: move and grow the fire so the tour changes and
+    // every drone rejoins where it happens to be.
+    // The fire jumps 1.5 x SEARCH_DISTANCE sideways. That puts the whole old tour on the near (west) side of the
+    // new one, so every drone rejoins on that side and they end up bunched whatever the starting ACO count in
+    // config.h. (A small 30-cell shift only bunched them when there were 5 drones; with ACO_DRONES = 2 the two
+    // drones rejoined at 0.85 of an even share and the test failed.) The shift is capped so the new tour still
+    // fits on the grid.
     for (int f = 0; f < 6 * REPLAN_INTERVAL; ++f) mission.update();
     const float settled = evenness();
-    fire = discFire(cx + 30, cy, 45);
+    const int shift = std::min(SEARCH_DISTANCE * 3 / 2, GRID_WIDTH - cx - 45 - SEARCH_DISTANCE - 10);
+    fire = discFire(cx + shift, cy, 45);
     live.compute(fire);
     perim.update(fire);
     mission.markFireChanged();
