@@ -88,28 +88,100 @@ namespace {
         return best;
     }
 
-    // Marks every cell (inside area, as a local bitmap) whose centre is within LANE_COVER_RADIUS of the lane's
-    // runs. Each run is sampled every RAY_STEP and a disc stamped at each sample; a cell within the radius of a
-    // sample is within the radius of the run, so a stamped cell is always really covered.
-    void stampLane(const SweepLane& lane, const GridRect& area, std::vector<std::uint8_t>& covered) {
+    // Disc stamp at one sample point c: marks every cell of `area` whose centre is within LANE_COVER_RADIUS of c.
+    // This is the original definition of coverage; the per-cell version in stampLane must agree with it exactly.
+    void stampDisc(Vec2 c, const GridRect& area, std::vector<std::uint8_t>& covered) {
         const float r = LANE_COVER_RADIUS, r2 = r * r;
         const int w = area.x1 - area.x0;
-        for (size_t i = 0; i + 1 < lane.pts.size(); i += 2) {
-            const Vec2 a = lane.pts[i], b = lane.pts[i + 1];
-            const float len = std::sqrt(sqDist(a, b));
-            const int steps = std::max(1, static_cast<int>(std::ceil(len / RAY_STEP)));
-            for (int s = 0; s <= steps; ++s) {
-                const Vec2 c = a + (b - a) * (static_cast<float>(s) / steps);
-                const int x0 = std::max(area.x0, static_cast<int>(std::floor(c.x - r)));
-                const int x1 = std::min(area.x1 - 1, static_cast<int>(std::floor(c.x + r)));
-                const int y0 = std::max(area.y0, static_cast<int>(std::floor(c.y - r)));
-                const int y1 = std::min(area.y1 - 1, static_cast<int>(std::floor(c.y + r)));
-                for (int y = y0; y <= y1; ++y)
-                    for (int x = x0; x <= x1; ++x)
-                        if (sqDist(Vec2(x + 0.5f, y + 0.5f), c) <= r2) covered[(y - area.y0) * w + (x - area.x0)] = 1;
+        const int x0 = std::max(area.x0, static_cast<int>(std::floor(c.x - r)));
+        const int x1 = std::min(area.x1 - 1, static_cast<int>(std::floor(c.x + r)));
+        const int y0 = std::max(area.y0, static_cast<int>(std::floor(c.y - r)));
+        const int y1 = std::min(area.y1 - 1, static_cast<int>(std::floor(c.y + r)));
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x)
+                if (sqDist(Vec2(x + 0.5f, y + 0.5f), c) <= r2) covered[(y - area.y0) * w + (x - area.x0)] = 1;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Lane coverage stamp
+// ----------------------------------------------------------------------------
+// Marks every cell (inside area, as a local bitmap) whose centre is within LANE_COVER_RADIUS of one of the
+// lane's samples: each run a -> b is sampled every RAY_STEP (sample s of `steps` is a + (b - a) * (s / steps)),
+// and a cell is covered when it is within the radius of a sample. A cell within the radius of a sample is within
+// the radius of the run, so a marked cell is always really covered.
+//
+// Coverage used to be stamped as a disc (a 14 x 14 box test) at every sample. Neighbouring samples are only half
+// a cell apart, so each cell was tested against ~28 samples. Now each cell near the run is tested only against
+// the few samples that could reach it, nearest first, stopping at the first hit:
+//  - A cell whose distance from the run's LINE is more than r + 1 is out of reach of every sample.
+//  - Otherwise the samples within reach lie within (r + 1) cells, along the run, of the cell's projection onto
+//    it. Samples further along are more than r + 1 away (the margin of 1 cell dwarfs float rounding, which is
+//    about 1e-3 cells at these coordinates), so the original test would reject them too.
+// The samples that are tested use exactly the original expressions (same float sample point, same distance test),
+// so the marked cells are exactly those the disc stamps marked. tests.cpp checks this bit for bit against the
+// disc version (lane_stamp_matches_disc_stamps).
+void stampLaneCoverage(const SweepLane& lane, const GridRect& area, std::vector<std::uint8_t>& covered) {
+    const float r = LANE_COVER_RADIUS, r2 = r * r;
+    const float reach = r + 1.0f;   // Search margin: comfortably more than r (see above)
+    const int w = area.x1 - area.x0;
+    std::vector<Vec2> samples;   // Sample points of the current run (reused between runs)
+    for (size_t i = 0; i + 1 < lane.pts.size(); i += 2) {
+        const Vec2 a = lane.pts[i], b = lane.pts[i + 1];
+        const float len = std::sqrt(sqDist(a, b));
+        const int steps = std::max(1, static_cast<int>(std::ceil(len / RAY_STEP)));
+        // The run's sample points, worked out once with exactly the original expression
+        samples.resize(static_cast<size_t>(steps) + 1);
+        for (int s = 0; s <= steps; ++s) samples[s] = a + (b - a) * (static_cast<float>(s) / steps);
+        auto sample = [&](int s) { return samples[s]; };
+
+        // A (near) zero-length run has no direction to project onto: stamp its samples as discs
+        if (len < 1e-3f) {
+            for (int s = 0; s <= steps; ++s) stampDisc(sample(s), area, covered);
+            continue;
+        }
+        const Vec2 dir = (b - a) / len;                    // Unit vector along the run
+        const float samplesPerCell = steps / len;          // Sample index advance per cell along the run
+        const int span = static_cast<int>(std::ceil(reach * samplesPerCell)) + 1;   // Samples either side to try
+
+        // Cells whose centres could be within reach: the run's bounding box grown by `reach`, clipped to area
+        const int x0 = std::max(area.x0, static_cast<int>(std::floor(std::min(a.x, b.x) - reach)));
+        const int x1 = std::min(area.x1 - 1, static_cast<int>(std::floor(std::max(a.x, b.x) + reach)));
+        const int y0 = std::max(area.y0, static_cast<int>(std::floor(std::min(a.y, b.y) - reach)));
+        const int y1 = std::min(area.y1 - 1, static_cast<int>(std::floor(std::max(a.y, b.y) + reach)));
+        for (int y = y0; y <= y1; ++y) {
+            // On this row, only cells whose distance from the run's line could be within `reach` need looking at.
+            // That distance is linear in x, so they form one interval; work it out (one cell wider each side, so
+            // rounding here can't drop a cell: the exact per-cell test below still decides).
+            int rx0 = x0, rx1 = x1;
+            if (std::fabs(dir.y) > 1e-6f) {
+                const float base = (y + 0.5f - a.y) * dir.x;          // across = (x + 0.5 - a.x) * dir.y - base
+                const float xa = a.x - 0.5f + (base - reach) / dir.y, xb = a.x - 0.5f + (base + reach) / dir.y;
+                rx0 = std::max(x0, static_cast<int>(std::floor(std::min(xa, xb))) - 1);
+                rx1 = std::min(x1, static_cast<int>(std::ceil(std::max(xa, xb))) + 1);
+            }
+            for (int x = rx0; x <= rx1; ++x) {
+                std::uint8_t& cov = covered[(y - area.y0) * w + (x - area.x0)];
+                if (cov) continue;                                     // Already covered (by this or another lane)
+                const Vec2 p(x + 0.5f, y + 0.5f), rel = p - a;
+                const float along = rel.x * dir.x + rel.y * dir.y;     // Distance along the run from a
+                const float across = rel.x * dir.y - rel.y * dir.x;    // Signed distance from the run's line
+                if (std::fabs(across) > reach) continue;               // Out of reach of every sample
+                if (along < -reach || along > len + reach) continue;   // Beyond either end, out of reach
+                // Samples nearest the projection first (most covered cells hit on the first test)
+                const int mid = std::clamp(static_cast<int>(std::lround(along * samplesPerCell)), 0, steps);
+                for (int k = 0; k <= span; ++k) {
+                    const int lo = mid - k, hi = mid + k;
+                    if (lo >= 0 && sqDist(p, sample(lo)) <= r2) { cov = 1; break; }
+                    if (k > 0 && hi <= steps && sqDist(p, sample(hi)) <= r2) { cov = 1; break; }
+                    if (lo < 0 && hi > steps) break;                   // No samples left on either side
+                }
             }
         }
     }
+}
+
+namespace {
 }
 
 // ----------------------------------------------------------------------------
@@ -171,7 +243,7 @@ int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& per
     if (area.empty() || lanes.empty()) return 0;
     const int w = area.x1 - area.x0, h = area.y1 - area.y0;
     std::vector<std::uint8_t> covered(static_cast<size_t>(w) * h, 0);
-    for (const SweepLane& l : lanes) stampLane(l, area, covered);
+    for (const SweepLane& l : lanes) stampLaneCoverage(l, area, covered);
 
     constexpr int MAX_PASSES = 6;
     int added = 0;
@@ -273,7 +345,7 @@ int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& per
 
         // --- Insert each new lane after the main lane it sits closest to (and after earlier gap lanes there) ---
         for (SweepLane& g : extra) {
-            stampLane(g, area, covered);
+            stampLaneCoverage(g, area, covered);
             const Vec2 mid = (g.pts.front() + g.pts.back()) * 0.5f;
             size_t parent = 0;
             float pd = std::numeric_limits<float>::max();

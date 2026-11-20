@@ -30,6 +30,11 @@ std::vector<SweepLane> layLanes(const std::vector<std::vector<Vec2>>& loops, con
 // through the patch, pointing the same way (down the distance-field gradient), clipped to the band, and
 // inserts it in the sequence next to the main lane it sits closest to. Repeats until every inner cell inside
 // `area` is seen (at most a few passes). Returns the number of lanes added.
+// Marks every cell of `area` (covered is a local bitmap, (y - area.y0) * width + (x - area.x0)) whose centre is
+// within LANE_COVER_RADIUS of one of the lane's samples (every RAY_STEP along each run). Used by the gap fill;
+// public so the tests can check it against the original disc-per-sample stamp.
+void stampLaneCoverage(const SweepLane& lane, const GridRect& area, std::vector<std::uint8_t>& covered);
+
 int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& perimEdt,
                      const std::vector<std::uint8_t>& zone, const GridRect& area);
 
