@@ -322,8 +322,32 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     const int numSweep = static_cast<int>(fleet.ids.size());
 
     MissionPlan plan;
-    plan.label.assign(N, -1);
-    plan.zone.assign(N, 0);   // 1 = inner zone, 2 = outer zone, 0 = unmapped / no-fly
+    // Whole-grid arrays: label (-1 = no region), zone (1 = inner zone, 2 = outer zone, 0 = unmapped / no-fly)
+    // and the sweep ownership map (-1 = no owner, built in Step 5). Reuse a finished-with plan's arrays when the
+    // controller hands one over: every value it set lies inside its bounds, so clearing just that rectangle
+    // gives the same all-default arrays as a fresh allocation, without filling ~11 MB each re-plan.
+    std::vector<int> ownerBuffer;   // Moved into plan.owner once the ownership map is built
+    MissionPlan* const old = fleet.recycle;
+    if (old && old->label.size() == static_cast<size_t>(N) && old->zone.size() == static_cast<size_t>(N)) {
+        const GridRect b = old->bounds;
+        const bool hasOwner = old->owner.size() == static_cast<size_t>(N);
+        for (int y = std::max(0, b.y0); y < std::min(GRID_HEIGHT, b.y1); ++y) {
+            const size_t from = static_cast<size_t>(y) * GRID_WIDTH + std::max(0, b.x0);
+            const size_t to = static_cast<size_t>(y) * GRID_WIDTH + std::min(GRID_WIDTH, b.x1);
+            if (from >= to) continue;
+            std::fill(old->label.begin() + from, old->label.begin() + to, -1);
+            std::fill(old->zone.begin() + from, old->zone.begin() + to, std::uint8_t(0));
+            if (hasOwner) std::fill(old->owner.begin() + from, old->owner.begin() + to, -1);
+        }
+        plan.label = std::move(old->label);
+        plan.zone = std::move(old->zone);
+        if (hasOwner) ownerBuffer = std::move(old->owner);
+        old->label.clear(); old->zone.clear(); old->owner.clear();   // The recycled plan no longer has them
+    }
+    else {
+        plan.label.assign(N, -1);
+        plan.zone.assign(N, 0);
+    }
     plan.sweepRoutes.assign(numSweep, {});
     plan.sectorDrone = fleet.ids;   // Until sectors are made (empty search area: each drone keeps an empty one)
 
@@ -545,7 +569,13 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     }
 
     // Ownership: each band cell to its nearest lane's sector, then sectors to drones by shared land
-    plan.owner = buildOwnerMap(plan.lanes, zone, win);
+    if (ownerBuffer.size() == static_cast<size_t>(N)) {
+        buildOwnerMap(plan.lanes, zone, win, ownerBuffer);   // Recycled buffer, already all -1
+        plan.owner = std::move(ownerBuffer);
+    }
+    else {
+        plan.owner = buildOwnerMap(plan.lanes, zone, win);
+    }
     plan.sectorDrone = matchSectors(plan, plan.sweepRoutes, fleet, win);
 
     // ------------------------------------------------------------------------

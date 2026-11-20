@@ -58,6 +58,7 @@ private:
     SafePlanner planner_;
     std::mt19937 rng_{ 2024 };
     MissionPlan plan_;
+    MissionPlan spare_;          // The plan before plan_, kept only so its whole-grid arrays can be reused
     Vec2 launch_;                // Where drones launch from (and, later, return to)
     std::vector<Drone> drones_;
     int nextId_ = 0;             // Id for the next drone launched

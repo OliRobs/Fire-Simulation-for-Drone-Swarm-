@@ -2028,6 +2028,58 @@ TEST(aco_drones_spread_back_out_after_a_replan) {
     for (const Drone& d : mission.drones()) CHECK(d.speedScale == 1.0f);
 }
 
+// Re-plans that reuse an old plan's whole-grid arrays (SweepFleet::recycle) must give exactly the plans that fresh
+// arrays give. The sequence grows the fire, moves it (so the old plan's window is partly outside the new one and
+// stale values there must be cleared) and shrinks it again.
+TEST(recycled_plan_buffers_match_fresh_plans) {
+    const std::vector<std::vector<std::uint8_t>> fires = {
+        discFire(CX, CY, 25), discFire(CX, CY, 60), bayFire(), discFire(CX + 120, CY - 60, 40), discFire(CX, CY, 20) };
+    MissionPlan prevFresh, prevRecycled, spare;
+    int compared = 0, differences = 0;
+    for (const auto& fire : fires) {
+        DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+        live.compute(fire);
+        Perimeter perim(fire);
+        SafePlanner sp(live);
+        auto fleetFor = [](const MissionPlan& prev) {
+            SweepFleet fleet;
+            for (int i = 0; i < SWEEP_DRONES; ++i) { fleet.ids.push_back(i); fleet.positions.push_back(Vec2(0.5f, GRID_HEIGHT - 0.5f)); }
+            if (!prev.label.empty()) fleet.previous = &prev;
+            return fleet;
+        };
+        // Fresh arrays
+        std::mt19937 rngA(2024);
+        MissionPlan fresh = planMission(live, perim.distance(), sp, rngA, fleetFor(prevFresh));
+        // Recycled arrays (the plan before the previous one, as the controller does)
+        std::mt19937 rngB(2024);
+        SweepFleet fleet = fleetFor(prevRecycled);
+        fleet.recycle = &spare;
+        MissionPlan recycled = planMission(live, perim.distance(), sp, rngB, fleet);
+
+        differences += fresh.label != recycled.label;
+        differences += fresh.zone != recycled.zone;
+        differences += fresh.owner != recycled.owner;
+        differences += fresh.sectorDrone != recycled.sectorDrone;
+        auto samePoints = [](const std::vector<Vec2>& a, const std::vector<Vec2>& b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) if (a[i].x != b[i].x || a[i].y != b[i].y) return false;
+            return true;
+        };
+        differences += !samePoints(fresh.acoTour, recycled.acoTour);
+        differences += fresh.sweepRoutes.size() != recycled.sweepRoutes.size();
+        for (size_t r = 0; r < std::min(fresh.sweepRoutes.size(), recycled.sweepRoutes.size()); ++r)
+            differences += !samePoints(fresh.sweepRoutes[r], recycled.sweepRoutes[r]);
+        ++compared;
+
+        prevFresh = std::move(fresh);
+        spare = std::move(prevRecycled);       // The plan before last becomes the spare, as in MissionController
+        prevRecycled = std::move(recycled);
+    }
+    std::printf("  (%d re-plans compared, %d differences)\n", compared, differences);
+    CHECK(differences == 0);
+    CHECK(spare.label.empty() || spare.label.size() == static_cast<size_t>(N));
+}
+
 // Only the ACO region (the outer zone, perimeter line out to SEARCH_DISTANCE) is split into Voronoi cells. The
 // inner band, which the sweep lanes cover, gets no Voronoi label, and every point of interest is in the outer zone.
 TEST(voronoi_covers_only_the_aco_region) {
