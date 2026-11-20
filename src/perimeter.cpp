@@ -175,13 +175,28 @@ std::vector<std::vector<Vec2>> tracePerimeterLine(const DistanceTransform& perim
     std::unordered_map<std::int64_t, Piece> pieces;
     std::vector<std::int64_t> order;   // Start sides in scan order, so tracing is deterministic
 
+    // Each sample is a corner of up to four squares. Rather than work f out (a square root) four times per
+    // sample, keep the values of the square row's top and bottom sample rows and slide them down one row at a
+    // time. The values are the same f(x, y) as before, so the traced line is exactly the same.
+    // Samples run from x = win.x0 - 1 to win.x1 inclusive: entry k of a row buffer is sample x = win.x0 - 1 + k.
+    const int sx0 = win.x0 - 1, nSamples = win.x1 - win.x0 + 2;
+    std::vector<double> topRow(nSamples), bottomRow(nSamples);
+    auto fillRow = [&](std::vector<double>& row, int y) {
+        for (int k = 0; k < nSamples; ++k) row[k] = f(sx0 + k, y);
+    };
+    fillRow(bottomRow, win.y0 - 1);   // Becomes the top row of the first square row below
+
     for (int y = win.y0 - 1; y < win.y1; ++y) {
+        // Slide down: the previous bottom row is this square row's top row
+        std::swap(topRow, bottomRow);
+        fillRow(bottomRow, y + 1);
         for (int x = win.x0 - 1; x < win.x1; ++x) {
-            double v[4];
+            const int k = x - sx0;
+            // Corner values in walking order (top-left, top-right, bottom-right, bottom-left), as SQ_DX / SQ_DY
+            double v[4] = { topRow[k], topRow[k + 1], bottomRow[k + 1], bottomRow[k] };
             bool in[4];
             int nIn = 0;
             for (int c = 0; c < 4; ++c) {
-                v[c] = f(x + SQ_DX[c], y + SQ_DY[c]);
                 in[c] = v[c] < 0.0;
                 nIn += in[c];
             }
