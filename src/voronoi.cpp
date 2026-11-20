@@ -190,19 +190,33 @@ Voronoi buildVoronoi(const std::vector<int>& cells, int numSites, std::mt19937& 
         candStart[bw * bh] = static_cast<int>(cand.size());
 
         // --- 2b: each cell against its block's candidates only (in increasing site order) ---
-        for (size_t i = 0; i < cells.size(); ++i) {
-            const Vec2 p = pts[i];
-            int bestSite = 0;
-            float bd = std::numeric_limits<float>::max();
-            for (int c = candStart[bucketOf[i]], e = candStart[bucketOf[i] + 1]; c < e; ++c) {
-                const int s = cand[c];
-                const float dd = sqDist(p, sites[s]);
-                if (dd < bd) {
-                    bd = dd;
-                    bestSite = s;
-                }
+        // Block by block, so a block's candidate list stays in cache while its cells are done. Each cell's answer
+        // depends only on its own position and the sites, not on the order cells are visited in, so this gives
+        // exactly the assignment of a pass in cell-list order.
+        for (int b = 0; b < bw * bh; ++b) {
+            const int c0 = candStart[b], c1 = candStart[b + 1];
+            if (c0 == c1) continue;   // Empty block (no cells, no candidates)
+            // Only one site can be nearest anywhere in this block: every cell in it goes to that site, with no
+            // distance tests (a full scan would pick it too, as the only site not beaten everywhere in the block)
+            if (c1 - c0 == 1) {
+                for (int k = blockStart[b], e = blockStart[b + 1]; k < e; ++k) assign[blockCells[k]] = cand[c0];
+                continue;
             }
-            assign[i] = bestSite;
+            for (int k = blockStart[b], e = blockStart[b + 1]; k < e; ++k) {
+                const int i = blockCells[k];
+                const Vec2 p = pts[i];
+                int bestSite = 0;
+                float bd = std::numeric_limits<float>::max();
+                for (int c = c0; c < c1; ++c) {
+                    const int s = cand[c];
+                    const float dd = sqDist(p, sites[s]);
+                    if (dd < bd) {
+                        bd = dd;
+                        bestSite = s;
+                    }
+                }
+                assign[i] = bestSite;
+            }
         }
         };
 
