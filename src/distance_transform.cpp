@@ -60,6 +60,7 @@ void DistanceTransform::compute(const std::vector<std::uint8_t>& sources, const 
 // ----------------------------------------------------------------------------
 // sourceBounds: a rectangle holding every source cell (the whole grid when there is no range limit).
 void DistanceTransform::computeIn(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds) {
+    ++version_;   // Every compute() goes through here: readers can tell the field has been recomputed
     // --- Choose the window of cells to work out ---
     GridRect win{ 0, 0, w_, h_ };   // No range limit: the whole grid
     if (maxDistance_ > 0) {

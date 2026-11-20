@@ -33,6 +33,11 @@ public:
     // whole grid when there is no range limit.
     GridRect window() const { return maxDistance_ > 0 ? last_ : GridRect{ 0, 0, w_, h_ }; }
 
+    // Number of times compute() has run. A reader that keeps something worked out from these distances can
+    // compare versions to tell whether the field may have changed since (e.g. the mission controller keeps the
+    // ACO tour until the Perimeter, which only recomputes its transform when a section moves, changes).
+    std::uint64_t version() const { return version_; }
+
 private:
     static constexpr double INF = 1e9; // >> max possible squared distance on the grid
     void edt1d(int n);
@@ -42,6 +47,7 @@ private:
 
     int w_, h_;
     int maxDistance_;               // 0 = whole grid
+    std::uint64_t version_ = 0;     // compute() calls so far (see version())
     GridRect last_;                 // Window [x0, x1) x [y0, y1) written by the previous compute(), reset to INF before the next one
     std::vector<double> sq_, f_, d_, z_;
     std::vector<int> v_;

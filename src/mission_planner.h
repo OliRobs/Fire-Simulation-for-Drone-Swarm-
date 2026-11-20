@@ -13,6 +13,10 @@ struct SweepFleet {
     const MissionPlan* previous = nullptr;   // Last plan (its owner map and sectorDrone), for stable ownership
     int shrinkStreak = 0;                    // Re-plans in a row (before this one) on which one drone fewer
                                              // would have kept every lap within SHRINK_MARGIN of the cap
+    // True when the committed perimeter has not moved since `previous` was planned. The ACO side of the plan
+    // (Voronoi regions, points of interest and the order of the tour) then stays exactly as it was, so the ACO
+    // routing only changes when the perimeter does. Only the fire-safe legs are rebuilt against the live fire.
+    bool perimeterUnchanged = false;
 };
 
 // Builds the whole survey plan from the live fire (standoff) and the committed perimeter (zones).

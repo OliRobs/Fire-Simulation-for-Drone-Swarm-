@@ -65,7 +65,11 @@ struct MissionPlan {
                                                    // the drone left without a sector is retired
 
     // --- ACO ---
+    std::vector<Vec2> acoOrder;                    // Points of interest in the order the ant colony chose (before
+                                                   // the fire-safe legs are added); reused while the perimeter holds
     std::vector<Vec2> acoTour;                     // Closed tour through the outer points of interest
+    bool acoKept = false;                          // Regions and tour order carried over from the previous plan
+                                                   // because the perimeter had not moved (SweepFleet::perimeterUnchanged)
     float acoLoopS = 0.0f;                         // Time for ONE drone to fly the whole closed tour, seconds
     int acoNeeded = MIN_ACO_DRONES;                // ceil(acoLoopS / ACO_REVISIT_S), clamped to MIN/MAX_ACO_DRONES
     bool acoOverLimit = false;                     // Even MAX_ACO_DRONES can't keep the revisit within ACO_REVISIT_S
