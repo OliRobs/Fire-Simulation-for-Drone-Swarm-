@@ -20,6 +20,13 @@ To build just the simulation core and the tests, without SFML or GDAL:
 
     cmake -S . -B build -DWF_BUILD_APP=OFF && cmake --build build && ctest --test-dir build
 
+**Benchmark.** `./build/wf_bench [frames]` (default 2400 frames, 200 simulated minutes) runs the frame loop
+headless on a flat grass map lit at the centre and prints the time of each phase per frame, the re-plan average
+and worst case, and a checksum of the final state (fire, distance fields, plan, routes, drones). CI runs it with
+`--expect` and fails if the checksum differs from `tools/bench_checksum.txt`: an optimisation must leave it
+unchanged; a change meant to alter results (including a `config.h` design value) updates that file in the same
+pull request.
+
 Windows: CMake looks for SFML in `C:\SFML-2.6.1` and GDAL in `C:\gdal` (the same folders as
 `UAVFireMap.vcxproj`). If yours are elsewhere, point CMake at them:
 

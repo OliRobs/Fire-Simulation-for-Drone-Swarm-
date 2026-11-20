@@ -27,6 +27,14 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
 
+      # Frame benchmark: fails if the results checksum differs from tools/bench_checksum.txt (results changed);
+      # the timings go to the job summary for information only (shared runners are too noisy to gate on them)
+      - name: Benchmark and results checksum
+        shell: bash
+        run: |
+          ./build/wf_bench 2400 --expect "$(head -n 1 tools/bench_checksum.txt)" | tee bench.txt
+          { echo '### Frame benchmark (2400 frames)'; echo '```'; cat bench.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   # MSVC build of the simulation core and tests, to catch Windows-only compile errors.
   # The SFML/GDAL app is skipped here: building GDAL through vcpkg takes far longer than the rest of CI,
   # and vcpkg's SFML is now version 3, which this code doesn't support.
@@ -44,3 +52,7 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build -C Release --output-on-failure
+
+      # Checks the benchmark builds and runs with MSVC; the checksum is not compared (float rounding may differ)
+      - name: Benchmark (no checksum check)
+        run: build\Release\wf_bench.exe 600

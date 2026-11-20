@@ -10,6 +10,9 @@ surveys round the fire. README.md has the module table and input-data notes.
 - Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 25 s (most of
   it the end-to-end mission test on the 2000 x 2000 grid).
 - Core and tests only, without SFML or GDAL: add `-DWF_BUILD_APP=OFF`.
+- Benchmark: `./build/wf_bench [frames]` prints per-phase times and a results checksum. CI (Linux) fails if the
+  checksum differs from `tools/bench_checksum.txt`. Optimisations must leave it unchanged; a change meant to alter
+  results (including a `config.h` value) updates that file in the same PR and says why.
 - The owner builds day to day with Visual Studio: `UAVFireMap.vcxproj`, SFML in `C:\SFML-2.6.1`, GDAL in
   `C:\gdal`. The project is x64 only (the SFML and GDAL builds are 64-bit). Debugger settings (working
   directory, PATH to the DLLs) live in the .vcxproj itself, because `.vcxproj.user` is not tracked.

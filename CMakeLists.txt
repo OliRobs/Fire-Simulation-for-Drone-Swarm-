@@ -46,6 +46,12 @@ target_link_libraries(wf_tests PRIVATE wf_core)
 wf_warnings(wf_tests)
 add_test(NAME wf_tests COMMAND wf_tests)
 
+# --- Frame benchmark (tools/frame_bench.cpp): times the frame loop and prints a checksum of the results ---
+# Headless like the tests. CI runs it and compares the checksum with tools/bench_checksum.txt.
+add_executable(wf_bench tools/frame_bench.cpp)
+target_link_libraries(wf_bench PRIVATE wf_core)
+wf_warnings(wf_bench)
+
 if(WF_BUILD_APP)
   # On Windows, SFML and GDAL are unpacked into plain folders rather than installed system-wide, so tell
   # CMake where to look. The defaults match UAVFireMap.vcxproj; override them for another location, e.g.
