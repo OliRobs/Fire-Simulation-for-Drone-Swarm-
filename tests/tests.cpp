@@ -13,6 +13,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "aco.h"
@@ -1052,6 +1053,430 @@ namespace {
         for (int i = 0; i < N; ++i) if (bite[i]) fire[i] = 0;
         return fire;
     }
+}
+
+
+// ----------------------------------------------------------------------------
+// Original (pre-2026-11-20) gap fill and perimeter-line trace, kept word for word as references.
+// The production versions only skip work that cannot change the answer (gap fill: later passes look only at
+// the previous pass's patch cells; trace: each sample's distance is worked out once instead of four times), so
+// their output must match these exactly, point for point.
+// ----------------------------------------------------------------------------
+namespace ref {
+    constexpr float RAY_STEP = 0.5f;   // Cells between samples along a lane (two per cell, so no cell is skipped)
+
+    // Distance (cells) from the committed fire at cell (x, y); far away off the grid
+    float distAt(const DistanceTransform& edt, int x, int y) {
+        if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) return 1e9f;
+        return static_cast<float>(std::sqrt(edt.squaredDistance(y * GRID_WIDTH + x)));
+    }
+
+    // ------------------------------------------------------------------------
+    // Downhill direction of the distance field at p (towards the nearest fire), unit length.
+    // Central differences two cells either side smooth out the cell-to-cell steps of the field. On the ridge
+    // between two fire edges (in a bay) the two sides cancel and the gradient is ill-defined; then `fallback`
+    // (the inward normal of the perimeter line, or another sensible direction) is used instead.
+    // ------------------------------------------------------------------------
+    Vec2 downhill(const DistanceTransform& edt, Vec2 p, Vec2 fallback) {
+        const int x = static_cast<int>(std::floor(p.x)), y = static_cast<int>(std::floor(p.y));
+        const Vec2 g((distAt(edt, x + 2, y) - distAt(edt, x - 2, y)) * 0.25f,
+                     (distAt(edt, x, y + 2) - distAt(edt, x, y - 2)) * 0.25f);
+        const float gl = std::sqrt(g.x * g.x + g.y * g.y);
+        // An exact distance field has gradient length 1 away from ridges; well below that means a ridge
+        // (or the edge of the transform's window, where the far side reads "very far")
+        if (gl < 0.5f || gl > 2.0f) {
+            const float fl = std::sqrt(fallback.x * fallback.x + fallback.y * fallback.y);
+            return fl > 1e-6f ? fallback / fl : Vec2(0.0f, 1.0f);
+        }
+        return g * (-1.0f / gl);
+    }
+
+    // ------------------------------------------------------------------------
+    // Inner-band runs along the line p + dir * t for t in [t0, t1], as run end points in increasing t.
+    // Sampled every RAY_STEP. When stopAtFire is set the walk also stops once it is clearly past the band:
+    // closer to the committed fire than the standoff (the band can't continue on the far side of the fire for
+    // this lane), or back out beyond the perimeter line after having been inside.
+    // ------------------------------------------------------------------------
+    std::vector<Vec2> bandRuns(const DistanceTransform& edt, const std::vector<std::uint8_t>& zone,
+                               Vec2 p, Vec2 dir, float t0, float t1, bool stopAtFire) {
+        std::vector<Vec2> pts;
+        bool inRun = false;
+        Vec2 last;
+        for (float t = t0; t <= t1 + 1e-4f; t += RAY_STEP) {
+            const Vec2 q = p + dir * t;
+            const int x = static_cast<int>(std::floor(q.x)), y = static_cast<int>(std::floor(q.y));
+            if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) {
+                if (t > 0.0f) break;   // Ran off the map
+                continue;
+            }
+            if (stopAtFire && t > 0.0f) {
+                const float d = distAt(edt, x, y);
+                if (d < MIN_FIRE_DISTANCE - 1.0f) break;                    // Past the standoff, at the fire
+                if (t > 2.0f && d > PERIMETER_DISTANCE + 1.5f) break;       // Left the band outwards again
+            }
+            const bool in = zone[y * GRID_WIDTH + x] == 1;
+            if (in && !inRun) { pts.push_back(q); inRun = true; }           // A run starts
+            if (!in && inRun) { pts.push_back(last); inRun = false; }       // A run ends at the previous sample
+            if (in) last = q;
+        }
+        if (inRun) pts.push_back(last);
+        return pts;
+    }
+
+    // Distance from point p to segment a-b
+    float segDist(Vec2 p, Vec2 a, Vec2 b) {
+        const Vec2 ab = b - a, ap = p - a;
+        const float l2 = ab.x * ab.x + ab.y * ab.y;
+        const float t = l2 > 1e-9f ? std::clamp((ap.x * ab.x + ap.y * ab.y) / l2, 0.0f, 1.0f) : 0.0f;
+        return std::sqrt(sqDist(p, a + ab * t));
+    }
+
+    // Distance from p to the nearest point of a lane (its runs only, not the gaps between them)
+    float laneDist(const SweepLane& lane, Vec2 p) {
+        float best = std::numeric_limits<float>::max();
+        for (size_t i = 0; i + 1 < lane.pts.size(); i += 2) best = std::min(best, segDist(p, lane.pts[i], lane.pts[i + 1]));
+        return best;
+    }
+
+    // Marks every cell (inside area, as a local bitmap) whose centre is within LANE_COVER_RADIUS of the lane's
+    // runs. Each run is sampled every RAY_STEP and a disc stamped at each sample; a cell within the radius of a
+    // sample is within the radius of the run, so a stamped cell is always really covered.
+    void stampLane(const SweepLane& lane, const GridRect& area, std::vector<std::uint8_t>& covered) {
+        const float r = LANE_COVER_RADIUS, r2 = r * r;
+        const int w = area.x1 - area.x0;
+        for (size_t i = 0; i + 1 < lane.pts.size(); i += 2) {
+            const Vec2 a = lane.pts[i], b = lane.pts[i + 1];
+            const float len = std::sqrt(sqDist(a, b));
+            const int steps = std::max(1, static_cast<int>(std::ceil(len / RAY_STEP)));
+            for (int s = 0; s <= steps; ++s) {
+                const Vec2 c = a + (b - a) * (static_cast<float>(s) / steps);
+                const int x0 = std::max(area.x0, static_cast<int>(std::floor(c.x - r)));
+                const int x1 = std::min(area.x1 - 1, static_cast<int>(std::floor(c.x + r)));
+                const int y0 = std::max(area.y0, static_cast<int>(std::floor(c.y - r)));
+                const int y1 = std::min(area.y1 - 1, static_cast<int>(std::floor(c.y + r)));
+                for (int y = y0; y <= y1; ++y)
+                    for (int x = x0; x <= x1; ++x)
+                        if (sqDist(Vec2(x + 0.5f, y + 0.5f), c) <= r2) covered[(y - area.y0) * w + (x - area.x0)] = 1;
+            }
+        }
+    }
+
+int fillCoverageGapsOriginal(std::vector<SweepLane>& lanes, const DistanceTransform& perimEdt,
+                     const std::vector<std::uint8_t>& zone, const GridRect& area) {
+    if (area.empty() || lanes.empty()) return 0;
+    const int w = area.x1 - area.x0, h = area.y1 - area.y0;
+    std::vector<std::uint8_t> covered(static_cast<size_t>(w) * h, 0);
+    for (const SweepLane& l : lanes) stampLane(l, area, covered);
+
+    constexpr int MAX_PASSES = 6;
+    int added = 0;
+    for (int pass = 0; pass < MAX_PASSES; ++pass) {
+        // --- Find patches of unseen inner cells (8-connected flood fill) ---
+        std::vector<int> patchOf(static_cast<size_t>(w) * h, -1);
+        std::vector<std::vector<int>> patches;   // Local indices of the cells in each patch
+        for (int i = 0; i < w * h; ++i) {
+            const int gx = area.x0 + i % w, gy = area.y0 + i / w;
+            if (covered[i] || patchOf[i] >= 0 || zone[gy * GRID_WIDTH + gx] != 1) continue;
+            const int id = static_cast<int>(patches.size());
+            patches.emplace_back();
+            std::vector<int> stack{ i };
+            patchOf[i] = id;
+            while (!stack.empty()) {
+                const int c = stack.back();
+                stack.pop_back();
+                patches[id].push_back(c);
+                const int cx = c % w, cy = c / w;
+                for (int k = 0; k < NUM_DIRS; ++k) {
+                    const int nx = cx + DX[k], ny = cy + DY[k];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    const int ni = ny * w + nx;
+                    if (covered[ni] || patchOf[ni] >= 0) continue;
+                    if (zone[(area.y0 + ny) * GRID_WIDTH + area.x0 + nx] != 1) continue;
+                    patchOf[ni] = id;
+                    stack.push_back(ni);
+                }
+            }
+        }
+        if (patches.empty()) break;   // Everything is seen
+
+        // --- One short lane through each patch ---
+        const size_t mainCount = lanes.size();
+        std::vector<SweepLane> extra;
+        for (const std::vector<int>& patch : patches) {
+            // Patch centre: the patch cell nearest the mean of its cells (the mean itself can lie outside a
+            // curved patch)
+            Vec2 mean(0.0f, 0.0f);
+            for (int c : patch) mean += Vec2(area.x0 + c % w + 0.5f, area.y0 + c / w + 0.5f);
+            mean = mean / static_cast<float>(patch.size());
+            Vec2 centre = mean;
+            float bd = std::numeric_limits<float>::max();
+            for (int c : patch) {
+                const Vec2 p(area.x0 + c % w + 0.5f, area.y0 + c / w + 0.5f);
+                if (sqDist(p, mean) < bd) { bd = sqDist(p, mean); centre = p; }
+            }
+
+            // Same direction as the main lanes: down the distance-field gradient at the centre. Fallback on a
+            // ridge: towards the nearest main lane's inner end direction (any lane direction will do there).
+            const SweepLane& nearLane = *std::min_element(lanes.begin(), lanes.begin() + mainCount,
+                [&](const SweepLane& a, const SweepLane& b) { return laneDist(a, centre) < laneDist(b, centre); });
+            const Vec2 laneDir = nearLane.pts.back() - nearLane.pts.front();
+            const Vec2 dir = downhill(perimEdt, centre, laneDir.x * laneDir.x + laneDir.y * laneDir.y > 1e-6f
+                                                         ? laneDir : Vec2(0.0f, 1.0f));
+
+            // How far along that line the patch reaches (cells close enough to the line to be seen from it)
+            float tMin = 0.0f, tMax = 0.0f;
+            for (int c : patch) {
+                const Vec2 rel = Vec2(area.x0 + c % w + 0.5f, area.y0 + c / w + 0.5f) - centre;
+                const float t = rel.x * dir.x + rel.y * dir.y;
+                const float perp = std::fabs(rel.x * dir.y - rel.y * dir.x);
+                if (perp > LANE_COVER_RADIUS) continue;
+                tMin = std::min(tMin, t);
+                tMax = std::max(tMax, t);
+            }
+
+            SweepLane lane;
+            lane.pts = bandRuns(perimEdt, zone, centre, dir, tMin - RAY_STEP, tMax + RAY_STEP, false);
+            if (lane.pts.empty()) lane.pts = { centre, centre };   // Centre is an inner cell, so can't happen
+            lane.seed = lane.pts.front();
+            lane.loop = nearLane.loop;
+            lane.gapFill = true;
+            extra.push_back(std::move(lane));
+        }
+
+        // --- Insert each new lane after the main lane it sits closest to (and after earlier gap lanes there) ---
+        for (SweepLane& g : extra) {
+            stampLane(g, area, covered);
+            const Vec2 mid = (g.pts.front() + g.pts.back()) * 0.5f;
+            size_t parent = 0;
+            float pd = std::numeric_limits<float>::max();
+            for (size_t i = 0; i < lanes.size(); ++i) {
+                if (lanes[i].gapFill || lanes[i].loop != g.loop) continue;
+                const float d = laneDist(lanes[i], mid);
+                if (d < pd) { pd = d; parent = i; }
+            }
+            size_t at = parent + 1;
+            while (at < lanes.size() && lanes[at].gapFill) ++at;
+            lanes.insert(lanes.begin() + static_cast<std::ptrdiff_t>(at), std::move(g));
+            ++added;
+        }
+    }
+    return added;
+}
+
+    // Corner offsets of a square, in walking order: top-left, top-right, bottom-right, bottom-left
+    constexpr int SQ_DX[4] = { 0, 1, 1, 0 };
+    constexpr int SQ_DY[4] = { 0, 0, 1, 1 };
+
+    // Id of the square side from corner c to corner c+1 (mod 4) of the square whose top-left sample is (x, y).
+    // Horizontal sides and vertical sides get even and odd ids, keyed by the side's top / left sample, so the
+    // side shared by two squares gets the same id from both. Samples run from -1 to GRID_WIDTH (one ring of
+    // padding round the grid), hence the +1 offsets.
+    std::int64_t sideId(int x, int y, int c) {
+        const std::int64_t W = GRID_WIDTH + 2;
+        auto key = [&](int sx, int sy, int vertical) {
+            return ((static_cast<std::int64_t>(sy) + 1) * W + (sx + 1)) * 2 + vertical;
+        };
+        switch (c) {
+        case 0:  return key(x, y, 0);         // Top side
+        case 1:  return key(x + 1, y, 1);     // Right side
+        case 2:  return key(x, y + 1, 0);     // Bottom side
+        default: return key(x, y, 1);         // Left side
+        }
+    }
+
+    // One traced piece of line inside a square, from one side crossing to another
+    struct Piece {
+        Vec2 from, to;
+        std::int64_t toSide;   // Side the piece ends on, i.e. where the next piece starts
+        bool used = false;
+    };
+
+std::vector<std::vector<Vec2>> tracePerimeterLineOriginal(const DistanceTransform& perimEdt, float level) {
+    // Only the transform's window holds finite distances; the level line lies well inside it, so squares
+    // from one sample outside the window to its far edge are enough
+    const GridRect win = perimEdt.window();
+    std::vector<std::vector<Vec2>> loops;
+    if (win.empty()) return loops;
+
+    // Level-line function at sample (x, y): negative on the fire side of the line (nearer than `level`).
+    // Samples off the grid count as far from the fire, so a loop that would leave the map closes along its edge.
+    auto f = [&](int x, int y) -> double {
+        if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) return 1e9;
+        return std::sqrt(perimEdt.squaredDistance(y * GRID_WIDTH + x)) - level;
+    };
+
+    // Pieces keyed by the side they start on (each side crossing starts exactly one piece)
+    std::unordered_map<std::int64_t, Piece> pieces;
+    std::vector<std::int64_t> order;   // Start sides in scan order, so tracing is deterministic
+
+    for (int y = win.y0 - 1; y < win.y1; ++y) {
+        for (int x = win.x0 - 1; x < win.x1; ++x) {
+            double v[4];
+            bool in[4];
+            int nIn = 0;
+            for (int c = 0; c < 4; ++c) {
+                v[c] = f(x + SQ_DX[c], y + SQ_DY[c]);
+                in[c] = v[c] < 0.0;
+                nIn += in[c];
+            }
+            if (nIn == 0 || nIn == 4) continue;   // The line doesn't pass through this square
+
+            // Crossing point on side c (corner c -> c+1), and whether the walk leaves the fire side there
+            Vec2 at[4];
+            bool leaving[4], crosses[4];
+            for (int c = 0; c < 4; ++c) {
+                const int d = (c + 1) % 4;
+                crosses[c] = in[c] != in[d];
+                leaving[c] = in[c] && !in[d];
+                if (!crosses[c]) continue;
+                const double t = v[c] / (v[c] - v[d]);   // Where the linear interpolation reaches 0
+                const Vec2 a(x + SQ_DX[c] + 0.5f, y + SQ_DY[c] + 0.5f), b(x + SQ_DX[d] + 0.5f, y + SQ_DY[d] + 0.5f);
+                at[c] = a + (b - a) * static_cast<float>(t);
+            }
+
+            // Pair each leaving crossing with an entering one. With two crossings there is only one way. With
+            // four (a saddle: opposite corners on the same side) the centre value decides: if the centre is on
+            // the fire side, the two fire corners are joined, so each leaving crossing pairs with the NEXT
+            // entering crossing round the square (cutting off the far corners); otherwise with the previous one.
+            const bool saddle = nIn == 2 && in[0] == in[2];
+            const bool centreIn = (v[0] + v[1] + v[2] + v[3]) * 0.25 < 0.0;
+            for (int c = 0; c < 4; ++c) {
+                if (!crosses[c] || !leaving[c]) continue;
+                int e = -1;
+                if (saddle && !centreIn) {
+                    for (int k = 1; k < 4 && e < 0; ++k) { const int j = (c + 4 - k) % 4; if (crosses[j] && !leaving[j]) e = j; }
+                }
+                else {
+                    for (int k = 1; k < 4 && e < 0; ++k) { const int j = (c + k) % 4; if (crosses[j] && !leaving[j]) e = j; }
+                }
+                if (e < 0) continue;   // Cannot happen with a consistent sign pattern
+                const std::int64_t start = sideId(x, y, c);
+                pieces[start] = Piece{ at[c], at[e], sideId(x, y, e) };
+                order.push_back(start);
+            }
+        }
+    }
+
+    // Chain pieces into loops: each piece ends on the side where the next one starts
+    for (std::int64_t first : order) {
+        auto it = pieces.find(first);
+        if (it == pieces.end() || it->second.used) continue;
+        std::vector<Vec2> loop;
+        while (it != pieces.end() && !it->second.used) {
+            it->second.used = true;
+            loop.push_back(it->second.from);
+            it = pieces.find(it->second.toSide);
+        }
+        if (loop.size() >= 3) loops.push_back(std::move(loop));
+    }
+
+    // Make every loop run anticlockwise on screen (negative area in y-down grid coordinates). The piece rule
+    // gives every loop the same sense round the fire, so if the first enclosing loop is the wrong way round,
+    // they all are: test the loop with the largest area (always one that encloses fire) and flip all if needed.
+    if (!loops.empty()) {
+        size_t biggest = 0;
+        for (size_t i = 1; i < loops.size(); ++i) {
+            if (std::fabs(loopSignedArea(loops[i])) > std::fabs(loopSignedArea(loops[biggest]))) biggest = i;
+        }
+        if (loopSignedArea(loops[biggest]) > 0.0) {
+            for (auto& l : loops) std::reverse(l.begin(), l.end());
+        }
+    }
+
+    // Start each loop at its topmost point (then leftmost), a stable place for lane numbering to begin
+    for (auto& l : loops) {
+        const auto top = std::min_element(l.begin(), l.end(), [](Vec2 a, Vec2 b) {
+            return a.y < b.y || (a.y == b.y && a.x < b.x);
+        });
+        std::rotate(l.begin(), top, l.end());
+    }
+    return loops;
+}
+}   // namespace ref
+
+namespace {
+    // True if two lane lists are identical: same lanes in the same order, every point bit for bit
+    bool sameLanes(const std::vector<SweepLane>& a, const std::vector<SweepLane>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].pts.size() != b[i].pts.size() || a[i].loop != b[i].loop || a[i].gapFill != b[i].gapFill
+                || a[i].seed.x != b[i].seed.x || a[i].seed.y != b[i].seed.y) return false;
+            for (size_t k = 0; k < a[i].pts.size(); ++k)
+                if (a[i].pts[k].x != b[i].pts[k].x || a[i].pts[k].y != b[i].pts[k].y) return false;
+        }
+        return true;
+    }
+
+    // Fires for the exactness tests below: the bay (gap fill needs several passes), a fire with two bays, a fire
+    // on the grid's west edge (its perimeter line runs off the map and closes along the edge), a random
+    // blobby fire (many small bays and patches) and two separate fires (two loops)
+    std::vector<std::vector<std::uint8_t>> exactnessFires() {
+        std::vector<std::vector<std::uint8_t>> fires;
+        fires.push_back(bayFire());
+        std::vector<std::uint8_t> twoBays = discFire(CX, CY, 100);
+        for (const auto& bite : { discFire(CX + 80, CY, 55), discFire(CX - 80, CY + 20, 50) })
+            for (int i = 0; i < N; ++i) if (bite[i]) twoBays[i] = 0;
+        fires.push_back(twoBays);
+        fires.push_back(discFire(20, CY, 40));
+        std::vector<std::uint8_t> blob(N, 0);
+        std::mt19937 rng(77);
+        std::uniform_int_distribution<int> off(-90, 90), rad(8, 40);
+        for (int k = 0; k < 25; ++k) {
+            const auto d = discFire(CX + off(rng), CY + off(rng), rad(rng));
+            for (int i = 0; i < N; ++i) blob[i] |= d[i];
+        }
+        fires.push_back(blob);
+        std::vector<std::uint8_t> twoFires = discFire(GRID_WIDTH / 4, GRID_HEIGHT / 4, 30);   // Two separate loops
+        const auto other = discFire(GRID_WIDTH * 3 / 4, GRID_HEIGHT * 3 / 4, 35);
+        for (int i = 0; i < N; ++i) twoFires[i] |= other[i];
+        fires.push_back(twoFires);
+        return fires;
+    }
+}
+
+// Gap fill now only re-floods the previous pass's patches (lanes only remove gaps, never add them). The lanes
+// it adds must be exactly the ones the original whole-window scan added, in the same places and order.
+TEST(gap_fill_matches_full_window_scan) {
+    int totalAdded = 0;
+    for (const auto& fire : exactnessFires()) {
+        SweepSetup s(fire);
+        // Rebuild the gap fill's input the way planMission does, then run both versions on copies of it
+        const std::vector<SweepLane> lanes = layLanes(tracePerimeterLine(s.perim.distance()), s.perim.distance(),
+                                                      s.plan.zone);
+        std::vector<SweepLane> fast = lanes, original = lanes;
+        const int addedFast = fillCoverageGaps(fast, s.perim.distance(), s.plan.zone, s.plan.bounds);
+        const int addedOriginal = ref::fillCoverageGapsOriginal(original, s.perim.distance(), s.plan.zone, s.plan.bounds);
+        CHECK(addedFast == addedOriginal);
+        CHECK(sameLanes(fast, original));
+        totalAdded += addedOriginal;
+    }
+    std::printf("  (%d gap-fill lanes added over the test fires, identical in both versions)\n", totalAdded);
+    CHECK(totalAdded > 0);   // The fires really exercise the gap fill
+}
+
+// The perimeter-line trace now works out each sample once and slides two row buffers down the window. The
+// loops must be exactly those of the original, which worked out all four corners of every square.
+TEST(perimeter_trace_matches_per_corner_evaluation) {
+    int loopsChecked = 0;
+    for (const auto& fire : exactnessFires()) {
+        Perimeter perim(fire);
+        // The planner's level, the survey standoff, and an odd fractional level
+        for (float level : { static_cast<float>(PERIMETER_DISTANCE), static_cast<float>(MIN_FIRE_DISTANCE), 57.3f }) {
+            const auto fast = tracePerimeterLine(perim.distance(), level);
+            const auto original = ref::tracePerimeterLineOriginal(perim.distance(), level);
+            CHECK(fast.size() == original.size());
+            if (fast.size() != original.size()) continue;
+            for (size_t l = 0; l < fast.size(); ++l) {
+                bool same = fast[l].size() == original[l].size();
+                for (size_t k = 0; same && k < fast[l].size(); ++k)
+                    same = fast[l][k].x == original[l][k].x && fast[l][k].y == original[l][k].y;
+                CHECK(same);
+                ++loopsChecked;
+            }
+        }
+    }
+    std::printf("  (%d loops identical point for point)\n", loopsChecked);
+    CHECK(loopsChecked > 0);
 }
 
 TEST(sweep_lanes_point_at_a_round_fire) {

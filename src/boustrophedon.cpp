@@ -175,17 +175,35 @@ int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& per
 
     constexpr int MAX_PASSES = 6;
     int added = 0;
+
+    // Cells that may start a patch, as local indices in increasing order. The first pass needs every unseen
+    // inner cell in the window, found with one row-by-row scan. A later pass only needs the cells of the
+    // previous pass's patches: lanes only ever ADD coverage, so a cell unseen now was unseen in the previous
+    // pass too, and was therefore in one of its patches. Looking at those cells in the same increasing order
+    // starts every flood fill from the same cell as a scan of the whole window, and the flood fill itself is
+    // unchanged, so the patches (and the order of the cells in each) are exactly the same as before.
+    std::vector<int> candidates;
+    for (int y = 0; y < h; ++y) {
+        const std::uint8_t* zoneRow = zone.data() + static_cast<size_t>(area.y0 + y) * GRID_WIDTH + area.x0;
+        for (int x = 0; x < w; ++x) {
+            if (zoneRow[x] == 1 && !covered[y * w + x]) candidates.push_back(y * w + x);
+        }
+    }
+    // Flood-fill marks, one byte per window cell: equal to pass + 1 once the cell is in a patch of this pass.
+    // Allocated once; a new pass uses a new mark value instead of clearing the array (MAX_PASSES < 255).
+    std::vector<std::uint8_t> inPatch(static_cast<size_t>(w) * h, 0);
+
     for (int pass = 0; pass < MAX_PASSES; ++pass) {
+        const std::uint8_t mark = static_cast<std::uint8_t>(pass + 1);
         // --- Find patches of unseen inner cells (8-connected flood fill) ---
-        std::vector<int> patchOf(static_cast<size_t>(w) * h, -1);
         std::vector<std::vector<int>> patches;   // Local indices of the cells in each patch
-        for (int i = 0; i < w * h; ++i) {
-            const int gx = area.x0 + i % w, gy = area.y0 + i / w;
-            if (covered[i] || patchOf[i] >= 0 || zone[gy * GRID_WIDTH + gx] != 1) continue;
+        for (int i : candidates) {
+            // Candidates are inner cells; skip the ones a new lane now covers or an earlier patch took
+            if (covered[i] || inPatch[i] == mark) continue;
             const int id = static_cast<int>(patches.size());
             patches.emplace_back();
             std::vector<int> stack{ i };
-            patchOf[i] = id;
+            inPatch[i] = mark;
             while (!stack.empty()) {
                 const int c = stack.back();
                 stack.pop_back();
@@ -195,14 +213,19 @@ int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& per
                     const int nx = cx + DX[k], ny = cy + DY[k];
                     if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                     const int ni = ny * w + nx;
-                    if (covered[ni] || patchOf[ni] >= 0) continue;
+                    if (covered[ni] || inPatch[ni] == mark) continue;
                     if (zone[(area.y0 + ny) * GRID_WIDTH + area.x0 + nx] != 1) continue;
-                    patchOf[ni] = id;
+                    inPatch[ni] = mark;
                     stack.push_back(ni);
                 }
             }
         }
         if (patches.empty()) break;   // Everything is seen
+
+        // Next pass's candidates: this pass's patch cells, back in increasing order
+        candidates.clear();
+        for (const std::vector<int>& patch : patches) candidates.insert(candidates.end(), patch.begin(), patch.end());
+        std::sort(candidates.begin(), candidates.end());
 
         // --- One short lane through each patch ---
         const size_t mainCount = lanes.size();
