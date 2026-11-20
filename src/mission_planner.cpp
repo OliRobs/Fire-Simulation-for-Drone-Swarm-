@@ -362,43 +362,67 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     if (cells.empty()) return plan;
 
     // ------------------------------------------------------------------------
-    // Step 2: Build Voronoi Spatial Regions (Lloyd's Relaxation)
+    // Step 2a: Keep the ACO side of the previous plan while the perimeter holds
     // ------------------------------------------------------------------------
-    // Calculate optimal region count 'S' clamped between MIN_SITES and MAX_SITES
-    const int S = std::min(std::clamp(static_cast<int>(cells.size()) / TARGET_REGION_CELLS, MIN_SITES, MAX_SITES),
-        static_cast<int>(cells.size()));
-
-    const Voronoi voronoi = buildVoronoi(cells, S, rng);
-
-    // Label each valid cell with its assigned Voronoi site index
-    for (size_t i = 0; i < cells.size(); ++i) {
-        plan.label[cells[i]] = voronoi.assign[i];
-    }
-
-    // ------------------------------------------------------------------------
-    // Step 3: Outer-Zone Statistics per Region and their Points of Interest
-    // ------------------------------------------------------------------------
-    plan.regions.assign(S, Region());
-    for (int idx : cells) {
-        if (zone[idx] != 2) continue;
-        Region& rg = plan.regions[plan.label[idx]];
-        ++rg.outerCount;
-        rg.outerSum += cellCentre(idx);
-    }
-    for (Region& rg : plan.regions) {
-        if (rg.outerCount > 0) rg.outerCentroid = rg.outerSum / static_cast<float>(rg.outerCount);
-    }
-
-    // Snap outer Point of Interest (POI) to the nearest actual cell in the outer region
-    for (int idx : cells) {
-        if (zone[idx] != 2) continue;
-        Region& rg = plan.regions[plan.label[idx]];
-        const float dd = sqDist(cellCentre(idx), rg.outerCentroid);
-        if (dd < rg.poiDist) {
-            rg.poiDist = dd;
-            rg.poi = cellCentre(idx);
+    // The Voronoi regions only supply the ACO points of interest. If the committed perimeter has not moved, the
+    // outer zone (perimeter line out to SEARCH_DISTANCE) is the same land, so the regions, their points of
+    // interest and the tour order are carried over unchanged and the ACO routing stays put. (Re-running the
+    // Voronoi would move them anyway: it also covers the inner band, which shrinks as the live fire grows.)
+    // The live fire can only remove search-area cells while the perimeter holds, so every cell here was
+    // labelled in the previous plan and keeps its label; cells now inside the standoff simply drop out. If
+    // that ever fails (e.g. a caller set the flag wrongly) the regions are rebuilt as normal.
+    const MissionPlan* prev = fleet.previous;
+    plan.acoKept = fleet.perimeterUnchanged && prev && !prev->regions.empty()
+                   && prev->label.size() == static_cast<size_t>(N);
+    if (plan.acoKept) {
+        for (int idx : cells) {
+            if (prev->label[idx] < 0) { plan.acoKept = false; break; }
         }
     }
+    if (plan.acoKept) {
+        for (int idx : cells) plan.label[idx] = prev->label[idx];
+        plan.regions = prev->regions;   // Same outer-zone cells, so the same points of interest
+    }
+    else {
+        // ------------------------------------------------------------------------
+        // Step 2: Build Voronoi Spatial Regions (Lloyd's Relaxation)
+        // ------------------------------------------------------------------------
+        // Calculate optimal region count 'S' clamped between MIN_SITES and MAX_SITES
+        const int S = std::min(std::clamp(static_cast<int>(cells.size()) / TARGET_REGION_CELLS, MIN_SITES, MAX_SITES),
+            static_cast<int>(cells.size()));
+
+        const Voronoi voronoi = buildVoronoi(cells, S, rng);
+
+        // Label each valid cell with its assigned Voronoi site index
+        for (size_t i = 0; i < cells.size(); ++i) {
+            plan.label[cells[i]] = voronoi.assign[i];
+        }
+
+        // ------------------------------------------------------------------------
+        // Step 3: Outer-Zone Statistics per Region and their Points of Interest
+        // ------------------------------------------------------------------------
+        plan.regions.assign(S, Region());
+        for (int idx : cells) {
+            if (zone[idx] != 2) continue;
+            Region& rg = plan.regions[plan.label[idx]];
+            ++rg.outerCount;
+            rg.outerSum += cellCentre(idx);
+        }
+        for (Region& rg : plan.regions) {
+            if (rg.outerCount > 0) rg.outerCentroid = rg.outerSum / static_cast<float>(rg.outerCount);
+        }
+
+        // Snap outer Point of Interest (POI) to the nearest actual cell in the outer region
+        for (int idx : cells) {
+            if (zone[idx] != 2) continue;
+            Region& rg = plan.regions[plan.label[idx]];
+            const float dd = sqDist(cellCentre(idx), rg.outerCentroid);
+            if (dd < rg.poiDist) {
+                rg.poiDist = dd;
+                rg.poi = cellCentre(idx);
+            }
+        }
+    }   // End of Steps 2-3 (new regions)
 
     // ------------------------------------------------------------------------
     // Step 4: Sweep Lanes along the Perimeter Line
@@ -525,14 +549,23 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     // ------------------------------------------------------------------------
     // Step 6: Plan Outer Zone Ant Colony Optimization (ACO) Tour
     // ------------------------------------------------------------------------
-    std::vector<Vec2> pois;
-    for (const Region& rg : plan.regions) {
-        if (rg.outerCount > 0) pois.push_back(rg.poi);
-    }
-
-    // Solve TSP over outer POIs using Elitist Ant System, then make it fire-safe
+    // Perimeter unchanged: the same points of interest in the same order as last time. Otherwise solve the TSP
+    // over the outer POIs with the Elitist Ant System.
     std::vector<Vec2> tour;
-    for (int i : solveACO(pois, rng)) tour.push_back(pois[i]);
+    if (plan.acoKept) {
+        tour = prev->acoOrder;
+    }
+    else {
+        std::vector<Vec2> pois;
+        for (const Region& rg : plan.regions) {
+            if (rg.outerCount > 0) pois.push_back(rg.poi);
+        }
+        for (int i : solveACO(pois, rng)) tour.push_back(pois[i]);
+    }
+    plan.acoOrder = tour;
+
+    // Make it fire-safe. This is redone on every re-plan, kept tour or not: the live fire may have grown across
+    // a leg since. Where every leg is still clear, the same order gives exactly the same route as before.
     plan.acoTour = safeLoop(planner, tour);
 
     // Always fly the tour anticlockwise on screen (negative signed area in y-down grid coordinates, the same

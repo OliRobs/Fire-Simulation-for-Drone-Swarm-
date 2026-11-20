@@ -169,9 +169,15 @@ void MissionController::replan() {
     }
     fleet.previous = &plan_;
     fleet.shrinkStreak = sweepShrinkStreak_;
+    // The committed perimeter's distance field is only recomputed when a section of the perimeter moves, so an
+    // unchanged version means the same perimeter as at the last re-plan: the planner then keeps the ACO
+    // regions and tour order (the ACO routing only changes when the perimeter does)
+    fleet.perimeterUnchanged = planned_ && perim_.version() == plannedPerimVersion_;
 
     // (The new plan is built while the old one is still in plan_, then replaces it)
     plan_ = planMission(live_, perim_, planner_, rng_, fleet);
+    planned_ = true;
+    plannedPerimVersion_ = perim_.version();
     lastPlanFrame_ = frame_;
     planDirty_ = false;
     planChanged_ = true;

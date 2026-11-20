@@ -246,7 +246,13 @@ builds and times the real routes and adds a drone if a lap is still over 20 minu
 
 A long, wind-driven fire has a longer perimeter line than a round one of the same width and needs more.
 
-**ACO tour.** The tour is always flown anticlockwise. After a re-plan each ACO drone locks back on at the
+**ACO tour.** The tour only changes when the perimeter does. While the fire grows inside the perimeter (no
+section has moved), a re-plan keeps the same Voronoi regions, points of interest and tour order, and only rebuilds
+the fire-safe legs against the live fire, so the route stays exactly the same unless the fire has grown across a
+leg. The sweep side still re-plans as usual. In the frame benchmark (600 simulated minutes) the perimeter moved 13
+times and the tour changed on 14 of 120 re-plans (it used to change on every one).
+
+The tour is always flown anticlockwise. After a re-plan each ACO drone locks back on at the
 nearest node of the new tour (or the next one if it has just passed it) and carries on the same way, so drones
 never turn back. New drones join in the middle of the largest gaps; when the fleet shrinks, the drone in the most
 crowded spot goes home, keeping the rest as evenly spaced as possible. Because drones carry on from where they

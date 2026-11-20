@@ -72,6 +72,9 @@ These behaviours were asked for explicitly. Keep them when changing planning cod
   the launch point); a drone is retired only after `SHRINK_REPLANS` re-plans in a row within `SHRINK_MARGIN` of the
   limit with one fewer, and flies a fire-safe route home before it is removed. Drones are found by role and id,
   never by position in the list. Collision avoidance and batteries are out of scope for now.
+- The ACO routing only changes when the perimeter does: while no perimeter section has moved, a re-plan keeps the
+  Voronoi regions, points of interest and tour order (`SweepFleet::perimeterUnchanged`, from
+  `DistanceTransform::version()` of the perimeter's field) and only rebuilds the fire-safe legs.
 - ACO drones first fly to the closest point on the tour, then follow it, evenly spaced and in one direction:
   the tour is always handed out anticlockwise on screen. After a re-plan, a drone already on the tour locks back
   on at the nearest node (the next one if it has just passed it) and carries on anticlockwise; it is never sent

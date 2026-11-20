@@ -2028,6 +2028,75 @@ TEST(aco_drones_spread_back_out_after_a_replan) {
     for (const Drone& d : mission.drones()) CHECK(d.speedScale == 1.0f);
 }
 
+// The ACO routing only changes when the perimeter does. While the fire grows inside the perimeter (no section
+// has moved) a re-plan keeps the same regions, points of interest and tour; once a section moves, the tour is
+// planned afresh. The kept tour must still be fire-safe.
+TEST(aco_tour_changes_only_when_the_perimeter_moves) {
+    // Identical tours, point for point
+    auto sameTour = [](const std::vector<Vec2>& a, const std::vector<Vec2>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) if (a[i].x != b[i].x || a[i].y != b[i].y) return false;
+        return true;
+    };
+    // Runs frames until the controller re-plans (at most one re-plan interval); true if it did
+    auto runToReplan = [](MissionController& m) {
+        for (int f = 0; f <= REPLAN_INTERVAL; ++f) {
+            m.update();
+            if (m.takePlanChanged()) return true;
+        }
+        return false;
+    };
+
+    std::vector<std::uint8_t> fire = discFire(CX, CY, 25);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    live.compute(fire);
+    Perimeter perim(fire);
+    MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
+    mission.markFireChanged();
+    CHECK(runToReplan(mission));
+    const std::vector<Vec2> first = mission.plan().acoTour;
+    CHECK(!mission.plan().acoKept);   // First plan: nothing to keep
+    CHECK(first.size() >= 3);
+
+    // --- The fire grows 150 m, well short of the 600 m that moves a perimeter section ---
+    fire = discFire(CX, CY, 40);
+    live.compute(fire);
+    CHECK(!perim.update(fire));       // The perimeter holds
+    mission.markFireChanged();
+    CHECK(runToReplan(mission));      // The sweep side still re-plans for the bigger fire...
+    CHECK(mission.plan().acoKept);    // ...but the ACO side is carried over
+    CHECK(sameTour(mission.plan().acoTour, first));
+
+    // Without the carry-over the re-plan would have moved the tour (the Voronoi also covers the inner band,
+    // which the bigger fire has eaten into), so the test really exercises it
+    {
+        SafePlanner sp(live);
+        std::mt19937 rng(2024);
+        const MissionPlan fresh = planMission(live, perim.distance(), sp, rng);
+        std::printf("  (tour of %zu waypoints kept; a fresh plan would have %s it)\n", first.size(),
+                    sameTour(fresh.acoTour, first) ? "kept" : "changed");
+        CHECK(!sameTour(fresh.acoTour, first));
+    }
+
+    // The kept tour is still fire-safe: every leg, including the wrap back to the start, clears the hard no-fly zone
+    {
+        SafePlanner sp(live);
+        const std::vector<Vec2>& t = mission.plan().acoTour;
+        int unsafe = 0;
+        for (size_t i = 0; i < t.size(); ++i) unsafe += !sp.lineClear(t[i], t[(i + 1) % t.size()]);
+        CHECK(unsafe == 0);
+    }
+
+    // --- The fire grows 700 m: past the trigger, so perimeter sections move and the tour is planned afresh ---
+    fire = discFire(CX, CY, 95);
+    live.compute(fire);
+    CHECK(perim.update(fire));
+    mission.markFireChanged();
+    CHECK(runToReplan(mission));
+    CHECK(!mission.plan().acoKept);
+    CHECK(!sameTour(mission.plan().acoTour, first));
+}
+
 // The ACO count follows the one-drone loop time: each point is revisited within ACO_REVISIT_S
 TEST(aco_count_follows_the_revisit_time) {
     for (int r : { 1, 100, 200 }) {

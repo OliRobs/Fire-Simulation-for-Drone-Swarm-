@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <random>
 #include <utility>
 #include <vector>
@@ -64,6 +65,8 @@ private:
     int acoShrinkStreak_ = 0;    // Re-plans in a row on which one ACO drone fewer would have done
     std::vector<float> acoArc_;  // Arc length from the ACO tour's first waypoint to each waypoint (cells)
     float acoTotal_ = 0.0f;      // Length of the closed ACO tour (cells)
+    bool planned_ = false;                      // A plan has been made (plan_ is a real previous plan)
+    std::uint64_t plannedPerimVersion_ = 0;     // perim_.version() when plan_ was made (see replan())
     bool planDirty_ = true;
     bool planChanged_ = false;
     int frame_ = 0;
