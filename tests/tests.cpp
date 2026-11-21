@@ -873,7 +873,9 @@ TEST(voronoi_bucketed_assignment_matches_brute_force) {
 // (update every cell's nearest-seed distance per seed, take the first farthest cell). The reference below is
 // the whole algorithm done the plain way: plain seeding, then Lloyd passes testing every site for every cell.
 // Sites and labels must match bit for bit, on shapes with many equal distances (a solid square, where ties
-// between cells are common) and with gaps (a ring with a gap plus scattered islands).
+// between cells are common), with gaps (a ring with a gap plus scattered islands), and on a wide ring like the
+// outer zone (with few sites most blocks have a single candidate, which the assignment fills without distance
+// tests; with one or two sites, every block or nearly every block does).
 TEST(voronoi_bucketed_seeding_matches_plain_method) {
     // Plain reference implementation of buildVoronoi, written as simply as possible
     auto plainVoronoi = [](const std::vector<int>& cells, int S, std::mt19937& rng) {
@@ -930,8 +932,16 @@ TEST(voronoi_bucketed_seeding_matches_plain_method) {
             if (onRing || shape() % 131 == 0) ring.push_back(at(x, y));
         }
 
-    for (const auto* cells : { &square, &ring }) {
-        for (int sites : { 1, 2, 9, 64 }) {
+    // Shape 3: wide ring, like the outer zone round a fire (the only cells the planner splits into regions)
+    std::vector<int> outerRing;
+    for (int y = 180; y < 820; ++y)
+        for (int x = 280; x < 920; ++x) {
+            const int r2 = (x - 600) * (x - 600) + (y - 500) * (y - 500);
+            if (r2 > 170 * 170 && r2 < 310 * 310) outerRing.push_back(at(x, y));
+        }
+
+    for (const auto* cells : { &square, &ring, &outerRing }) {
+        for (int sites : { 1, 2, 4, 9, 64 }) {
             std::mt19937 rngA(77), rngB(77);
             const Voronoi fast = buildVoronoi(*cells, sites, rngA);
             const Voronoi ref = plainVoronoi(*cells, sites, rngB);
