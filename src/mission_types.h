@@ -53,6 +53,9 @@ struct MissionPlan {
 
     // --- Sweep ---
     std::vector<std::vector<Vec2>> perimeterLoops; // Perimeter line, as traced (tracePerimeterLine)
+    std::uint64_t perimeterLoopsVersion = 0;       // perimEdt.version() the loops were traced from (0 = not
+                                                   // traced, e.g. an empty plan); a later re-plan reuses the loops
+                                                   // while the perimeter holds (see planMission, Step 4)
     std::vector<SweepLane> lanes;                  // Every lane, in sequence order along the perimeter line
     std::vector<int> owner;                        // Per cell: sector whose lane is nearest (-1 outside the band)
     std::vector<std::vector<Vec2>> sweepRoutes;    // One closed route per sector

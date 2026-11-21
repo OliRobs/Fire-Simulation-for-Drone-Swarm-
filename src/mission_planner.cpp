@@ -455,7 +455,21 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     // ------------------------------------------------------------------------
     // Trace the 1.2 km line into loops, seed a lane at most every 120 m along each, run each lane straight in
     // towards the fire, then add short gap-fill lanes where lanes spread apart in concave bays.
-    plan.perimeterLoops = tracePerimeterLine(perimEdt);
+    //
+    // The perimeter line depends only on the committed-perimeter field. While no perimeter section has moved
+    // (most re-plans: the fire grows inside the perimeter) that field is the very same one the previous plan
+    // traced, so its loops are copied rather than traced again (~2 ms of marching squares on a large fire).
+    // The version check makes sure of it: the previous plan records which version of the field it traced, and
+    // it must be the current one. The lanes and gap fill are still rebuilt, because they also depend on the
+    // live fire (through `zone`).
+    if (fleet.perimeterUnchanged && prev && prev->perimeterLoopsVersion != 0
+        && prev->perimeterLoopsVersion == perimEdt.version()) {
+        plan.perimeterLoops = prev->perimeterLoops;
+    }
+    else {
+        plan.perimeterLoops = tracePerimeterLine(perimEdt);
+    }
+    plan.perimeterLoopsVersion = perimEdt.version();
     plan.lanes = layLanes(plan.perimeterLoops, perimEdt, zone);
     fillCoverageGaps(plan.lanes, perimEdt, zone, win);
 

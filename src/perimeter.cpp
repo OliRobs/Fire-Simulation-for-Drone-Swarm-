@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <unordered_map>
 #include "viewport.h"   // maskBounds
 
@@ -17,7 +18,7 @@
 // Constructor: Initializes committed fire mask and computes the baseline 
 // Euclidean Distance Transform (EDT) around the initial fire shape.
 Perimeter::Perimeter(const std::vector<std::uint8_t>& initialFire)
-    : committed_(initialFire), trigger_(initialFire.size(), 0),
+    : committed_(initialFire), trigger_(initialFire.size(), 0), lastLive_(initialFire),
     // Range limits (distance_transform.h): the committed-fire distance is read out to SEARCH_DISTANCE + 0.5
     // (mission zones; the ring and the trigger distance are nearer), the trigger distance only out to
     // PERIMETER_SECTION_RADIUS, so neither transform needs the whole grid.
@@ -44,6 +45,19 @@ bool Perimeter::update(const std::vector<std::uint8_t>& liveFire) {
 // ----------------------------------------------------------------------------
 // Evaluates live fire expansion against the committed perimeter distance field.
 // Returns `true` if any section of the committed perimeter was pushed forward.
+//
+// Only cells that have newly caught fire since the last call can trigger an update, so only those are tested.
+// The reason: when a call ends, no live cell is within the trigger distance any more.
+//  - If the call returned false, no live cell triggered (that is what false means).
+//  - If it returned true, every triggering cell is within PERIMETER_SECTION_RADIUS of itself, so it was
+//    committed (distance 0 afterwards); every other live cell only got nearer to the committed fire.
+// The committed field only changes inside update(), so at the next call a cell that was live last time still
+// does not trigger, and the cells to test are those live now that were not live then. They are found by
+// comparing the mask with a copy of the last one (lastLive_), row by row (memcmp), which is much cheaper than
+// testing every cell of the fire's area against the distance field on every frame. The triggering set, and so
+// everything computed from it, is exactly the one the full test would find. This holds whether or not the
+// mask only grows: a cell that went out and caught fire again counts as new and is tested again, which is
+// harmless (the committed fire only grows, so a cell that was once too near to trigger stays too near).
 bool Perimeter::update(const std::vector<std::uint8_t>& liveFire, const GridRect& fireBounds) {
     // Trigger Threshold: A live fire cell triggers a perimeter update once it 
     // encroaches within PERIMETER_UPDATE_DISTANCE of the current perimeter ring.
@@ -53,28 +67,39 @@ bool Perimeter::update(const std::vector<std::uint8_t>& liveFire, const GridRect
     // Section Expansion Radius: Maximum influence distance around triggering cells
     constexpr double sectionSq = static_cast<double>(PERIMETER_SECTION_RADIUS) * PERIMETER_SECTION_RADIUS;
 
-    // Every cell that is (or ever was) live fire, committed or a trigger lies inside 'area', so the loops
-    // below only visit it: outside it liveFire, committed_ and trigger_ are all 0. Using the union with the
-    // earlier rectangles (not just this one) also clears trigger_ cells set by a previous call.
+    // Every cell that is (or ever was) live fire, or committed, lies inside 'area', so the loops below only
+    // visit it: outside it liveFire, lastLive_ and committed_ are all 0. Using the union with the earlier
+    // rectangles (not just this one) also catches cells that were live last time but have gone out since.
     fireSeen_ = fireSeen_.unite(fireBounds);
     const GridRect area = fireSeen_;
 
-    // --- Phase 1: Identify all live fire cells breaching the trigger distance ---
-    bool any = false;
-    for (int y = area.y0; y < area.y1; ++y) {
-        for (int idx = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; idx < end; ++idx) {
-            const bool trig = liveFire[idx] && perimEdt_.squaredDistance(idx) >= triggerSq;
-            trigger_[idx] = trig;
-            any = any || trig;
+    // --- Phase 1: Find the newly lit cells that breach the trigger distance ---
+    newTriggers_.clear();
+    const std::size_t rowBytes = static_cast<std::size_t>(area.x1 - area.x0);
+    for (int y = area.y0; y < area.y1 && rowBytes > 0; ++y) {
+        const int rowStart = y * GRID_WIDTH + area.x0;
+        const std::uint8_t* now = liveFire.data() + rowStart;
+        std::uint8_t* last = lastLive_.data() + rowStart;
+        if (std::memcmp(now, last, rowBytes) == 0) continue;   // Row unchanged: nothing new can trigger here
+        for (std::size_t k = 0; k < rowBytes; ++k) {
+            // Newly lit (live now, not live last call) and still at least the trigger distance from the
+            // committed fire: exactly the full test, limited to the cells that can pass it
+            if (now[k] && !last[k] && perimEdt_.squaredDistance(rowStart + static_cast<int>(k)) >= triggerSq) {
+                newTriggers_.push_back(rowStart + static_cast<int>(k));
+            }
         }
+        std::memcpy(last, now, rowBytes);   // Remember this row for the next call
     }
 
     // No cells breached the trigger distance; perimeter remains unchanged
-    if (!any) return false;
+    if (newTriggers_.empty()) return false;
 
     // --- Phase 2: Pull the committed perimeter forward around triggered sections ---
-    // Compute distance field from the triggering cells (all inside 'area', so no grid scan is needed)
+    // Compute distance field from the triggering cells (all inside 'area', so no grid scan is needed).
+    // trigger_ is all 0 between calls, so after marking these cells it holds exactly the triggering set.
+    for (int idx : newTriggers_) trigger_[idx] = 1;
     triggerEdt_.compute(trigger_, area);
+    for (int idx : newTriggers_) trigger_[idx] = 0;   // Back to all 0 for the next call
 
     for (int y = area.y0; y < area.y1; ++y) {
         for (int idx = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; idx < end; ++idx) {

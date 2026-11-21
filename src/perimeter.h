@@ -23,7 +23,10 @@ public:
     std::vector<int> ringCells() const;                              // Cells ~PERIMETER_DISTANCE out
 
 private:
-    std::vector<std::uint8_t> committed_, trigger_;
+    std::vector<std::uint8_t> committed_, trigger_;   // trigger_ is all 0 between calls (see update())
+    std::vector<std::uint8_t> lastLive_;   // Copy of the live-fire mask from the last call (or the starting fire),
+                                           // kept up to date inside fireSeen_ (outside it, both masks are all 0)
+    std::vector<int> newTriggers_;         // Scratch: cells that trigger an update in this call
     DistanceTransform perimEdt_, triggerEdt_;
     GridRect fireSeen_;   // Union of every fire rectangle passed in so far: the committed fire and any
                           // trigger_ cells left from an earlier update all lie inside it

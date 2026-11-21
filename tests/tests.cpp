@@ -259,6 +259,128 @@ TEST(perimeter_update_with_bounds_matches_scan) {
     }
 }
 
+// The perimeter update now tests only the cells that caught fire since the last call (live cells already
+// tested can't trigger again: see Perimeter::update). It must move exactly the same sections as the original,
+// which tested every live cell of the fire's area on every call. This keeps the original word for word and
+// compares the two on a real growing fire (with a second fire lit part-way) and on a mask that is not
+// growing-only: discs that jump about, so cells go out and catch fire again, some of them far out.
+namespace {
+    class OriginalPerimeter {
+    public:
+        explicit OriginalPerimeter(const std::vector<std::uint8_t>& initialFire)
+            : committed_(initialFire), trigger_(initialFire.size(), 0),
+            perimEdt_(GRID_WIDTH, GRID_HEIGHT, SEARCH_DISTANCE + 1),
+            triggerEdt_(GRID_WIDTH, GRID_HEIGHT, PERIMETER_SECTION_RADIUS + 1) {
+            perimEdt_.compute(committed_);
+            int x0, y0, x1, y1;
+            if (maskBounds(committed_, GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1)) fireSeen_ = GridRect{ x0, y0, x1 + 1, y1 + 1 };
+        }
+        // The update as it was: every live cell of the area tested against the trigger distance
+        bool update(const std::vector<std::uint8_t>& liveFire, const GridRect& fireBounds) {
+            constexpr double triggerSq = static_cast<double>(PERIMETER_DISTANCE - PERIMETER_UPDATE_DISTANCE)
+                * (PERIMETER_DISTANCE - PERIMETER_UPDATE_DISTANCE);
+            constexpr double sectionSq = static_cast<double>(PERIMETER_SECTION_RADIUS) * PERIMETER_SECTION_RADIUS;
+            fireSeen_ = fireSeen_.unite(fireBounds);
+            const GridRect area = fireSeen_;
+            bool any = false;
+            for (int y = area.y0; y < area.y1; ++y) {
+                for (int idx = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; idx < end; ++idx) {
+                    const bool trig = liveFire[idx] && perimEdt_.squaredDistance(idx) >= triggerSq;
+                    trigger_[idx] = trig;
+                    any = any || trig;
+                }
+            }
+            if (!any) return false;
+            triggerEdt_.compute(trigger_, area);
+            for (int y = area.y0; y < area.y1; ++y) {
+                for (int idx = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; idx < end; ++idx) {
+                    if (liveFire[idx] && !committed_[idx] && triggerEdt_.squaredDistance(idx) <= sectionSq) committed_[idx] = 1;
+                }
+            }
+            perimEdt_.compute(committed_, area);
+            return true;
+        }
+        const DistanceTransform& distance() const { return perimEdt_; }
+    private:
+        std::vector<std::uint8_t> committed_, trigger_;
+        DistanceTransform perimEdt_, triggerEdt_;
+        GridRect fireSeen_;
+    };
+
+    // Bounding box of a mask's non-zero cells (empty if none), as FireSimulation::fireBounds() gives it
+    GridRect boundsOf(const std::vector<std::uint8_t>& m) {
+        int x0, y0, x1, y1;
+        if (!maskBounds(m, GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1)) return GridRect{};
+        return GridRect{ x0, y0, x1 + 1, y1 + 1 };
+    }
+
+    // True if two committed-perimeter fields are identical, bit for bit, at every cell of the grid
+    bool sameField(const DistanceTransform& a, const DistanceTransform& b) {
+        for (int i = 0; i < N; ++i) {
+            const double da = a.squaredDistance(i), db = b.squaredDistance(i);
+            if (!(da == db)) return false;   // (INF == INF holds; written this way so a NaN would fail too)
+        }
+        return true;
+    }
+}
+
+TEST(perimeter_update_tests_only_new_cells_and_matches_original) {
+    int calls = 0, moves = 0, mismatches = 0;
+
+    // --- A real fire: one ignition, then a second, separate one part-way through ---
+    {
+        std::vector<Cell> grid(N);
+        FireSimulation sim(grid);
+        sim.ignite(at(CX, CY));
+        for (int t = 0; t < 100; ++t) sim.step();
+        Perimeter fast(sim.fireMask());
+        OriginalPerimeter original(sim.fireMask());
+        for (int t = 0; t < 2400; ++t) {
+            if (t == 900) sim.ignite(at(CX + 150, CY + 80));   // A spot fire well outside the perimeter
+            sim.step();
+            if (!sim.takeFireGrew()) continue;
+            const bool a = fast.update(sim.fireMask(), sim.fireBounds());
+            const bool b = original.update(sim.fireMask(), sim.fireBounds());
+            ++calls;
+            mismatches += a != b;
+            if (a) {
+                ++moves;
+                mismatches += !sameField(fast.distance(), original.distance());
+            }
+        }
+        mismatches += !sameField(fast.distance(), original.distance());
+    }
+
+    // --- A mask that is not growing-only: discs that move about and change size, so cells go out and catch
+    //     fire again, including cells far beyond the trigger distance that were live before ---
+    {
+        std::mt19937 rng(7);
+        std::uniform_int_distribution<int> dx(-60, 60), rad(5, 45);
+        std::vector<std::uint8_t> mask = discFire(CX, CY, 20);
+        Perimeter fast(mask);
+        OriginalPerimeter original(mask);
+        for (int step = 0; step < 60; ++step) {
+            mask = discFire(CX + dx(rng), CY + dx(rng), rad(rng));
+            if (step % 3 == 0) {   // Sometimes add a second, distant disc as well
+                const auto other = discFire(CX + 4 * dx(rng), CY + 3 * dx(rng), rad(rng) / 2);
+                for (int i = 0; i < N; ++i) mask[i] = mask[i] | other[i];
+            }
+            const GridRect b = boundsOf(mask);
+            const bool ra = fast.update(mask, b);
+            const bool rb = original.update(mask, b);
+            ++calls;
+            mismatches += ra != rb;
+            if (ra) ++moves;
+            if (ra || rb) mismatches += !sameField(fast.distance(), original.distance());
+        }
+        mismatches += !sameField(fast.distance(), original.distance());
+    }
+
+    std::printf("  (%d updates compared, %d perimeter moves, %d differences)\n", calls, moves, mismatches);
+    CHECK(moves >= 5);         // The perimeter really moved, many times
+    CHECK(mismatches == 0);
+}
+
 // ============================================================================
 // Safe planner
 // ============================================================================
@@ -2481,6 +2603,83 @@ TEST(aco_tour_changes_only_when_the_perimeter_moves) {
     CHECK(runToReplan(mission));
     CHECK(!mission.plan().acoKept);
     CHECK(!sameTour(mission.plan().acoTour, first));
+}
+
+// While no perimeter section has moved, a re-plan copies the previous plan's perimeter line instead of tracing
+// it again (it depends only on the committed-perimeter field, which is unchanged). The copy must be exactly
+// what tracing gives, and the plan built on it (lanes, routes, ownership, tour) exactly the plan built on a fresh
+// trace. If the field has changed, or the previous plan has no trace of it, the line is traced afresh.
+TEST(perimeter_line_reused_only_while_the_perimeter_holds) {
+    auto samePoints = [](const std::vector<Vec2>& a, const std::vector<Vec2>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) if (a[i].x != b[i].x || a[i].y != b[i].y) return false;
+        return true;
+    };
+    auto sameLoops = [&](const std::vector<std::vector<Vec2>>& a, const std::vector<std::vector<Vec2>>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t l = 0; l < a.size(); ++l) if (!samePoints(a[l], b[l])) return false;
+        return true;
+    };
+    auto fleetAfter = [](const MissionPlan& prev, bool perimeterUnchanged) {
+        SweepFleet fleet;
+        for (int i = 0; i < SWEEP_DRONES; ++i) { fleet.ids.push_back(i); fleet.positions.push_back(Vec2(0.5f, GRID_HEIGHT - 0.5f)); }
+        fleet.previous = &prev;
+        fleet.perimeterUnchanged = perimeterUnchanged;
+        return fleet;
+    };
+
+    // First plan, on a small fire
+    std::vector<std::uint8_t> fire = discFire(CX, CY, 25);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+    live.compute(fire);
+    Perimeter perim(fire);
+    MissionPlan first;
+    {
+        SafePlanner sp(live);
+        std::mt19937 rng(2024);
+        first = planMission(live, perim.distance(), sp, rng);
+    }
+    CHECK(first.perimeterLoopsVersion == perim.distance().version());
+    CHECK(!first.perimeterLoops.empty());
+
+    // The fire grows inside the perimeter (no section moves): the line is reused...
+    fire = discFire(CX, CY, 40);
+    live.compute(fire);
+    CHECK(!perim.update(fire));
+    SafePlanner sp(live);
+    std::mt19937 rngA(99);
+    const MissionPlan reused = planMission(live, perim.distance(), sp, rngA, fleetAfter(first, true));
+    const auto traced = tracePerimeterLine(perim.distance());
+    CHECK(sameLoops(reused.perimeterLoops, traced));
+    CHECK(sameLoops(reused.perimeterLoops, first.perimeterLoops));
+
+    // ...and the plan is the one a fresh trace gives: same previous plan, but marked as having no trace
+    MissionPlan untraced = first;
+    untraced.perimeterLoopsVersion = 0;
+    untraced.perimeterLoops.clear();
+    std::mt19937 rngB(99);
+    const MissionPlan fresh = planMission(live, perim.distance(), sp, rngB, fleetAfter(untraced, true));
+    CHECK(sameLoops(fresh.perimeterLoops, traced));
+    CHECK(sameLanes(reused.lanes, fresh.lanes));
+    CHECK(reused.owner == fresh.owner);
+    CHECK(reused.sectorDrone == fresh.sectorDrone);
+    CHECK(reused.sweepRoutes.size() == fresh.sweepRoutes.size());
+    for (size_t r = 0; r < std::min(reused.sweepRoutes.size(), fresh.sweepRoutes.size()); ++r)
+        CHECK(samePoints(reused.sweepRoutes[r], fresh.sweepRoutes[r]));
+    CHECK(samePoints(reused.acoTour, fresh.acoTour));
+
+    // The perimeter moves: even if a caller wrongly says it has not, the version check traces the new line
+    fire = discFire(CX, CY, 95);
+    live.compute(fire);
+    CHECK(perim.update(fire));
+    SafePlanner sp2(live);
+    std::mt19937 rngC(99);
+    const MissionPlan moved = planMission(live, perim.distance(), sp2, rngC, fleetAfter(reused, true));
+    CHECK(sameLoops(moved.perimeterLoops, tracePerimeterLine(perim.distance())));
+    CHECK(!sameLoops(moved.perimeterLoops, first.perimeterLoops));
+    CHECK(moved.perimeterLoopsVersion == perim.distance().version());
+    std::printf("  (%zu-point line reused; plan identical to a fresh trace; moved perimeter traced afresh)\n",
+                traced.empty() ? size_t(0) : traced[0].size());
 }
 
 // The ACO count follows the one-drone loop time: each point is revisited within ACO_REVISIT_S
