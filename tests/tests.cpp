@@ -1434,6 +1434,43 @@ namespace {
     }
 }
 
+// Lane coverage is now worked out per cell (only the samples that can reach each cell are tested). It must mark
+// exactly the cells the original disc-per-sample stamp (ref::stampLane, kept above) marks. Random lanes at every
+// angle and length, with several runs, axis-aligned and zero-length runs, clipped by the area's edges.
+TEST(lane_stamp_matches_disc_stamps) {
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> pos(300.0f, 700.0f), len(0.0f, 300.0f), ang(0.0f, 6.2831853f), gap(0.0f, 40.0f);
+    const GridRect area{ 380, 330, 760, 640 };   // Smaller than the spread of the lanes, so many are clipped
+    const size_t cells = static_cast<size_t>(area.x1 - area.x0) * (area.y1 - area.y0);
+    int lanes = 0, mismatched = 0;
+    long long marked = 0;
+    for (int k = 0; k < 2000; ++k) {
+        SweepLane lane;
+        Vec2 p(pos(rng), pos(rng));
+        // Direction: every 10th lane axis-aligned (a special case of the row interval), the rest at random
+        const float th = k % 10 == 0 ? 1.5707963f * (k / 10 % 4) : ang(rng);
+        const Vec2 dir(std::cos(th), std::sin(th));
+        const int runs = 1 + k % 3;
+        for (int r = 0; r < runs; ++r) {
+            // Every 7th run has zero length, every 13th a tiny one (just above the zero-length cut-off)
+            const float l = k % 7 == 0 ? 0.0f : (k % 13 == 0 ? 2e-3f : len(rng) / runs);
+            lane.pts.push_back(p);
+            p = p + dir * l;
+            lane.pts.push_back(p);
+            p = p + dir * gap(rng);
+        }
+        std::vector<std::uint8_t> fast(cells, 0), original(cells, 0);
+        stampLaneCoverage(lane, area, fast);
+        ref::stampLane(lane, area, original);
+        mismatched += fast != original;
+        for (std::uint8_t v : original) marked += v;
+        ++lanes;
+    }
+    std::printf("  (%d random lanes, %lld cells marked, %d lanes differ)\n", lanes, marked, mismatched);
+    CHECK(mismatched == 0);
+    CHECK(marked > 0);
+}
+
 // Gap fill now only re-floods the previous pass's patches (lanes only remove gaps, never add them). The lanes
 // it adds must be exactly the ones the original whole-window scan added, in the same places and order.
 TEST(gap_fill_matches_full_window_scan) {
