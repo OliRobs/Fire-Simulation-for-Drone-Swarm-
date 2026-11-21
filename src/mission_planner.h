@@ -17,6 +17,11 @@ struct SweepFleet {
     // (Voronoi regions, points of interest and the order of the tour) then stays exactly as it was, so the ACO
     // routing only changes when the perimeter does. Only the fire-safe legs are rebuilt against the live fire.
     bool perimeterUnchanged = false;
+    // Optional: a plan that is no longer needed (the controller passes the one from two re-plans ago). Its
+    // whole-grid arrays (label, zone, owner; about 11 MB on a 1200 x 1000 grid) are cleared inside its bounds
+    // and reused, instead of allocating and filling new ones on every re-plan. The new plan is identical either
+    // way. The recycled plan is left without those arrays.
+    MissionPlan* recycle = nullptr;
 };
 
 // Builds the whole survey plan from the live fire (standoff) and the committed perimeter (zones).

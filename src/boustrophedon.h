@@ -68,5 +68,9 @@ private:
 
 // Sector of the nearest lane for every inner-band cell (inside `area`), -1 elsewhere. Found by a breadth-first
 // search through the band from every lane's cells, so each cell goes to the lane it can be reached from first.
+// The second form fills `owner`, which must already be GRID_WIDTH x GRID_HEIGHT and -1 everywhere (e.g. a buffer
+// recycled from an earlier plan and cleared), instead of allocating a new whole-grid array.
+void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
+                   const GridRect& area, std::vector<int>& owner);
 std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
                                const GridRect& area);

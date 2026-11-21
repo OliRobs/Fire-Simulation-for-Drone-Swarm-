@@ -354,6 +354,13 @@ void SectorLapBuilder::addNext() { extended(++last_, len_, end_); }
 std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
                                const GridRect& area) {
     std::vector<int> owner(static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT, -1);
+    buildOwnerMap(lanes, zone, area, owner);
+    return owner;
+}
+
+// Fills a caller-provided whole-grid array (all -1 on entry); only cells inside `area` are written
+void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
+                   const GridRect& area, std::vector<int>& owner) {
     std::vector<int> queue;
 
     // Seed the search with every cell a lane run passes over
@@ -400,5 +407,4 @@ std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::v
             }
         }
     }
-    return owner;
 }

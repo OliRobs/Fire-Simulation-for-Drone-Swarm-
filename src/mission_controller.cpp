@@ -173,9 +173,15 @@ void MissionController::replan() {
     // unchanged version means the same perimeter as at the last re-plan: the planner then keeps the ACO
     // regions and tour order (the ACO routing only changes when the perimeter does)
     fleet.perimeterUnchanged = planned_ && perim_.version() == plannedPerimVersion_;
+    // Reuse the whole-grid arrays of the plan before last (see SweepFleet::recycle)
+    fleet.recycle = &spare_;
 
     // (The new plan is built while the old one is still in plan_, then replaces it)
-    plan_ = planMission(live_, perim_, planner_, rng_, fleet);
+    // The previous plan is read while the new one is built (fleet.previous), so both are alive at once. Afterwards
+    // the previous one becomes the spare, whose arrays the next re-plan reuses.
+    MissionPlan next = planMission(live_, perim_, planner_, rng_, fleet);
+    spare_ = std::move(plan_);
+    plan_ = std::move(next);
     planned_ = true;
     plannedPerimVersion_ = perim_.version();
     lastPlanFrame_ = frame_;
