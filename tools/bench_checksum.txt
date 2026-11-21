@@ -1,0 +1,7 @@
+3adc55676f58a95c
+# Expected checksum of `wf_bench 2400` (first line only is read). CI fails the Linux job when the benchmark's
+# checksum differs, i.e. when a change alters the simulation or planning results.
+# A change that is MEANT to alter results (new behaviour, a config.h design value, a bug fix) updates the first
+# line in the same pull request and says why in its description. A pure optimisation must leave it alone.
+# Computed with GCC on Ubuntu 24.04, Release build (MSVC may round floats differently, so Windows CI does not
+# compare it).
