@@ -27,15 +27,38 @@ public:
 
 private:
     int snap(Vec2 p) const;                 // Nearest flyable cell to p, or -1 if none within 40 cells
-    float heuristic(int a, int b) const;    // Octile distance (admissible for 8-connected moves)
+    void refreshFlyable();                  // Brings fly_ up to date with the live distance field (see below)
 
     const DistanceTransform& edt_;
 
     // A* working storage, reused between calls. Instead of clearing all 250k entries on every search,
     // each search bumps search_ and an entry only counts as valid if its stamp equals the current search.
-    std::vector<float> g_;                  // Cost from the start cell
-    std::vector<int> came_;                 // Parent cell on the best path found so far
-    std::vector<std::uint32_t> openStamp_;  // == search_ when g_/came_ hold values for this search
-    std::vector<std::uint32_t> closedStamp_;// == search_ once the cell has been expanded in this search
+    // All of a cell's A* state in one 16-byte record, so the search touches one cache line per cell rather than
+    // four separate whole-grid arrays (it jumps around the grid, so each array access was usually a cache miss).
+    struct Node {
+        float g;                    // Cost from the start cell
+        int came;                   // Parent cell on the best path found so far
+        std::uint32_t openStamp;    // == search_ when g/came hold values for this search
+        std::uint32_t closedStamp;  // == search_ once the cell has been expanded in this search
+    };
+    std::vector<Node> nodes_;
     std::uint32_t search_ = 0;
+
+    // A* open list, bucketed by f-cost: bucket k holds the entries with k <= f < k + 1, each bucket a small binary
+    // heap of (f, cell). The smallest (f, cell) overall is the smallest in the lowest non-empty bucket, so entries
+    // come out in exactly the order of a single priority queue of (f, cell) pairs (same tie-break on the cell
+    // index), and A* finds exactly the same paths; but each push and pop works on a heap of a few dozen entries
+    // instead of thousands. The buckets are kept between searches to reuse their memory.
+    std::vector<std::vector<std::pair<float, int>>> buckets_;
+
+    // Flyable-cell bitmap for A*: one byte per cell, 1 where cellOk() is true, on a grid padded with a border of
+    // 0 (not flyable) cells all round, so neighbour tests need no bounds checks. Cell (x, y) is at
+    // (y + 1) * FLY_W + (x + 1). It is only brought up to date when an A* search is about to run and the live
+    // distance field has been recomputed since (DistanceTransform::version()), and only the field's window is
+    // rewritten (outside it every cell is far from the fire, i.e. flyable).
+    static constexpr int FLY_W = GRID_WIDTH + 2;
+    std::vector<std::uint8_t> fly_;
+    bool flyBuilt_ = false;
+    std::uint64_t flyVersion_ = 0;          // edt_.version() that fly_ matches
+    GridRect flyWin_;                       // Window of the field fly_ was last built from
 };
