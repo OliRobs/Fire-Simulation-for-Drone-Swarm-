@@ -157,6 +157,65 @@ TEST(edt_with_source_bounds_matches_scan) {
     }
 }
 
+// The live distance field is now updated incrementally (only cells that caught fire since the last frame are
+// added) and clamped: exact out to maxDistance + 1, "very far" beyond. At every step it must equal the exact
+// range-limited transform with everything beyond that clamp radius read as very far. Covers a real fire growing
+// frame by frame (plus a second fire started part-way, which grows the window), and the fallbacks to a full
+// transform: the first call, a source cell switching off, and a burst too big for per-cell updates.
+TEST(live_edt_incremental_matches_clamped_full_transform) {
+    const int range = LIVE_EDT_RANGE;
+    const double cap = (range + 1.0) * (range + 1.0);
+    DistanceTransform inc(GRID_WIDTH, GRID_HEIGHT, range, DistanceTransform::Mode::IncrementalClamped);
+    DistanceTransform exact(GRID_WIDTH, GRID_HEIGHT, range);
+    int steps = 0, wrong = 0, windowWrong = 0;
+    std::uint64_t lastVersion = inc.version();
+    // Compares the two fields everywhere either has a finite value (outside both windows both read very far)
+    auto compare = [&](const std::vector<std::uint8_t>& mask, const GridRect& bounds) {
+        inc.compute(mask, bounds);
+        exact.compute(mask, bounds);
+        const GridRect w = inc.window().unite(exact.window());
+        for (int y = w.y0; y < w.y1; ++y)
+            for (int x = w.x0; x < w.x1; ++x) {
+                const double e = exact.squaredDistance(at(x, y)), v = inc.squaredDistance(at(x, y));
+                wrong += e <= cap ? v != e : !(v > cap);
+            }
+        const GridRect a = inc.window(), b = exact.window();
+        windowWrong += a.x0 != b.x0 || a.y0 != b.y0 || a.x1 != b.x1 || a.y1 != b.y1;
+        wrong += inc.version() == lastVersion;   // Every compute() is a new version
+        lastVersion = inc.version();
+        ++steps;
+    };
+
+    // --- A real fire, frame by frame, with a second fire part-way ---
+    std::vector<Cell> grid(N);
+    FireSimulation sim(grid);
+    sim.ignite(at(CX, CY));
+    for (int t = 0; t < 500; ++t) {
+        sim.step();
+        if (t == 200) sim.ignite(at(CX + 150, CY - 100));
+        if (sim.takeFireGrew()) compare(sim.fireMask(), sim.fireBounds());
+    }
+    const int growthSteps = steps;
+
+    // --- Fallbacks ---
+    std::vector<std::uint8_t> mask = sim.fireMask();
+    GridRect box = sim.fireBounds();
+    // A source switches off (as if the fire were reset there): distances grow, so a full transform is needed
+    for (int x = box.x0; x < box.x1; ++x) mask[at(x, (box.y0 + box.y1) / 2)] = 0;
+    compare(mask, box);
+    // A burst: a whole disc catches fire in one step (as a crown-fire run might)
+    const auto burst = discFire(CX - 100, CY + 80, 90);
+    for (int i = 0; i < N; ++i) if (burst[i]) { mask[i] = 1; box.include(i % GRID_WIDTH, i / GRID_WIDTH); }
+    compare(mask, box);
+    // Back to small additions after the fallbacks
+    for (int k = 0; k < 5; ++k) { mask[at(box.x0 + k, box.y0)] = 1; compare(mask, box); }
+
+    std::printf("  (%d growth steps and %d fallback / follow-up steps compared)\n", growthSteps, steps - growthSteps);
+    CHECK(growthSteps > 100);
+    CHECK(wrong == 0);
+    CHECK(windowWrong == 0);
+}
+
 // The fire simulation's bounding box must always be exactly the box of its fire mask
 TEST(fire_bounds_track_the_fire_mask) {
     std::vector<Cell> grid(N);

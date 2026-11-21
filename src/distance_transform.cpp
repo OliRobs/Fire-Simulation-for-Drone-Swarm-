@@ -1,5 +1,6 @@
 #include "distance_transform.h"
 #include <algorithm>
+#include <cmath>
 
 // ============================================================================
 // Euclidean Distance Transform (EDT)
@@ -10,8 +11,9 @@
 
 // Constructor: Initializes grid dimensions and pre-allocates workspace buffers. Every cell starts "very far"
 // (INF), so with a range limit the cells never inside a window read correctly without being written.
-DistanceTransform::DistanceTransform(int w, int h, int maxDistance)
-    : w_(w), h_(h), maxDistance_(maxDistance), sq_(static_cast<size_t>(w) * h, INF) {
+DistanceTransform::DistanceTransform(int w, int h, int maxDistance, Mode mode)
+    : w_(w), h_(h), maxDistance_(maxDistance), sq_(static_cast<size_t>(w) * h, INF),
+      incremental_(mode == Mode::IncrementalClamped && maxDistance > 0) {
     const int m = std::max(w, h);
     // Allocate 1D buffers used by the 1D EDT pass (sized to max dimension m)
     f_.resize(m); d_.resize(m); v_.resize(m); z_.resize(m + 1);
@@ -41,6 +43,7 @@ void DistanceTransform::compute(const std::vector<std::uint8_t>& sources) {
         box.include(static_cast<int>(first - row), y);
         box.include(static_cast<int>(last - row), y);
     }
+    if (incremental_) { computeIncremental(sources, box); return; }
     computeIn(sources, box);
 }
 
@@ -52,6 +55,7 @@ void DistanceTransform::compute(const std::vector<std::uint8_t>& sources, const 
     // Clip to the grid, in case the caller's rectangle runs off it
     const GridRect clipped{ std::max(0, sourceBounds.x0), std::max(0, sourceBounds.y0),
                             std::min(w_, sourceBounds.x1), std::min(h_, sourceBounds.y1) };
+    if (incremental_) { computeIncremental(sources, clipped); return; }
     computeIn(sources, maxDistance_ > 0 ? clipped : GridRect{ 0, 0, w_, h_ });
 }
 
@@ -121,6 +125,98 @@ void DistanceTransform::computeIn(const std::vector<std::uint8_t>& sources, cons
         edt1d(n); // Perform 1D EDT across the window's part of row y
         for (int x = 0; x < n; ++x) {
             sq_[row + x] = d_[x]; // Store final squared Euclidean distances
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Incremental mode: add the sources that switched on (see the header)
+// ----------------------------------------------------------------------------
+// The clamp: distances are kept exactly up to cap = (maxDistance + 1)^2 (squared) and INF beyond. A new source s
+// changes a cell c only if |c - s|^2 is below both its current value and cap, i.e. inside the disc of radius
+// maxDistance + 1 round s, where the new value is min(old, |c - s|^2): the distance to the nearest source is the
+// minimum over the sources, so adding sources can only lower it. All values are whole numbers, so the result is
+// exactly the full transform with every value above cap replaced by INF.
+void DistanceTransform::computeIncremental(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds) {
+    const int r = maxDistance_ + 1;
+    const double cap = static_cast<double>(r) * r;
+
+    // Full transform, then clamp, and remember the sources. Used on the first call and as the fallback.
+    auto full = [&]() {
+        computeIn(sources, sourceBounds);   // Also resets the previous window to INF and sets last_
+        for (int y = last_.y0; y < last_.y1; ++y) {
+            for (int x = last_.x0; x < last_.x1; ++x) {
+                double& v = sq_[static_cast<size_t>(y) * w_ + x];
+                if (v > cap) v = INF;
+            }
+        }
+        if (!haveSeen_) seen_.assign(static_cast<size_t>(w_) * h_, 0);
+        // seen_ := sources. Outside seenBox_ and sourceBounds both are 0, so only their union needs copying.
+        const GridRect copy = seenBox_.unite(sourceBounds);
+        for (int y = copy.y0; y < copy.y1; ++y) {
+            const size_t row = static_cast<size_t>(y) * w_;
+            std::copy(sources.begin() + row + copy.x0, sources.begin() + row + copy.x1, seen_.begin() + row + copy.x0);
+        }
+        seenBox_ = sourceBounds;
+        haveSeen_ = true;
+    };
+
+    if (!haveSeen_) { full(); return; }
+    ++version_;   // (full() counts itself through computeIn)
+
+    // --- Find the source cells that changed since the last call ---
+    // Sources can only be non-zero inside sourceBounds, and seen_ only inside seenBox_: compare their union, a
+    // row at a time (rows that are byte-for-byte equal, most of them, are skipped with one memcmp).
+    newSources_.clear();
+    const GridRect cmp = seenBox_.unite(sourceBounds);
+    for (int y = cmp.y0; y < cmp.y1; ++y) {
+        const size_t row = static_cast<size_t>(y) * w_;
+        const std::uint8_t* now = sources.data() + row;
+        const std::uint8_t* before = seen_.data() + row;
+        if (std::equal(now + cmp.x0, now + cmp.x1, before + cmp.x0)) continue;
+        for (int x = cmp.x0; x < cmp.x1; ++x) {
+            if ((now[x] != 0) == (before[x] != 0)) continue;
+            if (!now[x]) { --version_; full(); return; }   // A source switched OFF: distances can grow, start again
+            newSources_.push_back(static_cast<int>(row) + x);
+        }
+    }
+
+    // --- Too many at once (e.g. a crown-fire run): the full transform is cheaper than one disc per new cell ---
+    const GridRect win = sourceBounds.empty() ? GridRect{}
+                       : GridRect{ std::max(0, sourceBounds.x0 - r), std::max(0, sourceBounds.y0 - r),
+                                   std::min(w_, sourceBounds.x1 + r), std::min(h_, sourceBounds.y1 + r) };
+    const double winCells = static_cast<double>(win.x1 - win.x0) * (win.y1 - win.y0);
+    const double discCells = 3.2 * cap;   // A little over pi * r^2
+    // (The full transform makes about three passes over the window, hence the factor 3)
+    if (static_cast<double>(newSources_.size()) * discCells > 3.0 * winCells) { --version_; full(); return; }
+
+    // --- Lower the distances round each new source, and remember it ---
+    for (int idx : newSources_) {
+        addSource(idx % w_, idx / w_);
+        seen_[idx] = 1;
+    }
+    seenBox_ = seenBox_.unite(sourceBounds);
+    // The window (where finite values can be) is the source box grown by the clamp radius, as in computeIn. It
+    // only grows here (sources never switch off without a full recompute), so nothing outside it needs resetting.
+    last_ = last_.unite(win);
+}
+
+// Lowers every value within the clamp radius (maxDistance + 1) of source cell (sx, sy) to its squared distance
+// from that cell, where that is smaller. Cells further away keep their value (see computeIncremental).
+void DistanceTransform::addSource(int sx, int sy) {
+    const int r = maxDistance_ + 1;
+    const int y0 = std::max(0, sy - r), y1 = std::min(h_ - 1, sy + r);
+    for (int y = y0; y <= y1; ++y) {
+        const int dy = y - sy;
+        // Half-width of the disc on this row: the largest dx with dx^2 + dy^2 <= r^2
+        int half = static_cast<int>(std::sqrt(static_cast<double>(r * r - dy * dy)));
+        while ((half + 1) * (half + 1) + dy * dy <= r * r) ++half;   // Guard against sqrt rounding down
+        while (half * half + dy * dy > r * r) --half;                  // ...or up
+        const int x0 = std::max(0, sx - half), x1 = std::min(w_ - 1, sx + half);
+        double* row = sq_.data() + static_cast<size_t>(y) * w_;
+        for (int x = x0; x <= x1; ++x) {
+            const double d2 = static_cast<double>((x - sx) * (x - sx) + dy * dy);
+            if (d2 < row[x]) row[x] = d2;
         }
     }
 }

@@ -155,9 +155,14 @@ int main(int argc, char** argv) {
     // Step 2: Initialize Distance Field, Perimeter Tracking, and Mission Control
     // ------------------------------------------------------------------------
     // Live distance transform (EDT) maintaining safety buffers around active fire front
-    // Only worked out within LIVE_EDT_RANGE of the fire: that is as far as any reader looks, and it makes the
-    // per-frame recompute proportional to the fire's size rather than the whole 2000 x 2000 grid
-    DistanceTransform liveEdt(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE);
+    // Only worked out within LIVE_EDT_RANGE of the fire: that is as far as any reader looks. Incremental: each
+    // frame only the cells that caught fire since the last one are added (the fire never shrinks), and distances
+    // beyond the range read "very far" (distance_transform.h). The readers (SafePlanner, keepClearOfFire, the
+    // planner's zone test, the renderer's no-fly holes) compare against NO_FLY_SQ or HARD_NO_FLY_SQ, which the
+    // static_assert below keeps inside the range.
+    static_assert(NO_FLY_SQ < (LIVE_EDT_RANGE + 1.0) * (LIVE_EDT_RANGE + 1.0) && HARD_NO_FLY_SQ <= NO_FLY_SQ,
+                  "the live distance field must reach every threshold its readers compare it with");
+    DistanceTransform liveEdt(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE, DistanceTransform::Mode::IncrementalClamped);
 
     // Manages committed containment perimeter boundaries
     Perimeter perimeter(sim.fireMask());

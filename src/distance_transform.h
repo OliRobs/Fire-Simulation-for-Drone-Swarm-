@@ -11,10 +11,21 @@
 // than maxDistance from every source, read as "very far" (INF). The fire covers a tiny part of the 2000 x 2000
 // grid for most of a run, so this cuts the per-frame cost from the whole grid to a window round the fire.
 // Use it only where every reader compares the distance against thresholds no bigger than maxDistance.
+//
+// Incremental mode (for the live fire, whose cells only ever switch on): distances are exact out to
+// maxDistance + 1 cells and every cell further away reads INF ("very far"), instead of its exact distance. Every
+// reader of the live field compares against thresholds within maxDistance, so it sees exactly the same answers.
+// In exchange, compute() only has to deal with the source cells that switched on since the previous call: each
+// lowers the distances inside a disc of radius maxDistance + 1 round it, and nothing else can change. That is a few
+// thousand cells per new fire cell instead of three passes over the whole window. It falls back to a full
+// transform (then clamped) on the first call, when a source cell has switched OFF, and when so many cells switched
+// on at once that the full transform is cheaper.
 class DistanceTransform {
 public:
-    // maxDistance: cells; 0 = no limit (the whole grid, the original behaviour)
-    DistanceTransform(int w, int h, int maxDistance = 0);
+    enum class Mode { Exact, IncrementalClamped };
+
+    // maxDistance: cells; 0 = no limit (the whole grid, the original behaviour). IncrementalClamped needs a limit.
+    DistanceTransform(int w, int h, int maxDistance = 0, Mode mode = Mode::Exact);
 
     // sources[i] != 0 marks a source cell. Read results via squaredDistance().
     void compute(const std::vector<std::uint8_t>& sources);
@@ -44,6 +55,10 @@ private:
 
     // Shared by both compute() overloads: works out the window grown from the sources' bounding box
     void computeIn(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds);
+    // Incremental mode: update from the source cells that switched on, or fall back to computeIn + clamp
+    void computeIncremental(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds);
+    // Incremental mode: lowers every distance within the clamp radius of source cell (sx, sy)
+    void addSource(int sx, int sy);
 
     int w_, h_;
     int maxDistance_;               // 0 = whole grid
@@ -52,4 +67,11 @@ private:
     std::vector<double> sq_, f_, d_, z_;
     std::vector<int> v_;
     std::vector<int> lastSource_;   // Pass 1 scratch: row of the nearest source so far in each column
+
+    // --- Incremental mode only ---
+    bool incremental_ = false;
+    bool haveSeen_ = false;              // seen_ holds the sources of the previous compute()
+    std::vector<std::uint8_t> seen_;     // Copy of the sources at the previous compute() (to find new ones)
+    GridRect seenBox_;                   // Every non-zero cell of seen_ lies inside this rectangle
+    std::vector<int> newSources_;        // Scratch: cells that switched on since the previous compute()
 };

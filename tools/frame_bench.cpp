@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
     std::vector<Cell> grid(static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT);
     FireSimulation sim(grid);
     sim.ignite((GRID_HEIGHT / 2) * GRID_WIDTH + GRID_WIDTH / 2);
-    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE);
+    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE, DistanceTransform::Mode::IncrementalClamped);
     Perimeter perim(sim.fireMask());
     MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
     const auto t1 = Clock::now();
