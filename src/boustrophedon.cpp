@@ -452,16 +452,39 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
         }
     }
 
-    // Breadth-first through the band (8-connected): each cell takes the sector of the lane that reaches it first
+    // Breadth-first through the band (8-connected): each cell takes the sector of the lane that reaches it first.
+    // Cells are taken off the queue in order and their neighbours tried in the fixed DX/DY order, so which lane
+    // reaches a cell first never depends on anything else. Two exact speed-ups:
+    //  - Cells at least one cell inside the area (nearly all of them) need no bounds test on their neighbours,
+    //    so those cells use a loop over precomputed index offsets; only cells on the area's edge test bounds.
+    //  - Every band cell enters the queue at most once, so the queue never needs more room than the area has
+    //    cells: reserving that up front saves the repeated reallocate-and-copy as it grows.
+    queue.reserve(static_cast<size_t>(std::max(0, area.x1 - area.x0)) * std::max(0, area.y1 - area.y0));
+    int offset[NUM_DIRS];
+    for (int k = 0; k < NUM_DIRS; ++k) offset[k] = DY[k] * GRID_WIDTH + DX[k];
+    const std::uint8_t* const zp = zone.data();
+    int* const op = owner.data();
     for (size_t head = 0; head < queue.size(); ++head) {
         const int idx = queue[head];
         const int x = idx % GRID_WIDTH, y = idx / GRID_WIDTH;
+        const int sector = op[idx];
+        if (x > area.x0 && x < area.x1 - 1 && y > area.y0 && y < area.y1 - 1) {
+            // Interior cell: all eight neighbours are inside the area
+            for (int k = 0; k < NUM_DIRS; ++k) {
+                const int ni = idx + offset[k];
+                if (zp[ni] != 1 || op[ni] >= 0) continue;
+                op[ni] = sector;
+                queue.push_back(ni);
+            }
+            continue;
+        }
+        // Edge cell: the original bounds-checked test, same neighbour order
         for (int k = 0; k < NUM_DIRS; ++k) {
             const int nx = x + DX[k], ny = y + DY[k];
             if (nx < area.x0 || nx >= area.x1 || ny < area.y0 || ny >= area.y1) continue;
             const int ni = ny * GRID_WIDTH + nx;
-            if (zone[ni] != 1 || owner[ni] >= 0) continue;
-            owner[ni] = owner[idx];
+            if (zp[ni] != 1 || op[ni] >= 0) continue;
+            op[ni] = sector;
             queue.push_back(ni);
         }
     }

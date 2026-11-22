@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include "types.h"
@@ -38,6 +40,18 @@ public:
     void compute(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds);
 
     double squaredDistance(int idx) const { return sq_[idx]; }
+
+    // A lower bound on the (not squared) distance from cell idx to the nearest source cell: the exact distance
+    // where squaredDistance() holds it, and where it reads INF ("very far") the least distance that can mean. With
+    // a range limit INF means more than maxDistance + 1 cells from every source (outside the window, or beyond the
+    // incremental clamp); without one it only appears when there are no sources at all.
+    // Because the true distance changes by at most d between two cells d apart (triangle inequality), a reader can
+    // use this to know that every cell within (bound - threshold) of idx is also beyond a threshold without
+    // reading them (SafePlanner::lineClear does).
+    double distanceLowerBound(int idx) const {
+        const double far = maxDistance_ > 0 ? maxDistance_ + 1.0 : INF;
+        return std::min(std::sqrt(sq_[idx]), far);
+    }
 
     // Cells the last compute() worked out. Every cell outside it reads INF, i.e. is more than maxDistance from
     // every source, so a reader looking for cells nearer than that can loop over this rectangle only. The
