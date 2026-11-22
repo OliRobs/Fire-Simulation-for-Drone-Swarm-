@@ -71,18 +71,48 @@ void SafePlanner::refreshFlyable() {
 // ----------------------------------------------------------------------------
 // Ray-Casting Line-of-Sight Check
 // ----------------------------------------------------------------------------
-// Marches samples along the straight-line segment from point 'a' to point 'b'
-// at 0.25-cell increments to verify no-fly zone obstacles are crossed.
+// Marches samples along the straight-line segment from point 'a' to point 'b' at 0.25-cell increments and
+// reports whether every sample's cell is outside the hard no-fly zone (cellOk).
+//
+// Skipping samples that cannot fail: most of a leg is far from the fire, where testing four samples per cell
+// is wasted work. When a sample's cell is at least L cells from the fire (distanceLowerBound), the triangle
+// inequality says any cell whose centre is within L - r of it is at least r away, and so passes cellOk, where
+// r = sqrt(HARD_NO_FLY_SQ) is the no-fly radius. A later sample q lies |q - p| along the line from sample p, and
+// the centres of their cells are at most |q - p| + sqrt(2) apart (each sample is within sqrt(2)/2 of its own cell's
+// centre). So every sample within L - r - sqrt(2) further along passes and is skipped without reading the field.
+// The samples that are tested are a subset of the original ones and the skipped ones provably pass, so the answer
+// is exactly the original loop's (test lineclear_skip_matches_every_sample). A small margin covers float rounding
+// in the sample positions. Far from the fire the live field's bound is its range (32 cells), so one test covers
+// about 21 cells (~84 samples) instead of 4 per cell.
+//
+// The skip is only used when the whole segment is well inside the grid: off the grid cellOk fails whatever the
+// field says, so near the edges every sample is tested as before.
 bool SafePlanner::lineClear(Vec2 a, Vec2 b) const {
     const float len = std::sqrt(sqDist(a, b));
     const int steps = std::max(1, static_cast<int>(len / 0.25f) + 1);
 
-    for (int i = 0; i <= steps; ++i) {
+    // No-fly radius and the slack the skip leaves: two half cell-diagonals plus a rounding margin
+    static const double noFlyRadius = std::sqrt(HARD_NO_FLY_SQ);
+    constexpr double slack = 1.41421356237 + 0.05;
+    const bool inside = std::min(a.x, b.x) >= 0.5f && std::max(a.x, b.x) <= GRID_WIDTH - 0.5f
+                     && std::min(a.y, b.y) >= 0.5f && std::max(a.y, b.y) <= GRID_HEIGHT - 0.5f;
+    const double spacing = static_cast<double>(len) / steps;   // Distance between consecutive samples (cells)
+
+    for (int i = 0; i <= steps; ) {
+        // Sample i exactly as before (same t, same float arithmetic), so the tested samples are original ones
         const float t = static_cast<float>(i) / steps;
         const Vec2 p = a + (b - a) * t;
-        if (!cellOk(static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.y)))) {
+        const int x = static_cast<int>(std::floor(p.x)), y = static_cast<int>(std::floor(p.y));
+        if (!cellOk(x, y)) {
             return false;
         }
+        int skip = 0;
+        if (inside && spacing > 0.0) {
+            // How far along the line every cell is guaranteed to pass, in whole samples
+            const double room = edt_.distanceLowerBound(y * GRID_WIDTH + x) - noFlyRadius - slack;
+            if (room > 0.0) skip = static_cast<int>(room / spacing);
+        }
+        i += 1 + skip;
     }
     return true;
 }

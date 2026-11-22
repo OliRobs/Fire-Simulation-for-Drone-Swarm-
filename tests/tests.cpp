@@ -638,6 +638,65 @@ TEST(astar_matches_original_planner) {
     CHECK(detours > 50);   // The legs really exercise A*
 }
 
+// lineClear skips samples that the distance field proves are clear (see SafePlanner::lineClear). It must give
+// exactly the answer of the original loop that tests every sample (ref::OriginalPlanner::lineClear), for every
+// kind of field a planner can be given: the app's incremental clamped live field (also after the fire grows, so
+// the incremental path runs), a range-limited exact one, the whole-grid one, and one with no fire at all. The
+// segments include random ones across the map, ones that graze the no-fly radius round a fire (where a wrong skip
+// would show), and ones touching the grid edges (where the skip is turned off).
+TEST(lineclear_skip_matches_every_sample) {
+    const int R = 50;                                  // Fire disc radius (cells)
+    std::vector<std::uint8_t> fire = discFire(CX, CY, R);
+    std::vector<std::uint8_t> grown = fire;
+    const auto more = discFire(CX + 70, CY - 30, 35);
+    for (int i = 0; i < N; ++i) grown[i] |= more[i];
+    const std::vector<std::uint8_t> none(N, 0);
+
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> px(0.0f, GRID_WIDTH - 0.001f), py(0.0f, GRID_HEIGHT - 0.001f);
+    std::uniform_real_distribution<float> ang(0.0f, 6.2831853f), near(-3.0f, 3.0f), u(0.0f, 1.0f);
+    const float hard = static_cast<float>(std::sqrt(HARD_NO_FLY_SQ));
+    int segments = 0, clear = 0, blocked = 0, differ = 0;
+
+    // Compares the two planners on one segment and keeps count
+    auto compare = [&](const SafePlanner& fast, const ref::OriginalPlanner& orig, Vec2 a, Vec2 b) {
+        const bool f = fast.lineClear(a, b), o = orig.lineClear(a, b);
+        differ += f != o;
+        (o ? clear : blocked) += 1;
+        ++segments;
+    };
+
+    struct FieldCase { int range; DistanceTransform::Mode mode; };
+    for (const FieldCase fc : { FieldCase{ LIVE_EDT_RANGE, DistanceTransform::Mode::IncrementalClamped },
+                                FieldCase{ LIVE_EDT_RANGE, DistanceTransform::Mode::Exact },
+                                FieldCase{ 0, DistanceTransform::Mode::Exact } }) {
+        DistanceTransform live(GRID_WIDTH, GRID_HEIGHT, fc.range, fc.mode);
+        const SafePlanner fast(live);
+        const ref::OriginalPlanner orig(live);
+        const std::vector<std::uint8_t>* fields[] = { &none, &fire, &grown };
+        for (const std::vector<std::uint8_t>* f : fields) {   // Same field object throughout: incremental after the first
+            live.compute(*f);
+            for (int k = 0; k < 400; ++k) {
+                // Random segment anywhere on the map
+                compare(fast, orig, Vec2(px(rng), py(rng)), Vec2(px(rng), py(rng)));
+                // Grazing: a chord of a circle whose radius is within a few cells of the fire disc plus the no-fly
+                // radius, so its closest approach to the fire is right at the limit
+                const float rad = R + hard + near(rng), a0 = ang(rng), a1 = a0 + 0.3f + u(rng) * 2.0f;
+                const float c = rad / std::cos((a1 - a0) / 2.0f);   // Endpoints so the chord's midpoint is at rad
+                compare(fast, orig, Vec2(CX + 0.5f + c * std::cos(a0), CY + 0.5f + c * std::sin(a0)),
+                                    Vec2(CX + 0.5f + c * std::cos(a1), CY + 0.5f + c * std::sin(a1)));
+                // Along or close to a grid edge
+                compare(fast, orig, Vec2(px(rng), u(rng) * 2.0f), Vec2(px(rng), GRID_HEIGHT - u(rng) * 2.0f));
+                compare(fast, orig, Vec2(u(rng), py(rng)), Vec2(GRID_WIDTH - u(rng), py(rng)));
+            }
+        }
+    }
+    std::printf("  (%d segments: %d clear, %d blocked; %d differ)\n", segments, clear, blocked, differ);
+    CHECK(differ == 0);
+    CHECK(blocked > 1000);   // Plenty of both answers, so the comparison means something
+    CHECK(clear > 1000);
+}
+
 // ============================================================================
 // Fire model
 // ============================================================================
@@ -1878,6 +1937,88 @@ TEST(gap_fill_matches_full_window_scan) {
     }
     std::printf("  (%d gap-fill lanes added over the test fires, identical in both versions)\n", totalAdded);
     CHECK(totalAdded > 0);   // The fires really exercise the gap fill
+}
+
+// Original (pre-2026-11-22) ownership flood, kept word for word: seed every cell a lane run passes over, then
+// breadth-first through the band, bounds-testing every neighbour. The last stage of buildOwnerMap (band cells cut
+// off from every lane go to the nearest lane) is unchanged and left out here, so those cells stay -1.
+namespace ref {
+    void ownerSeedAndFlood(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
+                           const GridRect& area, std::vector<int>& owner) {
+        constexpr float RAY_STEP = 0.5f;
+        std::vector<int> queue;
+        for (const SweepLane& l : lanes) {
+            for (size_t i = 0; i + 1 < l.pts.size(); i += 2) {
+                const Vec2 a = l.pts[i], b = l.pts[i + 1];
+                const int steps = std::max(1, static_cast<int>(std::ceil(std::sqrt(sqDist(a, b)) / RAY_STEP)));
+                for (int s = 0; s <= steps; ++s) {
+                    const Vec2 p = a + (b - a) * (static_cast<float>(s) / steps);
+                    const int x = static_cast<int>(std::floor(p.x)), y = static_cast<int>(std::floor(p.y));
+                    if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1) continue;
+                    const int idx = y * GRID_WIDTH + x;
+                    if (zone[idx] != 1 || owner[idx] >= 0) continue;
+                    owner[idx] = l.sector;
+                    queue.push_back(idx);
+                }
+            }
+        }
+        for (size_t head = 0; head < queue.size(); ++head) {
+            const int idx = queue[head];
+            const int x = idx % GRID_WIDTH, y = idx / GRID_WIDTH;
+            for (int k = 0; k < NUM_DIRS; ++k) {
+                const int nx = x + DX[k], ny = y + DY[k];
+                if (nx < area.x0 || nx >= area.x1 || ny < area.y0 || ny >= area.y1) continue;
+                const int ni = ny * GRID_WIDTH + nx;
+                if (zone[ni] != 1 || owner[ni] >= 0) continue;
+                owner[ni] = owner[idx];
+                queue.push_back(ni);
+            }
+        }
+    }
+}   // namespace ref
+
+// buildOwnerMap's breadth-first flood now skips the bounds tests for cells inside the area and reserves its queue.
+// Every cell the flood reaches must get exactly the sector the original flood gave it (same lane reaches it first),
+// and the cells it cannot reach must still be given a sector by the last stage. Run on the test fires with the
+// planner's own window and with smaller areas cut out of it, so the area's edge runs through the band (many edge
+// cells), plus an island of band cells no lane reaches.
+TEST(owner_map_matches_original_flood) {
+    long long compared = 0, cutOff = 0, differ = 0, unowned = 0;
+    for (const auto& fire : exactnessFires()) {
+        SweepSetup s(fire);
+        const GridRect w = s.plan.bounds;
+        const int mx = (w.x0 + w.x1) / 2, my = (w.y0 + w.y1) / 2;
+        // An island of band cells in the window's corner, well away from the band and every lane, so the flood
+        // cannot reach it and the last stage has to place it
+        std::vector<std::uint8_t> zone = s.plan.zone;
+        for (int y = w.y0 + 2; y < w.y0 + 12; ++y)
+            for (int x = w.x0 + 2; x < w.x0 + 12; ++x) zone[at(x, y)] = 1;
+        for (const GridRect area : { w, GridRect{ w.x0, w.y0, mx, my }, GridRect{ mx - 37, w.y0, w.x1, my + 23 },
+                                     GridRect{ w.x0 + 5, my - 60, w.x1 - 5, my + 60 } }) {
+            std::vector<int> fast(N, -1), original(N, -1);
+            buildOwnerMap(s.plan.lanes, zone, area, fast);
+            ref::ownerSeedAndFlood(s.plan.lanes, zone, area, original);
+            for (int y = area.y0; y < area.y1; ++y) {
+                for (int x = area.x0; x < area.x1; ++x) {
+                    const int i = at(x, y);
+                    if (zone[i] != 1) { differ += fast[i] != -1; continue; }
+                    if (original[i] >= 0) { differ += fast[i] != original[i]; ++compared; }
+                    else { ++cutOff; unowned += fast[i] < 0 && !s.plan.lanes.empty(); }
+                }
+            }
+            // Nothing outside the area is written
+            for (int i = 0; i < N; ++i) {
+                const int x = i % GRID_WIDTH, y = i / GRID_WIDTH;
+                if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1) differ += fast[i] != -1;
+            }
+        }
+    }
+    std::printf("  (%lld flooded cells compared, %lld cut off from every lane; %lld differ, %lld left unowned)\n",
+                compared, cutOff, differ, unowned);
+    CHECK(differ == 0);
+    CHECK(unowned == 0);
+    CHECK(compared > 100000);
+    CHECK(cutOff > 0);   // The cut-down areas really leave band pieces the flood cannot reach
 }
 
 // The perimeter-line trace now works out each sample once and slides two row buffers down the window. The
