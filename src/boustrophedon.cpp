@@ -113,17 +113,30 @@ namespace {
 //
 // Coverage used to be stamped as a disc (a 14 x 14 box test) at every sample. Neighbouring samples are only half
 // a cell apart, so each cell was tested against ~28 samples. Now each cell near the run is tested only against
-// the few samples that could reach it, nearest first, stopping at the first hit:
-//  - A cell whose distance from the run's LINE is more than r + 1 is out of reach of every sample.
-//  - Otherwise the samples within reach lie within (r + 1) cells, along the run, of the cell's projection onto
-//    it. Samples further along are more than r + 1 away (the margin of 1 cell dwarfs float rounding, which is
-//    about 1e-3 cells at these coordinates), so the original test would reject them too.
+// the few samples that could reach it, stopping at the first hit:
+//  - Every sample lies on the run's line (to within float rounding, about 1e-4 cells at these coordinates). So a
+//    cell whose distance `across` from the line is more than r + MARGIN is out of reach of every sample.
+//    MARGIN (0.1 cell) is about a thousand times the rounding, so the original float test would reject those
+//    samples too.
+//  - A cell level with the run and within sqrt((r - MARGIN)^2 - (RAY_STEP / 2)^2) of its line is certainly
+//    covered: the nearest sample is at most half a step along, so it is within r - MARGIN of the cell and passes
+//    the original test. Most covered cells are marked this way, with no sample test at all.
+//  - Otherwise a sample can only be within r of the cell if it lies within h = sqrt((r + MARGIN)^2 - across^2)
+//    of the cell's projection onto the run (Pythagoras; MARGIN again absorbs rounding). Sample s sits s / (steps
+//    per cell) along the run, so those samples form one index range, widened by one sample each side. Only that
+//    range is tested. (Until 2026-11-23 every cell within r + 1 of the line tried all samples within r + 1 of its
+//    projection, about 30, so the cells just outside the swath, which no sample reaches, cost the most.)
 // The samples that are tested use exactly the original expressions (same float sample point, same distance test),
-// so the marked cells are exactly those the disc stamps marked. tests.cpp checks this bit for bit against the
-// disc version (lane_stamp_matches_disc_stamps).
+// and the samples skipped provably fail that test, so the marked cells are exactly those the disc stamps marked.
+// tests.cpp checks this bit for bit against the disc version (lane_stamp_matches_disc_stamps, and
+// lane_stamp_matches_disc_stamps_on_the_edge for cells right on the swath's edge).
 void stampLaneCoverage(const SweepLane& lane, const GridRect& area, std::vector<std::uint8_t>& covered) {
     const float r = LANE_COVER_RADIUS, r2 = r * r;
-    const float reach = r + 1.0f;   // Search margin: comfortably more than r (see above)
+    constexpr float MARGIN = 0.1f;          // Allowance for float rounding (see above), far larger than it
+    const float reach = r + MARGIN;         // No sample is within r of a cell further than this from the line
+    const float reach2 = reach * reach;
+    // Cells within sqrt(inner2) of the line (and level with the run) are certainly covered (see the loop below)
+    const float inner2 = (r - MARGIN) * (r - MARGIN) - 0.25f * RAY_STEP * RAY_STEP;
     const int w = area.x1 - area.x0;
     std::vector<Vec2> samples;   // Sample points of the current run (reused between runs)
     for (size_t i = 0; i + 1 < lane.pts.size(); i += 2) {
@@ -133,16 +146,14 @@ void stampLaneCoverage(const SweepLane& lane, const GridRect& area, std::vector<
         // The run's sample points, worked out once with exactly the original expression
         samples.resize(static_cast<size_t>(steps) + 1);
         for (int s = 0; s <= steps; ++s) samples[s] = a + (b - a) * (static_cast<float>(s) / steps);
-        auto sample = [&](int s) { return samples[s]; };
 
         // A (near) zero-length run has no direction to project onto: stamp its samples as discs
         if (len < 1e-3f) {
-            for (int s = 0; s <= steps; ++s) stampDisc(sample(s), area, covered);
+            for (int s = 0; s <= steps; ++s) stampDisc(samples[s], area, covered);
             continue;
         }
         const Vec2 dir = (b - a) / len;                    // Unit vector along the run
         const float samplesPerCell = steps / len;          // Sample index advance per cell along the run
-        const int span = static_cast<int>(std::ceil(reach * samplesPerCell)) + 1;   // Samples either side to try
 
         // Cells whose centres could be within reach: the run's bounding box grown by `reach`, clipped to area
         const int x0 = std::max(area.x0, static_cast<int>(std::floor(std::min(a.x, b.x) - reach)));
@@ -160,21 +171,33 @@ void stampLaneCoverage(const SweepLane& lane, const GridRect& area, std::vector<
                 rx0 = std::max(x0, static_cast<int>(std::floor(std::min(xa, xb))) - 1);
                 rx1 = std::min(x1, static_cast<int>(std::ceil(std::max(xa, xb))) + 1);
             }
+            std::uint8_t* const row = covered.data() + static_cast<size_t>(y - area.y0) * w - area.x0;
             for (int x = rx0; x <= rx1; ++x) {
-                std::uint8_t& cov = covered[(y - area.y0) * w + (x - area.x0)];
+                std::uint8_t& cov = row[x];
                 if (cov) continue;                                     // Already covered (by this or another lane)
                 const Vec2 p(x + 0.5f, y + 0.5f), rel = p - a;
-                const float along = rel.x * dir.x + rel.y * dir.y;     // Distance along the run from a
                 const float across = rel.x * dir.y - rel.y * dir.x;    // Signed distance from the run's line
-                if (std::fabs(across) > reach) continue;               // Out of reach of every sample
-                if (along < -reach || along > len + reach) continue;   // Beyond either end, out of reach
-                // Samples nearest the projection first (most covered cells hit on the first test)
-                const int mid = std::clamp(static_cast<int>(std::lround(along * samplesPerCell)), 0, steps);
-                for (int k = 0; k <= span; ++k) {
-                    const int lo = mid - k, hi = mid + k;
-                    if (lo >= 0 && sqDist(p, sample(lo)) <= r2) { cov = 1; break; }
-                    if (k > 0 && hi <= steps && sqDist(p, sample(hi)) <= r2) { cov = 1; break; }
-                    if (lo < 0 && hi > steps) break;                   // No samples left on either side
+                const float acrossSq = across * across;
+                if (acrossSq > reach2) continue;                       // Out of reach of every sample
+                const float along = rel.x * dir.x + rel.y * dir.y;     // Distance along the run from a
+                // Well inside the swath: the nearest sample is at most half a step (RAY_STEP / 2) along from the
+                // cell's projection, so within sqrt(across^2 + (RAY_STEP / 2)^2) <= r - MARGIN of the cell, and
+                // the original float test certainly passes for it. Mark the cell without testing any sample.
+                if (acrossSq <= inner2 && along >= 0.0f && along <= len) { cov = 1; continue; }
+                // Near the swath's edge or past an end: the samples that could be within r are those within h
+                // of the projection (see the header), as an index range widened by one sample each side and
+                // clipped to the run's samples
+                const float h = std::sqrt(reach2 - acrossSq);
+                const float sLo = (along - h) * samplesPerCell, sHi = (along + h) * samplesPerCell;
+                if (sHi < -1.0f || sLo > steps + 1.0f) continue;       // Beyond either end, out of reach
+                const int lo = std::max(0, static_cast<int>(std::floor(sLo)) - 1);
+                const int hi = std::min(steps, static_cast<int>(std::ceil(sHi)) + 1);
+                // Try the sample nearest the projection first, then outwards (the order only affects how soon
+                // a hit stops the search, not whether there is one)
+                const int mid = std::clamp(static_cast<int>(std::floor(along * samplesPerCell + 0.5f)), lo, hi);
+                for (int k = 0; mid - k >= lo || mid + k <= hi; ++k) {
+                    if (mid - k >= lo && sqDist(p, samples[mid - k]) <= r2) { cov = 1; break; }
+                    if (k > 0 && mid + k <= hi && sqDist(p, samples[mid + k]) <= r2) { cov = 1; break; }
                 }
             }
         }

@@ -1919,6 +1919,53 @@ TEST(lane_stamp_matches_disc_stamps) {
     CHECK(marked > 0);
 }
 
+// The stamp now tests a cell only against the samples within h = sqrt((r + 0.1)^2 - across^2) of its projection
+// onto the run (2026-11-23). The cells where skipping a sample could go wrong are the ones right on the swath's
+// edge, where the nearest sample is almost exactly LANE_COVER_RADIUS away. Lanes on whole and half-cell
+// coordinates put cell centres EXACTLY r = 6.5 cells across from the run (and exactly on samples along it), and
+// lanes nudged by a few float ulps put them a hair inside or outside; long lanes far out on a 2000-cell grid
+// have the largest rounding. Every stamp must match the disc stamps bit for bit.
+TEST(lane_stamp_matches_disc_stamps_on_the_edge) {
+    std::mt19937 rng(23);
+    std::uniform_int_distribution<int> cell(20, 1950);
+    std::uniform_int_distribution<int> lenCells(0, 400), nudge(-3, 3), half(0, 1), axis(0, 5);
+    const GridRect area{ 0, 0, 2000, 2000 };   // Whole 2000 x 2000 grid, coordinates up to 2000 (most rounding)
+    const size_t cells = static_cast<size_t>(area.x1 - area.x0) * (area.y1 - area.y0);
+    std::vector<std::uint8_t> fast(cells), original(cells);
+    int lanes = 0, mismatched = 0;
+    long long marked = 0;
+    // Moves a float by k units in the last place (k may be negative), to sit just either side of the edge
+    auto ulps = [](float v, int k) {
+        for (; k > 0; --k) v = std::nextafter(v, 1e9f);
+        for (; k < 0; ++k) v = std::nextafter(v, -1e9f);
+        return v;
+    };
+    for (int k = 0; k < 600; ++k) {
+        // Start on a whole or half cell, nudged a few ulps; run along an axis, a diagonal or a 1:2 slope
+        const float sx = ulps(cell(rng) + 0.5f * half(rng), nudge(rng));
+        const float sy = ulps(cell(rng) + 0.5f * half(rng), nudge(rng));
+        static const int DIRS[6][2] = { {1, 0}, {0, 1}, {-1, 0}, {1, 1}, {1, -2}, {2, 1} };
+        const int* d = DIRS[axis(rng)];
+        const float l = static_cast<float>(lenCells(rng));
+        const float norm = std::sqrt(static_cast<float>(d[0] * d[0] + d[1] * d[1]));
+        const Vec2 a(sx, sy);
+        Vec2 b(std::clamp(sx + d[0] * l / norm, 1.0f, 1999.0f), std::clamp(sy + d[1] * l / norm, 1.0f, 1999.0f));
+        b = Vec2(ulps(b.x, nudge(rng)), ulps(b.y, nudge(rng)));
+        SweepLane lane;
+        lane.pts = { a, b };
+        std::fill(fast.begin(), fast.end(), 0);
+        std::fill(original.begin(), original.end(), 0);
+        stampLaneCoverage(lane, area, fast);
+        ref::stampLane(lane, area, original);
+        mismatched += fast != original;
+        for (std::uint8_t v : original) marked += v;
+        ++lanes;
+    }
+    std::printf("  (%d edge lanes, %lld cells marked, %d lanes differ)\n", lanes, marked, mismatched);
+    CHECK(mismatched == 0);
+    CHECK(marked > 0);
+}
+
 // Gap fill now only re-floods the previous pass's patches (lanes only remove gaps, never add them). The lanes
 // it adds must be exactly the ones the original whole-window scan added, in the same places and order.
 TEST(gap_fill_matches_full_window_scan) {
