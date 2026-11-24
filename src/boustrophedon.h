@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include "distance_transform.h"
 #include "mission_types.h"
@@ -71,11 +72,53 @@ private:
     Vec2 start_, end_;        // Where the lap starts (first lane's entry) and where it currently ends
 };
 
+// Remembers every estimated sector lap worked out during one re-plan, so the sector split (which asks for the
+// same laps again and again: a binary search of ~20 greedy fills per split, and many splits per re-plan while
+// the fleet is sized) works each one out only once.
+//
+// For each first lane it keeps one SectorLapBuilder and the laps it has produced so far, lap(first, first),
+// lap(first, first + 1), ..., extended only as far as a question needs. Every value is the builder's own
+// result, so lap() == estimateSectorLength() bit for bit, and greedyLast() returns exactly what the lane-by-lane
+// greedy fill (grow while lapWithNext() <= limit) returned. The lanes must not change while the table is in use
+// (call reset() after they do, e.g. after loops are joined).
+class SectorLapTable {
+public:
+    explicit SectorLapTable(const std::vector<SweepLane>& lanes);
+
+    // Estimated lap of lanes[first..last] (cells), == estimateSectorLength(lanes, first, last) bit for bit
+    float lap(int first, int last);
+
+    // Last lane of a sector that starts at `first` and greedily takes lanes while its lap stays <= limit,
+    // stopping at lane `bound` at the latest. The first lane is always taken, so the result is >= first.
+    int greedyLast(int first, int bound, float limit);
+
+    // Forgets every lap (the lanes have changed)
+    void reset();
+
+private:
+    // Laps of the sectors that start at one lane, as far as they have been worked out
+    struct Row {
+        explicit Row(const std::vector<SweepLane>& lanes, int first) : builder(lanes, first) {}
+        SectorLapBuilder builder;          // Holds lanes[first..first + laps.size() - 1]
+        std::vector<float> laps;           // laps[k] = lap(first, first + k)
+        std::vector<float> runMax;         // runMax[k] = largest of laps[1..k] (runMax[0] unused): never falls,
+                                           // so the first lap over a limit can be found by binary search
+    };
+    Row& row(int first);                   // Creates the row on first use
+    void grow(Row& r);                     // Adds the next lane to a row
+
+    const std::vector<SweepLane>& lanes_;
+    std::vector<std::unique_ptr<Row>> rows_;   // One per first lane, created lazily
+};
+
 // Sector of the nearest lane for every inner-band cell (inside `area`), -1 elsewhere. Found by a breadth-first
 // search through the band from every lane's cells, so each cell goes to the lane it can be reached from first.
 // The second form fills `owner`, which must already be GRID_WIDTH x GRID_HEIGHT and -1 everywhere (e.g. a buffer
 // recycled from an earlier plan and cleared), instead of allocating a new whole-grid array.
+// bandCells: the number of zone-1 cells inside `area` if the caller already knows it (the planner counts them
+// while classifying), else -1. When the search reaches that many cells every band cell has an owner, so the last
+// stage (a scan of the whole area for band cells cut off from every lane) is skipped: it would change nothing.
 void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
-                   const GridRect& area, std::vector<int>& owner);
+                   const GridRect& area, std::vector<int>& owner, long long bandCells = -1);
 std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
-                               const GridRect& area);
+                               const GridRect& area, long long bandCells = -1);

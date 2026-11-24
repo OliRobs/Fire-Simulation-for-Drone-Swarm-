@@ -68,30 +68,30 @@ namespace {
     // estimated lap still fits). A sector's estimate only grows as lanes are added (triangle inequality on the
     // return leg), so the greedy fill is exact for a given limit. Always returns exactly
     // min(parts, number of lanes) sectors: if the best split needs fewer, the largest ones are cut in two.
-    std::vector<LaneRange> splitGroup(const std::vector<SweepLane>& lanes, int first, int last, int parts) {
+    // Laps come from `laps`, which remembers them across the binary search and across the many splits of one
+    // re-plan; each is the same value, bit for bit, that estimateSectorLength gives, so the split is unchanged.
+    std::vector<LaneRange> splitGroup(SectorLapTable& laps, int first, int last, int parts) {
         const int n = last - first + 1;
         parts = std::max(1, std::min(parts, n));
 
-        // Greedy fill for limit T; returns the sectors (may be more than `parts` if T is too small)
+        // Greedy fill for limit T; returns the sectors (may be more than `parts` if T is too small). Each
+        // sector takes lanes while its lap still fits: SectorLapTable::greedyLast gives the same last lane as
+        // growing a SectorLapBuilder while lapWithNext() <= T.
         auto fill = [&](float T) {
             std::vector<LaneRange> out;
             int s = first;
             while (s <= last) {
-                // Grow the sector one lane at a time while its lap still fits. The builder keeps the running
-                // length, so each test costs one lane rather than re-adding the whole sector (same result
-                // as estimateSectorLength(lanes, s, e + 1), bit for bit)
-                SectorLapBuilder b(lanes, s);
-                while (b.last() + 1 <= last && b.lapWithNext() <= T) b.addNext();
-                out.emplace_back(s, b.last());
-                s = b.last() + 1;
+                const int e = laps.greedyLast(s, last, T);
+                out.emplace_back(s, e);
+                s = e + 1;
             }
             return out;
         };
 
         // The lap can't be shorter than the longest single-lane sector, nor longer than the whole group
         float lo = 0.0f;
-        for (int i = first; i <= last; ++i) lo = std::max(lo, estimateSectorLength(lanes, i, i));
-        float hi = std::max(lo, estimateSectorLength(lanes, first, last));
+        for (int i = first; i <= last; ++i) lo = std::max(lo, laps.lap(i, i));
+        float hi = std::max(lo, laps.lap(first, last));
         for (int it = 0; it < 40 && hi - lo > 0.5f; ++it) {
             const float mid = 0.5f * (lo + hi);
             if (static_cast<int>(fill(mid).size()) <= parts) hi = mid; else lo = mid;
@@ -104,7 +104,7 @@ namespace {
             float worst = -1.0f;
             for (int i = 0; i < static_cast<int>(out.size()); ++i) {
                 if (out[i].second == out[i].first) continue;
-                const float l = estimateSectorLength(lanes, out[i].first, out[i].second);
+                const float l = laps.lap(out[i].first, out[i].second);
                 if (l > worst) { worst = l; pick = i; }
             }
             if (pick < 0) break;
@@ -117,9 +117,9 @@ namespace {
     }
 
     // Longest estimated lap among some sectors (cells)
-    float longestEstimate(const std::vector<SweepLane>& lanes, const std::vector<LaneRange>& sectors) {
+    float longestEstimate(SectorLapTable& laps, const std::vector<LaneRange>& sectors) {
         float worst = 0.0f;
-        for (const LaneRange& r : sectors) worst = std::max(worst, estimateSectorLength(lanes, r.first, r.second));
+        for (const LaneRange& r : sectors) worst = std::max(worst, laps.lap(r.first, r.second));
         return worst;
     }
 
@@ -186,11 +186,11 @@ namespace {
     // Gives each group one drone, then each further drone to the group whose longest sector is currently the
     // longest. For a min-max goal with laps that only shrink as drones are added, this greedy is optimal.
     // A group never gets more drones than it has lanes.
-    std::vector<int> shareDrones(const std::vector<SweepLane>& lanes, const std::vector<LaneRange>& groups, int k) {
+    std::vector<int> shareDrones(SectorLapTable& laps, const std::vector<LaneRange>& groups, int k) {
         const int g = static_cast<int>(groups.size());
         std::vector<int> share(g, 1);
         std::vector<float> worst(g);
-        for (int i = 0; i < g; ++i) worst[i] = longestEstimate(lanes, splitGroup(lanes, groups[i].first, groups[i].second, 1));
+        for (int i = 0; i < g; ++i) worst[i] = longestEstimate(laps, splitGroup(laps, groups[i].first, groups[i].second, 1));
         for (int left = k - g; left > 0; --left) {
             int pick = -1;
             for (int i = 0; i < g; ++i) {
@@ -199,17 +199,17 @@ namespace {
             }
             if (pick < 0) break;
             ++share[pick];
-            worst[pick] = longestEstimate(lanes, splitGroup(lanes, groups[pick].first, groups[pick].second, share[pick]));
+            worst[pick] = longestEstimate(laps, splitGroup(laps, groups[pick].first, groups[pick].second, share[pick]));
         }
         return share;
     }
 
     // The sectors for a given share of drones per group, in sequence order
-    std::vector<LaneRange> sectorsFor(const std::vector<SweepLane>& lanes, const std::vector<LaneRange>& groups,
+    std::vector<LaneRange> sectorsFor(SectorLapTable& laps, const std::vector<LaneRange>& groups,
                                       const std::vector<int>& share) {
         std::vector<LaneRange> out;
         for (size_t i = 0; i < groups.size(); ++i) {
-            const std::vector<LaneRange> s = splitGroup(lanes, groups[i].first, groups[i].second, share[i]);
+            const std::vector<LaneRange> s = splitGroup(laps, groups[i].first, groups[i].second, share[i]);
             out.insert(out.end(), s.begin(), s.end());
         }
         return out;
@@ -220,11 +220,11 @@ namespace {
     // ------------------------------------------------------------------------
     // Fewest sectors this group can be split into with every estimated lap within `limit` cells (capped at
     // `most`, or the number of lanes if smaller)
-    int dronesNeeded(const std::vector<SweepLane>& lanes, LaneRange group, float limit, int most) {
+    int dronesNeeded(SectorLapTable& laps, LaneRange group, float limit, int most) {
         const int n = group.second - group.first + 1;
         most = std::max(1, std::min(most, n));
         for (int k = 1; k < most; ++k) {
-            if (longestEstimate(lanes, splitGroup(lanes, group.first, group.second, k)) <= limit) return k;
+            if (longestEstimate(laps, splitGroup(laps, group.first, group.second, k)) <= limit) return k;
         }
         return most;
     }
@@ -356,6 +356,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     // ------------------------------------------------------------------------
     std::vector<std::uint8_t>& zone = plan.zone;
     bool anyCells = false;     // Any surveyable cell at all (inner band or outer zone)
+    long long bandCells = 0;   // Inner-band cells (zone 1): lets the ownership map skip its final scan (Step 5)
     std::vector<int> outer;    // Outer-zone cells (the ACO region), in scan order: the only cells the Voronoi splits
 
     // Only the perimeter transform's window can hold search-area cells: outside it every cell reads INF (for
@@ -372,6 +373,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
             const double d2 = perimEdt.squaredDistance(i);
             if (d2 < innerHi) {
                 zone[i] = 1; // Inner zone cell (swept by lanes, not split into Voronoi regions)
+                ++bandCells;
             }
             else if (d2 < outerHi) {
                 zone[i] = 2; // Outer zone cell (ACO region)
@@ -487,8 +489,11 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         // 1-2. Estimate: per loop, the fewest contiguous sectors whose estimated laps (lanes, steps between
         //      lanes, straight return leg) all fit in the target; their sum is the drones needed
         std::vector<LaneRange> groups = laneGroups(plan.lanes);
+        // Every estimated lap this re-plan asks for, worked out once (plan.lanes must not change while it is
+        // in use, so it is reset after loops are joined below)
+        SectorLapTable lapTable(plan.lanes);
         int needed = 0;
-        for (const LaneRange& g : groups) needed += dronesNeeded(plan.lanes, g, targetCells, MAX_SWEEP_DRONES);
+        for (const LaneRange& g : groups) needed += dronesNeeded(lapTable, g, targetCells, MAX_SWEEP_DRONES);
 
         // Drones to plan for: never fewer than the fleet has now (shrinking is the controller's call, made
         // slowly) and within the configured range
@@ -498,6 +503,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         if (static_cast<int>(groups.size()) > k) {
             joinSmallLoops(plan.lanes, k);
             groups = laneGroups(plan.lanes);
+            lapTable.reset();   // Lanes moved: every remembered lap may be stale
         }
 
         // Builds the real fire-safe routes for one share of drones per loop, and times every lap
@@ -509,7 +515,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         };
         auto build = [&](const std::vector<int>& share) {
             Split sp;
-            sp.sectors = sectorsFor(plan.lanes, groups, share);
+            sp.sectors = sectorsFor(lapTable, groups, share);
             for (int s = 0; s < static_cast<int>(sp.sectors.size()); ++s) {
                 sp.routes.push_back(safeLoop(planner, sectorWaypoints(plan.lanes, sp.sectors[s].first, sp.sectors[s].second)));
                 sp.laps.push_back(flightSeconds(closedRouteLength(sp.routes.back())));
@@ -525,7 +531,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         };
 
         // 3. Split: share the k drones between loops (worst loop first) and split each loop min-max
-        std::vector<int> share = shareDrones(plan.lanes, groups, k);
+        std::vector<int> share = shareDrones(lapTable, groups, k);
 
         // 4. Check: build the real fire-safe routes and time them. If a lap is over the cap, add a drone to that
         //    lap's loop and split again (at most 3 extra passes)
@@ -549,7 +555,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
             float best = std::numeric_limits<float>::max();
             for (int g = 0; g < static_cast<int>(groups.size()); ++g) {
                 if (share[g] <= 1) continue;
-                const float l = longestEstimate(plan.lanes, splitGroup(plan.lanes, groups[g].first, groups[g].second, share[g] - 1));
+                const float l = longestEstimate(lapTable, splitGroup(lapTable, groups[g].first, groups[g].second, share[g] - 1));
                 if (l < best) { best = l; from = g; }
             }
             if (from >= 0) {
@@ -584,11 +590,11 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
 
     // Ownership: each band cell to its nearest lane's sector, then sectors to drones by shared land
     if (ownerBuffer.size() == static_cast<size_t>(N)) {
-        buildOwnerMap(plan.lanes, zone, win, ownerBuffer);   // Recycled buffer, already all -1
+        buildOwnerMap(plan.lanes, zone, win, ownerBuffer, bandCells);   // Recycled buffer, already all -1
         plan.owner = std::move(ownerBuffer);
     }
     else {
-        plan.owner = buildOwnerMap(plan.lanes, zone, win);
+        plan.owner = buildOwnerMap(plan.lanes, zone, win, bandCells);
     }
     plan.sectorDrone = matchSectors(plan, plan.sweepRoutes, fleet, win);
 
