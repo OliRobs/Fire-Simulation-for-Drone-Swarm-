@@ -2068,6 +2068,39 @@ TEST(owner_map_matches_original_flood) {
     CHECK(cutOff > 0);   // The cut-down areas really leave band pieces the flood cannot reach
 }
 
+// buildOwnerMap can be told how many band cells the area holds (the planner counts them while classifying) and
+// then skips its final scan for cut-off cells when the flood has already reached them all. The map must be
+// identical with and without the count, both when nothing is cut off (scan skipped) and when an island of band
+// cells is cut off from every lane (scan still runs).
+TEST(owner_map_band_count_skip_is_exact) {
+    int skippedCases = 0, scannedCases = 0;
+    long long differ = 0;
+    for (const auto& fire : exactnessFires()) {
+        SweepSetup s(fire);
+        const GridRect w = s.plan.bounds;
+        std::vector<std::uint8_t> island = s.plan.zone;   // As owner_map_matches_original_flood: a far island
+        for (int y = w.y0 + 2; y < w.y0 + 12; ++y)
+            for (int x = w.x0 + 2; x < w.x0 + 12; ++x) island[at(x, y)] = 1;
+        for (const std::vector<std::uint8_t>* zone : { &s.plan.zone, &island }) {
+            long long band = 0;
+            for (int y = w.y0; y < w.y1; ++y)
+                for (int x = w.x0; x < w.x1; ++x) band += (*zone)[at(x, y)] == 1;
+            const std::vector<int> plain = buildOwnerMap(s.plan.lanes, *zone, w);          // Always scans
+            const std::vector<int> counted = buildOwnerMap(s.plan.lanes, *zone, w, band);  // May skip the scan
+            for (int i = 0; i < N; ++i) differ += plain[i] != counted[i];
+            // Every band cell has an owner either way (so a skipped scan really had nothing left to do)
+            long long unowned = 0;
+            for (int y = w.y0; y < w.y1; ++y)
+                for (int x = w.x0; x < w.x1; ++x) unowned += (*zone)[at(x, y)] == 1 && counted[at(x, y)] < 0;
+            CHECK(unowned == 0 || s.plan.lanes.empty());
+            (zone == &island ? scannedCases : skippedCases) += 1;
+        }
+    }
+    std::printf("  (%d plain and %d cut-off cases; %lld cells differ)\n", skippedCases, scannedCases, differ);
+    CHECK(differ == 0);
+    CHECK(skippedCases > 0 && scannedCases > 0);
+}
+
 // The perimeter-line trace now works out each sample once and slides two row buffers down the window. The
 // loops must be exactly those of the original, which worked out all four corners of every square.
 TEST(perimeter_trace_matches_per_corner_evaluation) {
@@ -2222,6 +2255,160 @@ TEST(sector_lap_builder_matches_plain_sum) {
         }
     }
     CHECK(mismatches == 0);
+}
+
+// The sector split now reads its laps from a SectorLapTable, which remembers them and finds each greedy sector's
+// last lane by binary search over the running maximum of the laps. Both must match the original code bit for
+// bit: every lap(first, last) must equal estimateSectorLength, and greedyLast must return exactly the lane the
+// original lane-by-lane fill stopped at (grow a SectorLapBuilder while lapWithNext() <= limit). Limits are
+// chosen to sit exactly on lap values and one float step either side, where a rounding slip would show, as well
+// as at random; questions come in random order so rows are grown lazily in every pattern; and the table is reset
+// and reused after the lanes change, as the planner does after joining loops.
+TEST(sector_lap_table_matches_lane_by_lane_fill) {
+    // Reference: the greedy fill as it was in splitGroup before the table
+    auto greedyRef = [](const std::vector<SweepLane>& lanes, int first, int bound, float limit) {
+        SectorLapBuilder b(lanes, first);
+        while (b.last() + 1 <= bound && b.lapWithNext() <= limit) b.addNext();
+        return b.last();
+    };
+
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> coord(0.0f, 1500.0f);
+    auto randomLanes = [&](int n) {
+        std::vector<SweepLane> lanes(n);
+        for (SweepLane& l : lanes) {
+            const int pts = 2 * (1 + static_cast<int>(rng() % 3));
+            for (int k = 0; k < pts; ++k) l.pts.push_back(Vec2(coord(rng), coord(rng)));
+            if (rng() % 5 == 0) l.pts[1] = l.pts[0];   // A single-cell run
+        }
+        return lanes;
+    };
+
+    long long lapsChecked = 0, fillsChecked = 0, mismatches = 0;
+    std::vector<SweepLane> lanes = randomLanes(60);
+    SectorLapTable table(lanes);
+    for (int round = 0; round < 3; ++round) {
+        const int n = static_cast<int>(lanes.size());
+        for (int q = 0; q < 4000; ++q) {
+            const int first = static_cast<int>(rng() % n);
+            const int bound = first + static_cast<int>(rng() % (n - first));
+            // A limit on a real lap from this first lane, one float step either side of it, or random
+            const float onLap = estimateSectorLength(lanes, first, first + static_cast<int>(rng() % (n - first)));
+            float limit = onLap;
+            switch (rng() % 4) {
+            case 0: break;
+            case 1: limit = std::nextafter(onLap, 0.0f); break;
+            case 2: limit = std::nextafter(onLap, std::numeric_limits<float>::max()); break;
+            default: limit = std::uniform_real_distribution<float>(0.0f, 20000.0f)(rng); break;
+            }
+            if (table.greedyLast(first, bound, limit) != greedyRef(lanes, first, bound, limit)) ++mismatches;
+            ++fillsChecked;
+            if (table.lap(first, bound) != estimateSectorLength(lanes, first, bound)) ++mismatches;
+            ++lapsChecked;
+        }
+        // Infinite and NaN limits take the plain path and must still agree
+        for (float limit : { std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN() }) {
+            for (int first = 0; first < n; first += 7) {
+                if (table.greedyLast(first, n - 1, limit) != greedyRef(lanes, first, n - 1, limit)) ++mismatches;
+                ++fillsChecked;
+            }
+        }
+        // The lanes change (same count, as after joining loops): reset and carry on with the new ones
+        lanes = randomLanes(n);
+        table.reset();
+    }
+    std::printf("  (%lld laps and %lld greedy fills compared; %lld differ)\n", lapsChecked, fillsChecked, mismatches);
+    CHECK(mismatches == 0);
+}
+
+// The planner's sector split (now read from a SectorLapTable) must give exactly the sectors the original
+// split gives on the plan's final lanes: for each lane group, with the number of sectors the plan gave it, the
+// original min-max split (binary search on the lap, greedy fill lane by lane, kept here unchanged) must cut the
+// group at the same lanes. Run on the exactness fires and on twelve separate spot fires of different sizes: more
+// loops than MAX_SWEEP_DRONES, so the planner joins small loops (moving lanes) and resets its lap table. (After a
+// join every group has exactly one drone, so today the split there is the whole group either way; the case is
+// covered so that a future change to the sizing rules can't use stale laps unnoticed.)
+TEST(sweep_sectors_match_the_original_split) {
+    using Range = std::pair<int, int>;
+    // Original splitGroup (before SectorLapTable), word for word apart from the name
+    auto splitRef = [](const std::vector<SweepLane>& lanes, int first, int last, int parts) {
+        const int n = last - first + 1;
+        parts = std::max(1, std::min(parts, n));
+        auto fill = [&](float T) {
+            std::vector<Range> out;
+            int s = first;
+            while (s <= last) {
+                SectorLapBuilder b(lanes, s);
+                while (b.last() + 1 <= last && b.lapWithNext() <= T) b.addNext();
+                out.emplace_back(s, b.last());
+                s = b.last() + 1;
+            }
+            return out;
+        };
+        float lo = 0.0f;
+        for (int i = first; i <= last; ++i) lo = std::max(lo, estimateSectorLength(lanes, i, i));
+        float hi = std::max(lo, estimateSectorLength(lanes, first, last));
+        for (int it = 0; it < 40 && hi - lo > 0.5f; ++it) {
+            const float mid = 0.5f * (lo + hi);
+            if (static_cast<int>(fill(mid).size()) <= parts) hi = mid; else lo = mid;
+        }
+        std::vector<Range> out = fill(hi);
+        while (static_cast<int>(out.size()) < parts) {
+            int pick = -1;
+            float worst = -1.0f;
+            for (int i = 0; i < static_cast<int>(out.size()); ++i) {
+                if (out[i].second == out[i].first) continue;
+                const float l = estimateSectorLength(lanes, out[i].first, out[i].second);
+                if (l > worst) { worst = l; pick = i; }
+            }
+            if (pick < 0) break;
+            const Range r = out[pick];
+            const int mid = (r.first + r.second) / 2;
+            out[pick] = Range(r.first, mid);
+            out.insert(out.begin() + pick + 1, Range(mid + 1, r.second));
+        }
+        return out;
+    };
+
+    std::vector<std::vector<std::uint8_t>> fires = exactnessFires();
+    // 4 x 3 spot fires, 300 cells (3 km) apart: twelve perimeter loops, of different sizes (radius 2 to 13 cells)
+    // so that no two loops have the same lanes
+    std::vector<std::uint8_t> spots(N, 0);
+    int radius = 2;
+    for (int dx : { -450, -150, 150, 450 })
+        for (int dy : { -300, 0, 300 }) {
+            const auto d = discFire(CX + dx, CY + dy, radius++);
+            for (int i = 0; i < N; ++i) spots[i] |= d[i];
+        }
+    fires.push_back(spots);
+
+    int groupsChecked = 0, differ = 0;
+    bool joined = false;
+    for (const auto& fire : fires) {
+        SweepSetup s(fire);
+        const std::vector<SweepLane>& lanes = s.plan.lanes;
+        if (lanes.empty()) continue;
+        // Lane groups (contiguous runs sharing a loop id) and the plan's sectors in each (contiguous runs of
+        // lanes sharing a sector)
+        std::vector<Range> groups;
+        for (int i = 0; i < static_cast<int>(lanes.size()); ++i) {
+            if (groups.empty() || lanes[i].loop != lanes[groups.back().first].loop) groups.emplace_back(i, i);
+            else groups.back().second = i;
+        }
+        if (s.plan.perimeterLoops.size() > groups.size()) joined = true;   // Loops were joined
+        for (const Range& g : groups) {
+            std::vector<Range> planned;
+            for (int i = g.first; i <= g.second; ++i) {
+                if (planned.empty() || lanes[i].sector != lanes[planned.back().first].sector) planned.emplace_back(i, i);
+                else planned.back().second = i;
+            }
+            differ += splitRef(lanes, g.first, g.second, static_cast<int>(planned.size())) != planned;
+            ++groupsChecked;
+        }
+    }
+    std::printf("  (%d lane groups checked; %d differ; loops joined: %s)\n", groupsChecked, differ, joined ? "yes" : "no");
+    CHECK(differ == 0);
+    CHECK(joined);   // The spot fires really make the planner join loops
 }
 
 TEST(sweep_laps_stay_within_the_cap) {

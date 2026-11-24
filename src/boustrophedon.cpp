@@ -444,18 +444,93 @@ float SectorLapBuilder::lapWithNext() const {
 void SectorLapBuilder::addNext() { extended(++last_, len_, end_); }
 
 // ----------------------------------------------------------------------------
+// Memoised Sector Laps (SectorLapTable)
+// ----------------------------------------------------------------------------
+// The sector split binary-searches a lap limit, and every step of that search re-runs a greedy fill that grows
+// sectors lane by lane from the same few first lanes. Laps are pure functions of (first, last) and the lanes, so
+// each is worked out once here and then only looked up. A row per first lane holds one SectorLapBuilder (the
+// only place the arithmetic lives) and the laps it has produced, so every value is bit for bit the one the
+// builder, and so estimateSectorLength, gives.
+SectorLapTable::SectorLapTable(const std::vector<SweepLane>& lanes) : lanes_(lanes) { reset(); }
+
+void SectorLapTable::reset() {
+    rows_.clear();
+    rows_.resize(lanes_.size());   // All empty: rows are created on first use
+}
+
+SectorLapTable::Row& SectorLapTable::row(int first) {
+    std::unique_ptr<Row>& r = rows_[static_cast<size_t>(first)];
+    if (!r) {
+        r = std::make_unique<Row>(lanes_, first);
+        r->laps.push_back(r->builder.lap());                          // laps[0]: the first lane alone
+        r->runMax.push_back(-std::numeric_limits<float>::infinity()); // Unused (the first lane is always taken)
+    }
+    return *r;
+}
+
+void SectorLapTable::grow(Row& r) {
+    r.builder.addNext();
+    const float l = r.builder.lap();   // Same value lapWithNext() gave before addNext() (tested bit for bit)
+    r.laps.push_back(l);
+    // A NaN lap (only possible with non-finite lane coordinates) fails every `<= limit` test, so for the
+    // running maximum it counts as +infinity, which fails every finite limit too
+    const float key = std::isnan(l) ? std::numeric_limits<float>::infinity() : l;
+    r.runMax.push_back(std::max(r.runMax.back(), key));
+}
+
+float SectorLapTable::lap(int first, int last) {
+    Row& r = row(first);
+    const size_t k = static_cast<size_t>(last - first);
+    while (r.laps.size() <= k) grow(r);
+    return r.laps[k];
+}
+
+// The original greedy fill was:
+//     SectorLapBuilder b(lanes, first);
+//     while (b.last() + 1 <= bound && b.lapWithNext() <= limit) b.addNext();
+//     return b.last();
+// i.e. it stops just before the first lane j in (first, bound] whose lap(first, j) is not <= limit. With a finite
+// limit, "some lap up to j fails" is exactly "the running maximum at j is > limit", and the running maximum never
+// falls, so the stopping lane among the laps already worked out is found by binary search. Past those, the row
+// grows one lane at a time, as the original did, until a lap fails or the bound is reached.
+int SectorLapTable::greedyLast(int first, int bound, float limit) {
+    if (bound <= first) return first;
+    Row& r = row(first);
+    const int need = bound - first;   // Highest k = last - first the fill may reach
+
+    if (std::isfinite(limit)) {
+        const int have = std::min(need, static_cast<int>(r.laps.size()) - 1);   // laps[1..have] known
+        const auto b = r.runMax.begin() + 1, e = r.runMax.begin() + 1 + have;
+        const auto it = std::upper_bound(b, e, limit);                         // First running max > limit
+        if (it != e) return first + static_cast<int>(it - r.runMax.begin()) - 1;
+        for (int k = have + 1; k <= need; ++k) {   // have < need here, so laps.size() == k before grow
+            grow(r);
+            if (!(r.laps[static_cast<size_t>(k)] <= limit)) return first + k - 1;
+        }
+        return bound;
+    }
+
+    // Infinite or NaN limit (never produced by the planner): the plain lane-by-lane test, for exactness
+    for (int k = 1; k <= need; ++k) {
+        if (r.laps.size() <= static_cast<size_t>(k)) grow(r);
+        if (!(r.laps[static_cast<size_t>(k)] <= limit)) return first + k - 1;
+    }
+    return bound;
+}
+
+// ----------------------------------------------------------------------------
 // Ownership Map
 // ----------------------------------------------------------------------------
 std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
-                               const GridRect& area) {
+                               const GridRect& area, long long bandCells) {
     std::vector<int> owner(static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT, -1);
-    buildOwnerMap(lanes, zone, area, owner);
+    buildOwnerMap(lanes, zone, area, owner, bandCells);
     return owner;
 }
 
 // Fills a caller-provided whole-grid array (all -1 on entry); only cells inside `area` are written
 void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
-                   const GridRect& area, std::vector<int>& owner) {
+                   const GridRect& area, std::vector<int>& owner, long long bandCells) {
     std::vector<int> queue;
 
     // Seed the search with every cell a lane run passes over
@@ -511,6 +586,11 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
             queue.push_back(ni);
         }
     }
+
+    // Every band cell enters the queue exactly once, when it is given an owner. If the queue holds as many cells
+    // as the area has band cells (the caller's count), none is left without an owner and the scan below would
+    // change nothing, so it is skipped. That is the usual case: cut-off slivers are rare.
+    if (bandCells >= 0 && static_cast<long long>(queue.size()) == bandCells) return;
 
     // Band cells cut off from every lane (a sliver beyond a gap in the band): nearest lane in a straight line
     for (int y = area.y0; y < area.y1; ++y) {
