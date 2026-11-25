@@ -528,9 +528,34 @@ std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::v
     return owner;
 }
 
-// Fills a caller-provided whole-grid array (all -1 on entry); only cells inside `area` are written
+// Fills a caller-provided whole-grid array (all -1 on entry); only cells inside `area` are written. The zone map
+// is read-only here, so the flood runs on a copy of it (the planner, which owns its zone map, calls
+// buildOwnerMapUsingZone directly and saves the copy).
 void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
                    const GridRect& area, std::vector<int>& owner, long long bandCells) {
+    std::vector<std::uint8_t> scratch = zone;
+    buildOwnerMapUsingZone(lanes, scratch, area, owner, bandCells);
+}
+
+// ----------------------------------------------------------------------------
+// Ownership Map, flooding through the caller's zone map
+// ----------------------------------------------------------------------------
+// The same map as buildOwnerMap, built the same way, but the flood keeps track of which band cells are still
+// free in the zone map itself instead of reading the owner array to find out.
+//
+// Why: the flood tries 8 neighbours of every band cell, and each try asked two questions, "is it a band cell?"
+// (one byte of `zone`) and "has it an owner yet?" (four bytes of `owner`, a second array). Marking each band
+// cell in `zone` as it is claimed (ZONE_CLAIMED) turns both into one question about one byte: a neighbour is
+// free exactly when its zone is still 1. That halves the arrays the flood reads, and the 4-byte owner array is
+// now only written, once per cell.
+//
+// Exactness: a cell is marked at the very moment it is given an owner (seeding or flood), so "zone == 1" here
+// means precisely "zone == 1 and owner < 0" in the original test. The cells, their order in the queue and the
+// sector each gets are therefore unchanged. Every marked cell is in the queue, so walking the queue afterwards
+// puts every mark back to 1, and the zone map is exactly as it was on entry before the final scan reads it.
+void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std::uint8_t>& zone,
+                            const GridRect& area, std::vector<int>& owner, long long bandCells) {
+    constexpr std::uint8_t ZONE_CLAIMED = 3;   // Band cell already given an owner (only while this function runs)
     std::vector<int> queue;
 
     // Seed the search with every cell a lane run passes over
@@ -543,7 +568,8 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
                 const int x = static_cast<int>(std::floor(p.x)), y = static_cast<int>(std::floor(p.y));
                 if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1) continue;
                 const int idx = y * GRID_WIDTH + x;
-                if (zone[idx] != 1 || owner[idx] >= 0) continue;
+                if (zone[idx] != 1) continue;   // Not a band cell, or already claimed
+                zone[idx] = ZONE_CLAIMED;
                 owner[idx] = l.sector;
                 queue.push_back(idx);
             }
@@ -560,7 +586,7 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
     queue.reserve(static_cast<size_t>(std::max(0, area.x1 - area.x0)) * std::max(0, area.y1 - area.y0));
     int offset[NUM_DIRS];
     for (int k = 0; k < NUM_DIRS; ++k) offset[k] = DY[k] * GRID_WIDTH + DX[k];
-    const std::uint8_t* const zp = zone.data();
+    std::uint8_t* const zp = zone.data();
     int* const op = owner.data();
     for (size_t head = 0; head < queue.size(); ++head) {
         const int idx = queue[head];
@@ -570,7 +596,8 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
             // Interior cell: all eight neighbours are inside the area
             for (int k = 0; k < NUM_DIRS; ++k) {
                 const int ni = idx + offset[k];
-                if (zp[ni] != 1 || op[ni] >= 0) continue;
+                if (zp[ni] != 1) continue;   // Not a band cell, or already claimed
+                zp[ni] = ZONE_CLAIMED;
                 op[ni] = sector;
                 queue.push_back(ni);
             }
@@ -581,11 +608,15 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
             const int nx = x + DX[k], ny = y + DY[k];
             if (nx < area.x0 || nx >= area.x1 || ny < area.y0 || ny >= area.y1) continue;
             const int ni = ny * GRID_WIDTH + nx;
-            if (zp[ni] != 1 || op[ni] >= 0) continue;
+            if (zp[ni] != 1) continue;   // Not a band cell, or already claimed
+            zp[ni] = ZONE_CLAIMED;
             op[ni] = sector;
             queue.push_back(ni);
         }
     }
+
+    // Put the zone map back as it was: every claimed cell is in the queue, and was a band cell (zone 1)
+    for (const int idx : queue) zp[idx] = 1;
 
     // Every band cell enters the queue exactly once, when it is given an owner. If the queue holds as many cells
     // as the area has band cells (the caller's count), none is left without an owner and the scan below would

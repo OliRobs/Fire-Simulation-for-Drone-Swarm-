@@ -2101,6 +2101,174 @@ TEST(owner_map_band_count_skip_is_exact) {
     CHECK(skippedCases > 0 && scannedCases > 0);
 }
 
+// The planner now builds the ownership map with buildOwnerMapUsingZone, which marks claimed band cells in the
+// zone map itself (one byte read per neighbour instead of the zone and owner arrays) and puts the marks back.
+// Checked on the test fires, with the planner's window and cut-down areas (many edge cells, pieces cut off from
+// every lane) and a far island of band cells:
+//  - every cell the flood reaches gets exactly the sector the original flood (ref::ownerSeedAndFlood) gave it;
+//  - cut-off band cells still get an owner from the final scan, and nothing outside the area is written;
+//  - the zone map is exactly as it was on entry, with and without the band count (which skips the final scan).
+TEST(owner_map_using_zone_matches_and_restores_zone) {
+    long long compared = 0, differ = 0, unowned = 0, zoneChanged = 0;
+    int cases = 0;
+    for (const auto& fire : exactnessFires()) {
+        SweepSetup s(fire);
+        const GridRect w = s.plan.bounds;
+        const int mx = (w.x0 + w.x1) / 2, my = (w.y0 + w.y1) / 2;
+        std::vector<std::uint8_t> island = s.plan.zone;   // As owner_map_matches_original_flood: a far island
+        for (int y = w.y0 + 2; y < w.y0 + 12; ++y)
+            for (int x = w.x0 + 2; x < w.x0 + 12; ++x) island[at(x, y)] = 1;
+        for (const std::vector<std::uint8_t>* zoneIn : { &s.plan.zone, &island }) {
+            for (const GridRect area : { w, GridRect{ w.x0, w.y0, mx, my }, GridRect{ mx - 37, w.y0, w.x1, my + 23 } }) {
+                // Band cells in the area, for the form that may skip the final scan
+                long long band = 0;
+                for (int y = area.y0; y < area.y1; ++y)
+                    for (int x = area.x0; x < area.x1; ++x) band += (*zoneIn)[at(x, y)] == 1;
+                std::vector<int> original(N, -1);
+                ref::ownerSeedAndFlood(s.plan.lanes, *zoneIn, area, original);
+                for (const long long count : { -1LL, band }) {
+                    std::vector<std::uint8_t> zone = *zoneIn;   // Marked and restored by the call
+                    std::vector<int> fast(N, -1);
+                    buildOwnerMapUsingZone(s.plan.lanes, zone, area, fast, count);
+                    zoneChanged += zone != *zoneIn;
+                    ++cases;
+                    for (int i = 0; i < N; ++i) {
+                        const int x = i % GRID_WIDTH, y = i / GRID_WIDTH;
+                        const bool inside = x >= area.x0 && x < area.x1 && y >= area.y0 && y < area.y1;
+                        if (!inside || (*zoneIn)[i] != 1) { differ += fast[i] != -1; continue; }
+                        if (original[i] >= 0) { differ += fast[i] != original[i]; ++compared; }
+                        else unowned += fast[i] < 0 && !s.plan.lanes.empty();
+                    }
+                }
+            }
+        }
+    }
+    std::printf("  (%d cases, %lld flooded cells compared; %lld differ, %lld left unowned, zone changed in %lld)\n",
+                cases, compared, differ, unowned, zoneChanged);
+    CHECK(differ == 0);
+    CHECK(unowned == 0);
+    CHECK(zoneChanged == 0);
+    CHECK(compared > 100000);
+}
+
+// Original (pre-2026-11-25) sector matching, kept word for word: it counted shared cells by scanning every cell of
+// the plan window and searched the fleet's ids for each one. The planner now counts over its list of band cells
+// with a sector-to-drone table worked out once.
+namespace ref {
+    std::vector<int> matchSectorsOriginal(const MissionPlan& plan, const std::vector<std::vector<Vec2>>& routes,
+                                          const SweepFleet& fleet, const GridRect& area) {
+        const int S = static_cast<int>(routes.size()), D = static_cast<int>(fleet.ids.size());
+        std::vector<int> result(S, -1);
+        std::vector<char> droneUsed(D, 0);
+        struct Pair { double score; int sector, drone; };
+        std::vector<Pair> pairs;
+        const MissionPlan* prev = fleet.previous;
+        if (prev && !prev->owner.empty() && !prev->sectorDrone.empty()) {
+            std::vector<long long> shared(static_cast<size_t>(S) * D, 0);
+            for (int y = area.y0; y < area.y1; ++y) {
+                for (int i = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; i < end; ++i) {
+                    const int s = plan.owner[i], ps = prev->owner[i];
+                    if (s < 0 || ps < 0 || ps >= static_cast<int>(prev->sectorDrone.size())) continue;
+                    const int id = prev->sectorDrone[ps];
+                    for (int d = 0; d < D; ++d) if (fleet.ids[d] == id) { ++shared[static_cast<size_t>(s) * D + d]; break; }
+                }
+            }
+            for (int s = 0; s < S; ++s)
+                for (int d = 0; d < D; ++d)
+                    if (shared[static_cast<size_t>(s) * D + d] > 0) pairs.push_back({ static_cast<double>(shared[static_cast<size_t>(s) * D + d]), s, d });
+            std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) {
+                return a.score > b.score || (a.score == b.score && (a.sector < b.sector || (a.sector == b.sector && a.drone < b.drone)));
+            });
+            for (const Pair& p : pairs) {
+                if (result[p.sector] >= 0 || droneUsed[p.drone]) continue;
+                result[p.sector] = fleet.ids[p.drone];
+                droneUsed[p.drone] = 1;
+            }
+        }
+        pairs.clear();
+        for (int s = 0; s < S; ++s) {
+            if (result[s] >= 0 || routes[s].empty()) continue;
+            for (int d = 0; d < D; ++d) {
+                if (droneUsed[d]) continue;
+                float best = std::numeric_limits<float>::max();
+                for (const Vec2& p : routes[s]) best = std::min(best, sqDist(p, fleet.positions[d]));
+                pairs.push_back({ best, s, d });
+            }
+        }
+        std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) {
+            return a.score < b.score || (a.score == b.score && (a.sector < b.sector || (a.sector == b.sector && a.drone < b.drone)));
+        });
+        for (const Pair& p : pairs) {
+            if (result[p.sector] >= 0 || droneUsed[p.drone]) continue;
+            result[p.sector] = fleet.ids[p.drone];
+            droneUsed[p.drone] = 1;
+        }
+        for (int s = 0; s < S; ++s) {
+            if (result[s] >= 0) continue;
+            for (int d = 0; d < D; ++d) if (!droneUsed[d]) { result[s] = fleet.ids[d]; droneUsed[d] = 1; break; }
+        }
+        return result;
+    }
+}   // namespace ref
+
+// Sector matching now counts shared land over the band cells only, with each previous sector's drone looked up
+// once. Over a growing, moving fire, each plan's sectorDrone must equal what the original window scan gives for the
+// same plan and fleet. Three kinds of fleet are tried at every step: the previous plan's drones in order; the same
+// drones reversed (so fleet index and id differ); and one drone retired plus one the previous plan never saw (so
+// some previous sectors have no drone, and one drone has no previous land).
+TEST(sector_matching_over_band_matches_window_scan) {
+    const std::vector<std::vector<std::uint8_t>> fires = {
+        discFire(CX, CY, 40), discFire(CX, CY, 55), bayFire(), discFire(CX + 30, CY - 20, 70), discFire(CX + 30, CY - 20, 90) };
+    int compared = 0, differ = 0, matchedByLand = 0;
+    MissionPlan prev;
+    int nextId = 100;
+    for (const auto& fire : fires) {
+        DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
+        live.compute(fire);
+        Perimeter perim(fire);
+        SafePlanner sp(live);
+        MissionPlan kept;   // The plan the next fire's fleets follow on from
+        for (int variant = 0; variant < 3; ++variant) {
+            SweepFleet fleet;
+            if (prev.sectorDrone.empty()) {
+                for (int i = 0; i < SWEEP_DRONES; ++i) { fleet.ids.push_back(i); fleet.positions.push_back(Vec2(0.5f, 0.5f)); }
+            }
+            else {
+                for (size_t k = 0; k < prev.sectorDrone.size(); ++k) {
+                    fleet.ids.push_back(prev.sectorDrone[k]);
+                    fleet.positions.push_back(prev.sweepRoutes[k].empty() ? Vec2(0.5f, 0.5f) : prev.sweepRoutes[k].front());
+                }
+                if (variant == 1) {
+                    std::reverse(fleet.ids.begin(), fleet.ids.end());
+                    std::reverse(fleet.positions.begin(), fleet.positions.end());
+                }
+                if (variant == 2 && fleet.ids.size() > 1) {
+                    fleet.ids.erase(fleet.ids.begin());             // Retired: its old sector has no drone now
+                    fleet.positions.erase(fleet.positions.begin());
+                    fleet.ids.push_back(999);                       // New: no land in the previous plan
+                    fleet.positions.push_back(Vec2(CX + 0.5f, CY + 0.5f));
+                }
+                fleet.previous = &prev;
+            }
+            std::mt19937 rng(2024);
+            MissionPlan plan = planMission(live, perim.distance(), sp, rng, fleet);
+            const std::vector<int> original = ref::matchSectorsOriginal(plan, plan.sweepRoutes, fleet, plan.bounds);
+            differ += plan.sectorDrone != original;
+            ++compared;
+            // Sectors given a drone already in the fleet (by shared land or distance), so matching really ran
+            if (fleet.previous)
+                for (int id : plan.sectorDrone) matchedByLand += std::find(fleet.ids.begin(), fleet.ids.end(), id) != fleet.ids.end();
+            if (variant == 0) kept = std::move(plan);
+        }
+        for (int& id : kept.sectorDrone) if (id < 0) id = nextId++;   // As the controller does: new drones get ids
+        prev = std::move(kept);
+    }
+    std::printf("  (%d plans compared, %d differ; %d sectors given a fleet drone)\n", compared, differ, matchedByLand);
+    CHECK(differ == 0);
+    CHECK(compared == 15);
+    CHECK(matchedByLand > 0);
+}
+
 // The perimeter-line trace now works out each sample once and slides two row buffers down the window. The
 // loops must be exactly those of the original, which worked out all four corners of every square.
 TEST(perimeter_trace_matches_per_corner_evaluation) {

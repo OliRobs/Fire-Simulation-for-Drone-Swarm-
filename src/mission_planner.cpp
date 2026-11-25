@@ -238,8 +238,13 @@ namespace {
     // (greedy). Sectors are cut along the perimeter line in a fixed direction, so a drone that keeps its side of
     // the fire keeps most of its sector. Sectors and drones still unmatched after that (first plan, new land) are
     // paired by distance: each drone to the nearest unclaimed sector start, nearest pairs first.
+    //
+    // band: every inner-band (zone 1) cell of the plan, in any order. Only band cells can have an owner (the
+    // ownership map gives sectors to zone-1 cells and nothing else), so counting over this list gives exactly
+    // the counts a scan of the whole plan window would, while skipping the window's outer-zone and no-fly cells.
+    // The shared-cell counts are whole numbers, so the order the cells are visited in cannot change them.
     std::vector<int> matchSectors(const MissionPlan& plan, const std::vector<std::vector<Vec2>>& routes,
-                                  const SweepFleet& fleet, const GridRect& area) {
+                                  const SweepFleet& fleet, const std::vector<int>& band) {
         const int S = static_cast<int>(routes.size()), D = static_cast<int>(fleet.ids.size());
         std::vector<int> result(S, -1);
         std::vector<char> droneUsed(D, 0);
@@ -251,13 +256,22 @@ namespace {
         const MissionPlan* prev = fleet.previous;
         if (prev && !prev->owner.empty() && !prev->sectorDrone.empty()) {
             std::vector<long long> shared(static_cast<size_t>(S) * D, 0);
-            for (int y = area.y0; y < area.y1; ++y) {
-                for (int i = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; i < end; ++i) {
-                    const int s = plan.owner[i], ps = prev->owner[i];
-                    if (s < 0 || ps < 0 || ps >= static_cast<int>(prev->sectorDrone.size())) continue;
-                    const int id = prev->sectorDrone[ps];
-                    for (int d = 0; d < D; ++d) if (fleet.ids[d] == id) { ++shared[static_cast<size_t>(s) * D + d]; break; }
-                }
+
+            // For each previous sector, the index in the fleet of the drone that flew it (the first fleet entry
+            // with that id, as the old per-cell search found), or -1 if that drone has left the fleet. Worked
+            // out once here instead of searching the fleet's ids again for every shared cell.
+            const int P = static_cast<int>(prev->sectorDrone.size());
+            std::vector<int> prevDrone(P, -1);
+            for (int ps = 0; ps < P; ++ps) {
+                for (int d = 0; d < D; ++d) if (fleet.ids[d] == prev->sectorDrone[ps]) { prevDrone[ps] = d; break; }
+            }
+
+            // Count shared cells over the band cells only (see `band` above)
+            for (const int i : band) {
+                const int s = plan.owner[i], ps = prev->owner[i];
+                if (s < 0 || ps < 0 || ps >= P) continue;
+                const int d = prevDrone[ps];
+                if (d >= 0) ++shared[static_cast<size_t>(s) * D + d];
             }
             for (int s = 0; s < S; ++s)
                 for (int d = 0; d < D; ++d)
@@ -356,7 +370,9 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     // ------------------------------------------------------------------------
     std::vector<std::uint8_t>& zone = plan.zone;
     bool anyCells = false;     // Any surveyable cell at all (inner band or outer zone)
-    long long bandCells = 0;   // Inner-band cells (zone 1): lets the ownership map skip its final scan (Step 5)
+    // Inner-band cells (zone 1), in scan order. Their count lets the ownership map skip its final scan, and the
+    // list lets sector matching visit just these cells instead of the whole window (Step 5)
+    std::vector<int> band;
     std::vector<int> outer;    // Outer-zone cells (the ACO region), in scan order: the only cells the Voronoi splits
 
     // Only the perimeter transform's window can hold search-area cells: outside it every cell reads INF (for
@@ -373,7 +389,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
             const double d2 = perimEdt.squaredDistance(i);
             if (d2 < innerHi) {
                 zone[i] = 1; // Inner zone cell (swept by lanes, not split into Voronoi regions)
-                ++bandCells;
+                band.push_back(i);
             }
             else if (d2 < outerHi) {
                 zone[i] = 2; // Outer zone cell (ACO region)
@@ -589,14 +605,16 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     }
 
     // Ownership: each band cell to its nearest lane's sector, then sectors to drones by shared land
+    const long long bandCells = static_cast<long long>(band.size());
     if (ownerBuffer.size() == static_cast<size_t>(N)) {
-        buildOwnerMap(plan.lanes, zone, win, ownerBuffer, bandCells);   // Recycled buffer, already all -1
+        buildOwnerMapUsingZone(plan.lanes, zone, win, ownerBuffer, bandCells);   // Recycled buffer, already all -1
         plan.owner = std::move(ownerBuffer);
     }
     else {
-        plan.owner = buildOwnerMap(plan.lanes, zone, win, bandCells);
+        plan.owner.assign(N, -1);
+        buildOwnerMapUsingZone(plan.lanes, zone, win, plan.owner, bandCells);
     }
-    plan.sectorDrone = matchSectors(plan, plan.sweepRoutes, fleet, win);
+    plan.sectorDrone = matchSectors(plan, plan.sweepRoutes, fleet, band);
 
     // ------------------------------------------------------------------------
     // Step 6: Plan Outer Zone Ant Colony Optimization (ACO) Tour
