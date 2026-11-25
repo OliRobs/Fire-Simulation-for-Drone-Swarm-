@@ -122,3 +122,8 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
                    const GridRect& area, std::vector<int>& owner, long long bandCells = -1);
 std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
                                const GridRect& area, long long bandCells = -1);
+// The same map as the first form, without copying `zone`: the flood marks claimed band cells in `zone` as it
+// goes (so it reads one byte per neighbour instead of two arrays) and puts every mark back before returning, so
+// `zone` is unchanged on return. Used by the planner, which owns its zone map; the forms above call it on a copy.
+void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std::uint8_t>& zone,
+                            const GridRect& area, std::vector<int>& owner, long long bandCells = -1);
