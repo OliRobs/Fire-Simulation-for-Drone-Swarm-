@@ -797,6 +797,244 @@ TEST(rothermel_wind_slope_and_ellipse) {
     CHECK(unshelteredWaf(6.0) > unshelteredWaf(1.0));
 }
 
+// --- Rothermel set-up: cached fuel-bed terms and the per-cell memos give bit-identical rates ---
+namespace {
+    // The wind and slope factors and the effective wind speed exactly as they were written before the fuel-bed
+    // terms were cached (kept word for word, so the new code can be checked against them bit for bit)
+    double origWindFactor(const SurfaceFuelBed& b, double u) {
+        if (u <= 0.0) return 0.0;
+        return b.windC * std::pow(u, b.windB) * std::pow(b.relativePacking, -b.windE);
+    }
+    double origSlopeFactor(const SurfaceFuelBed& b, double tanSlope) {
+        if (b.packingRatio <= 0.0) return 0.0;
+        return 5.275 * std::pow(b.packingRatio, -0.3) * tanSlope * tanSlope;
+    }
+    double origEffectiveWindSpeed(const SurfaceFuelBed& b, double phiE) {
+        if (phiE <= 0.0 || b.windC <= 0.0 || b.windB <= 0.0) return 0.0;
+        return std::pow(phiE * std::pow(b.relativePacking, b.windE) / b.windC, 1.0 / b.windB);
+    }
+
+    // The original computeSpread, word for word, on the original factors above
+    SpreadEllipse origComputeSpread(const SurfaceFuelBed& bed, double midflame, double windX, double windY,
+                                    double tanSlope, double upX, double upY, bool applyWindLimit) {
+        SpreadEllipse e;
+        if (!bed.burnable()) return e;
+        const double phiW = origWindFactor(bed, midflame);
+        const double phiS = origSlopeFactor(bed, tanSlope);
+        const double vx = phiS * upX + phiW * windX;
+        const double vy = phiS * upY + phiW * windY;
+        double phiE = std::sqrt(vx * vx + vy * vy);
+        if (phiE > 1e-12) { e.dirX = vx / phiE; e.dirY = vy / phiE; }
+        double uE = origEffectiveWindSpeed(bed, phiE);
+        if (applyWindLimit) {
+            const double uMax = 0.9 * bed.reactionIntensity;
+            if (uE > uMax) {
+                uE = uMax;
+                phiE = origWindFactor(bed, uE);
+            }
+        }
+        e.headRos = bed.r0 * (1.0 + phiE);
+        e.effectiveWindMph = uE / FT_PER_MIN_PER_MPH;
+        const double z = 1.0 + 0.25 * e.effectiveWindMph;
+        e.eccentricity = std::sqrt(z * z - 1.0) / z;
+        return e;
+    }
+
+    // Moisture scenarios used by both tests: the D2L2 default, very dry, fully cured, and wet enough that some
+    // models stop burning (so non-burnable beds, with all-zero fields, are exercised too)
+    std::vector<FuelMoisture> testMoistures() {
+        FuelMoisture dry, cured, wet;
+        dry.dead1h = 0.03; dry.dead10h = 0.04; dry.dead100h = 0.05; dry.liveHerb = 0.30; dry.liveWoody = 0.60;
+        cured.liveHerb = 0.30;
+        wet.dead1h = 0.20; wet.dead10h = 0.22; wet.dead100h = 0.24; wet.liveHerb = 1.50; wet.liveWoody = 1.50;
+        return { FuelMoisture(), dry, cured, wet };
+    }
+}
+
+// The wind factor, slope factor, effective wind speed and whole spread ellipse, now using the fuel-bed terms
+// cached by computeFuelBed, must equal the original inline-pow formulas bit for bit: every fuel model (plus
+// fuel model 10), four moisture scenarios, and a spread of wind speeds, slopes and directions, with and
+// without the wind limit. computeSpreadWithWindFactor with a precomputed phi_w must equal computeSpread.
+TEST(rothermel_cached_bed_terms_match_original_formulas) {
+    int count = 0;
+    const FuelModel* models = allFuelModels(count);
+    std::vector<const FuelModel*> list;
+    for (int i = 0; i < count; ++i) list.push_back(&models[i]);
+    list.push_back(&fuelModel10());
+
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    long compared = 0, differ = 0;
+    int burnableBeds = 0, deadBeds = 0;
+    for (const FuelMoisture& mo : testMoistures()) {
+        for (const FuelModel* m : list) {
+            const SurfaceFuelBed bed = computeFuelBed(*m, mo);
+            (bed.burnable() ? burnableBeds : deadBeds)++;
+            for (int k = 0; k < 200; ++k) {
+                // Wind 0..60 mi/h midflame (k = 0: exactly 0), slope 0..45 degrees, random wind and aspect
+                const double u = k == 0 ? 0.0 : 60.0 * FT_PER_MIN_PER_MPH * unit(rng);
+                const double tanSlope = k % 7 == 0 ? 0.0 : std::tan(0.785 * unit(rng));
+                const double phiE = 50.0 * unit(rng);
+                const double wa = 6.283185307 * unit(rng), sa = 6.283185307 * unit(rng);
+                const bool limit = k % 2 == 1;
+                ++compared;
+                if (bed.windFactor(u) != origWindFactor(bed, u)) ++differ;
+                if (bed.slopeFactor(tanSlope) != origSlopeFactor(bed, tanSlope)) ++differ;
+                if (bed.effectiveWindSpeed(phiE) != origEffectiveWindSpeed(bed, phiE)) ++differ;
+                const SpreadEllipse a = computeSpread(bed, u, std::cos(wa), std::sin(wa), tanSlope,
+                                                      std::cos(sa), std::sin(sa), limit);
+                const SpreadEllipse b = origComputeSpread(bed, u, std::cos(wa), std::sin(wa), tanSlope,
+                                                          std::cos(sa), std::sin(sa), limit);
+                const SpreadEllipse c = computeSpreadWithWindFactor(bed, bed.windFactor(u), std::cos(wa),
+                                                                    std::sin(wa), tanSlope, std::cos(sa),
+                                                                    std::sin(sa), limit);
+                for (const SpreadEllipse* s : { &a, &c }) {
+                    if (s->headRos != b.headRos || s->dirX != b.dirX || s->dirY != b.dirY
+                        || s->eccentricity != b.eccentricity || s->effectiveWindMph != b.effectiveWindMph) ++differ;
+                }
+            }
+        }
+    }
+    std::printf("  %ld cases (%d burnable beds, %d that won't burn), %ld differ\n", compared, burnableBeds,
+                deadBeds, differ);
+    CHECK(differ == 0);
+    CHECK(burnableBeds > 0 && deadBeds > 0);   // Both kinds of bed were exercised
+}
+
+// FireSimulation's set-up (fuel-bed terms cached, wind factor memo per fuel model, unsheltered WAF per fuel
+// model, crown wind factor computed once) must give exactly the per-cell rates of the original set-up loop,
+// kept word for word below on the original formulas. The grid mixes every fuel model in patches, random
+// slopes and aspects, forest patches with crown fire (active and passive), awkward canopy edge cases (cover
+// without height, height without cover, sparse cover on the 5 % crown fill boundary, canopy with no bulk
+// density), roads, non-burnable
+// codes and code 0. Several weathers: the default, a fixed WAF, the wind limit, no crown fire, calm, and a
+// wet scenario. Cells are 10 x 12 m so the step directions are not the square-grid ones.
+TEST(fire_setup_matches_original_rates) {
+    int count = 0;
+    const FuelModel* models = allFuelModels(count);
+    std::mt19937 rng(23);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    std::vector<Cell> grid(N);
+    for (int y = 0; y < GRID_HEIGHT; ++y) {
+        for (int x = 0; x < GRID_WIDTH; ++x) {
+            Cell& c = grid[at(x, y)];
+            const int patch = (x / 30) * 7 + (y / 30) * 13;
+            c.fuelModel = static_cast<std::int16_t>(models[patch % count].code);
+            if (patch % 53 == 0) c.fuelModel = 91;   // Non-burnable (urban)
+            if (patch % 61 == 0) c.fuelModel = 0;    // No data
+            if (x % 97 == 0) c.roadClass = static_cast<std::uint8_t>(20 + y % 4);   // A road: fuel break
+            c.slopeDeg = (x / 30 + y / 30) % 5 == 0 ? 0.0f : 45.0f * unit(rng);   // Some flat patches
+            const float a = 6.2831853f * unit(rng);
+            c.upslopeX = c.slopeDeg > 0.0f ? std::cos(a) : 0.0f;
+            c.upslopeY = c.slopeDeg > 0.0f ? std::sin(a) : 0.0f;
+            switch (((x / 40) + 3 * (y / 40)) % 6) {
+            case 0: case 1:   // Forest
+                c.canopyCoverPct = 10.0f + 80.0f * unit(rng);
+                c.canopyHeightM = 5.0f + 30.0f * unit(rng);
+                c.canopyBaseHeightM = 0.3f + 6.0f * unit(rng);
+                c.canopyBulkDensity = 0.02f + 0.35f * unit(rng);
+                break;
+            case 2:           // Odd canopy layers: cover without height, height without cover, sparse cover,
+                              // and a canopy with no bulk density (shelters the wind, can't crown)
+                if (x % 4 == 0) c.canopyCoverPct = 50.0f;
+                else if (x % 4 == 1) { c.canopyHeightM = 20.0f; c.canopyBulkDensity = 0.1f; }
+                else if (x % 4 == 2) { c.canopyCoverPct = 15.0f * unit(rng); c.canopyHeightM = 15.0f;
+                                       c.canopyBaseHeightM = 15.0f * unit(rng); c.canopyBulkDensity = 0.1f; }
+                else { c.canopyCoverPct = 60.0f; c.canopyHeightM = 20.0f; c.canopyBaseHeightM = 2.0f; }
+                break;
+            default: break;   // Open ground: no canopy
+            }
+        }
+    }
+
+    std::vector<FireWeather> weathers;
+    weathers.push_back(FireWeather());
+    { FireWeather w; w.windAdjustmentFactor = 0.4f; weathers.push_back(w); }
+    { FireWeather w; w.windLimit = !w.windLimit; w.wind20ftKmh = 60.0f; weathers.push_back(w); }
+    { FireWeather w; w.crownFire = false; w.windFromDeg = 135.0f; weathers.push_back(w); }
+    { FireWeather w; w.wind20ftKmh = 0.0f; weathers.push_back(w); }
+    { FireWeather w; w.moisture = testMoistures()[3]; w.wind20ftKmh = 45.0f; weathers.push_back(w); }
+
+    const float csx = 10.0f, csy = 12.0f;
+    long cellsCompared = 0, differ = 0, active = 0, passive = 0, sheltered = 0;
+    for (const FireWeather& weather : weathers) {
+        FireSimulation sim(grid, weather, csx, csy);
+
+        // --- The original set-up loop, word for word except for writing to local arrays ---
+        double stepUx[NUM_DIRS], stepUy[NUM_DIRS];
+        for (int d = 0; d < NUM_DIRS; ++d) {
+            const double sx = DX[d] * csx, sy = DY[d] * csy;
+            const double len = std::sqrt(sx * sx + sy * sy);
+            stepUx[d] = sx / len;
+            stepUy[d] = sy / len;
+        }
+        const Vec2 wind = windTowardGrid(weather.windFromDeg);
+        const double wind20 = weather.wind20ftKmh * KMH_TO_FT_PER_MIN;
+        const SurfaceFuelBed fm10 = computeFuelBed(fuelModel10(), weather.moisture);
+        constexpr double DEG_TO_RAD = 0.017453292519943295;
+        const double minCell = std::min(csx, csy);
+        for (int idx = 0; idx < N; ++idx) {
+            const Cell& c = grid[idx];
+            std::uint8_t fireType = static_cast<std::uint8_t>(FireType::Surface);
+            bool burnable = false;
+            float head = 0.0f, dur = 0.0f, dir[NUM_DIRS] = {};
+            const int code = c.fuelModel;
+            const FuelModel* m = code > 0 && code < 256 ? findFuelModel(code) : nullptr;
+            const SurfaceFuelBed bed = m ? computeFuelBed(*m, weather.moisture) : SurfaceFuelBed();
+            const bool road = ROADS_ARE_FUEL_BREAKS && c.roadClass >= ROAD_CLASS_MIN && c.roadClass <= ROAD_CLASS_MAX;
+            if (m && bed.burnable() && !road) {
+                const double tanSlope = std::tan(c.slopeDeg * DEG_TO_RAD);
+                double waf = weather.windAdjustmentFactor;
+                if (waf <= 0.0) {
+                    const double crownRatio = c.canopyHeightM > 0.0f
+                        ? (c.canopyHeightM - c.canopyBaseHeightM) / c.canopyHeightM : 0.0;
+                    waf = windAdjustmentFactor(m->depthFt, c.canopyCoverPct, c.canopyHeightM * FT_PER_M, crownRatio);
+                    if (waf != unshelteredWaf(m->depthFt)) ++sheltered;
+                }
+                SpreadEllipse e = origComputeSpread(bed, wind20 * waf, wind.x, wind.y, tanSlope, c.upslopeX,
+                                                    c.upslopeY, weather.windLimit);
+                if (weather.crownFire && c.canopyBulkDensity > 0.0f && c.canopyHeightM > 0.0f && c.canopyCoverPct > 0.0f) {
+                    const double surfaceIntensity = firelineIntensityKwM(bed, e.headRos);
+                    if (surfaceIntensity >= criticalSurfaceIntensity(c.canopyBaseHeightM, weather.foliarMoisturePct)) {
+                        SpreadEllipse crown = origComputeSpread(fm10, wind20 * 0.4, wind.x, wind.y, tanSlope,
+                                                                c.upslopeX, c.upslopeY, false);
+                        crown.headRos *= 3.34;
+                        const double crownMPerMin = crown.headRos * FT_PER_MIN_TO_M_PER_MIN;
+                        if (crownMPerMin >= criticalActiveRos(c.canopyBulkDensity)) {
+                            fireType = static_cast<std::uint8_t>(FireType::Active);
+                            if (crown.headRos > e.headRos) e = crown;
+                        }
+                        else {
+                            fireType = static_cast<std::uint8_t>(FireType::Passive);
+                        }
+                    }
+                }
+                burnable = true;
+                head = static_cast<float>(e.headRos * FT_PER_MIN_TO_M_PER_MIN);
+                for (int d = 0; d < NUM_DIRS; ++d)
+                    dir[d] = static_cast<float>(e.rosToward(stepUx[d], stepUy[d]) * FT_PER_MIN_TO_M_PER_MIN);
+                dur = static_cast<float>(minCell / head + bed.residenceTime);
+            }
+
+            // --- Compare bit for bit with what FireSimulation set up ---
+            ++cellsCompared;
+            if (fireType == static_cast<std::uint8_t>(FireType::Active)) ++active;
+            if (fireType == static_cast<std::uint8_t>(FireType::Passive)) ++passive;
+            bool same = sim.canBurn(idx) == burnable && sim.grid()[idx].fireType == fireType
+                        && sim.headRos(idx) == head;
+            if (burnable) {
+                same = same && sim.burnDuration(idx) == dur;
+                for (int d = 0; d < NUM_DIRS; ++d) same = same && sim.directionalRos(idx, d) == dir[d];
+            }
+            if (!same) ++differ;
+        }
+    }
+    std::printf("  %ld cells over %zu weathers (%ld active crown, %ld passive, %ld sheltered), %ld differ\n",
+                cellsCompared, weathers.size(), active, passive, sheltered, differ);
+    CHECK(differ == 0);
+    CHECK(active > 0 && passive > 0 && sheltered > 0);   // The crown fire and canopy paths were exercised
+}
+
 // --- Canopy and crown fire ---
 TEST(fuel_model_10_matches_published_values) {
     // RMRS-GTR-371 Table 8a: characteristic SAV 1764 1/ft, relative packing ratio 2.35

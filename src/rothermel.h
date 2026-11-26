@@ -43,7 +43,19 @@ struct SurfaceFuelBed {
     double sigma = 0.0;             // Characteristic surface-area-to-volume ratio, 1/ft
     double windC = 0.0, windB = 0.0, windE = 0.0;  // Wind factor coefficients C, B, E
 
+    // Parts of the wind and slope factors that depend only on the fuel bed, worked out once by computeFuelBed
+    // so the per-cell set-up (one call per cell, ~1 M cells) does not repeat three of its five pow() calls.
+    // They are the very same expressions the factors used to evaluate inline, so the results are bit-for-bit
+    // the same. Derived values: if you change the fields above by hand, call cacheFactorTerms() again.
+    double relPackingPowNegE = 0.0; // (beta/beta_op)^-E, in phi_w
+    double relPackingPowE = 0.0;    // (beta/beta_op)^E, in U_E
+    double slopeCoef = 0.0;         // 5.275 beta^-0.3, in phi_s
+    double invWindB = 0.0;          // 1 / B, the exponent in U_E
+
     bool burnable() const { return r0 > 0.0; }
+
+    // Fills the derived terms above from packingRatio, relativePacking and the wind coefficients
+    void cacheFactorTerms();
 
     // Wind factor phi_w = C U^B (beta/beta_op)^-E, U = midflame wind speed in ft/min
     double windFactor(double midflameFtPerMin) const;
@@ -89,3 +101,9 @@ struct SpreadEllipse {
 // (Rothermel 1972, as in BehavePlus); RMRS-GTR-371 section 3.2.7 discusses why this cap is often left off.
 SpreadEllipse computeSpread(const SurfaceFuelBed& bed, double midflameFtPerMin, double windDirX, double windDirY,
                             double tanSlope, double upslopeX, double upslopeY, bool applyWindLimit);
+
+// The same, given the wind factor phi_w = bed.windFactor(midflame) already worked out. Lets a caller that meets
+// the same fuel model and midflame wind in many cells (every unsheltered cell of one fuel model) compute phi_w
+// once. computeSpread(bed, u, ...) is exactly computeSpreadWithWindFactor(bed, bed.windFactor(u), ...).
+SpreadEllipse computeSpreadWithWindFactor(const SurfaceFuelBed& bed, double phiW, double windDirX, double windDirY,
+                                          double tanSlope, double upslopeX, double upslopeY, bool applyWindLimit);

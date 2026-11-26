@@ -56,6 +56,9 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weathe
     SurfaceFuelBed beds[kCodeSlots];
     const FuelModel* models[kCodeSlots] = {};
     bool known[kCodeSlots] = {};
+    // Unsheltered wind adjustment factor per fuel model (it depends only on the fuel bed depth). Cells with no
+    // canopy use it instead of calling windAdjustmentFactor, which would give the same value (Step 2).
+    double unshelteredWafByCode[kCodeSlots] = {};
     for (const Cell& c : grid_) {
         const int code = c.fuelModel;
         if (code <= 0 || code >= kCodeSlots || known[code]) continue;
@@ -63,6 +66,7 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weathe
         if (const FuelModel* m = findFuelModel(code)) {
             models[code] = m;
             beds[code] = computeFuelBed(*m, weather.moisture);
+            unshelteredWafByCode[code] = unshelteredWaf(m->depthFt);
         }
     }
     const Vec2 wind = windTowardGrid(weather.windFromDeg);
@@ -72,6 +76,17 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weathe
     const SurfaceFuelBed fm10 = computeFuelBed(fuelModel10(), weather.moisture);
     constexpr double ROTHERMEL_1991_WAF = 0.4;
     constexpr double ROTHERMEL_1991_RATIO = 3.34;   // Crown rate / FM10 surface rate
+    // The crown run's midflame wind is the same in every cell, so its wind factor is too: work it out once
+    const double fm10WindFactor = fm10.windFactor(wind20 * ROTHERMEL_1991_WAF);
+
+    // Wind factor memo, one slot per fuel model: the last midflame wind seen for that model and its phi_w.
+    // Every unsheltered cell of a fuel model has the same midflame wind (20-ft wind x a WAF that depends only on
+    // the fuel depth), so this skips one pow() per cell there. Under a canopy the WAF varies and the memo simply
+    // misses. A hit returns the value computed earlier from the identical input, so results don't change.
+    // NaN never compares equal, so every slot starts as a miss.
+    double memoMidflame[kCodeSlots], memoWindFactor[kCodeSlots];
+    std::fill(memoMidflame, memoMidflame + kCodeSlots, std::numeric_limits<double>::quiet_NaN());
+    std::fill(memoWindFactor, memoWindFactor + kCodeSlots, 0.0);
 
     // --- 2 & 3. Per-cell ellipse and directional rates ---
     dirRos_.assign(static_cast<size_t>(N) * NUM_DIRS, 0.0f);
@@ -95,21 +110,33 @@ FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weathe
 
         // Midflame wind: the 20-ft wind slowed by the surface fuel bed, or by the tree canopy where there is one
         double waf = weather.windAdjustmentFactor;
-        if (waf <= 0.0) {
+        if (waf <= 0.0 && (c.canopyCoverPct <= 0.0f || c.canopyHeightM <= 0.0f)) {
+            // No canopy over this cell (no cover, or no height and so a crown ratio of 0): the crown fill
+            // portion is 0, so windAdjustmentFactor would take its unsheltered branch. That depends only on
+            // the fuel depth, so it is the per-model value worked out with the fuel beds.
+            waf = unshelteredWafByCode[code];
+        }
+        else if (waf <= 0.0) {
             const double crownRatio = c.canopyHeightM > 0.0f
                 ? (c.canopyHeightM - c.canopyBaseHeightM) / c.canopyHeightM : 0.0;
             waf = windAdjustmentFactor(models[code]->depthFt, c.canopyCoverPct, c.canopyHeightM * FT_PER_M, crownRatio);
         }
-        SpreadEllipse e = computeSpread(bed, wind20 * waf, wind.x, wind.y, tanSlope, c.upslopeX, c.upslopeY,
-                                        weather.windLimit);
+        const double midflame = wind20 * waf;
+        if (!(memoMidflame[code] == midflame)) {   // Memo miss: phi_w for this model and wind, then remember it
+            memoMidflame[code] = midflame;
+            memoWindFactor[code] = bed.windFactor(midflame);
+        }
+        // Same as computeSpread(bed, midflame, ...), with phi_w from the memo
+        SpreadEllipse e = computeSpreadWithWindFactor(bed, memoWindFactor[code], wind.x, wind.y, tanSlope,
+                                                      c.upslopeX, c.upslopeY, weather.windLimit);
 
         // Crown fire: only where LANDFIRE maps a forest canopy with fuel in it
         if (weather.crownFire && c.canopyBulkDensity > 0.0f && c.canopyHeightM > 0.0f && c.canopyCoverPct > 0.0f) {
             const double surfaceIntensity = firelineIntensityKwM(bed, e.headRos);
             if (surfaceIntensity >= criticalSurfaceIntensity(c.canopyBaseHeightM, weather.foliarMoisturePct)) {
                 // The surface fire torches the canopy. Is the crown fire fast enough to be self-sustaining?
-                SpreadEllipse crown = computeSpread(fm10, wind20 * ROTHERMEL_1991_WAF, wind.x, wind.y, tanSlope,
-                                                    c.upslopeX, c.upslopeY, false);
+                SpreadEllipse crown = computeSpreadWithWindFactor(fm10, fm10WindFactor, wind.x, wind.y, tanSlope,
+                                                                  c.upslopeX, c.upslopeY, false);
                 crown.headRos *= ROTHERMEL_1991_RATIO;   // Scales every direction of the ellipse alike
                 const double crownMPerMin = crown.headRos * FT_PER_MIN_TO_M_PER_MIN;
                 if (crownMPerMin >= criticalActiveRos(c.canopyBulkDensity)) {
