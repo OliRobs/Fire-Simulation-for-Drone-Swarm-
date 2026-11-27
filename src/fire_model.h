@@ -45,6 +45,9 @@ public:
 
     bool canBurn(int idx) const { return burnable_[idx] != 0; }  // Burnable fuel, not a road fuel break
     float headRos(int idx) const { return headRos_[idx]; }       // Head fire rate of spread, m/min
+    // Rate of spread from cell idx towards its neighbour in direction d (0..7, DX/DY order), m/min
+    float directionalRos(int idx, int d) const { return dirRos_[static_cast<size_t>(idx) * NUM_DIRS + d]; }
+    float burnDuration(int idx) const { return burnDuration_[idx]; } // Minutes a cell shows as Burning
     double minutes() const { return now_; }                       // Simulated time since the start
 
     const std::vector<Cell>& grid() const { return grid_; }

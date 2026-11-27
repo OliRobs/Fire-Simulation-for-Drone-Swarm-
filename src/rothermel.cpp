@@ -169,26 +169,47 @@ SurfaceFuelBed computeFuelBed(const FuelModel& m, const FuelMoisture& mo) {
     bed.windC = 7.47 * std::exp(-0.133 * std::pow(sigma, 0.55));
     bed.windB = 0.02526 * std::pow(sigma, 0.54);
     bed.windE = 0.715 * std::exp(-3.59e-4 * sigma);
+    bed.cacheFactorTerms();
     return bed;
+}
+
+// ----------------------------------------------------------------------------
+// Fuel-bed-only parts of the wind and slope factors
+// ----------------------------------------------------------------------------
+// windFactor, slopeFactor and effectiveWindSpeed run once per cell at set-up. Each used to raise a fuel-bed
+// value to a fuel-bed power (pow(beta/beta_op, -E), pow(beta, -0.3), pow(beta/beta_op, E), 1/B), which is the
+// same for every cell of that fuel model. They are worked out here once instead. Each is the identical
+// expression on identical inputs, so the factors come out bit-for-bit as before.
+// Guarded like the factors themselves: a bed that won't burn (all zeros) keeps zeros, never inf or NaN.
+void SurfaceFuelBed::cacheFactorTerms() {
+    relPackingPowNegE = relativePacking > 0.0 ? std::pow(relativePacking, -windE) : 0.0;
+    relPackingPowE = relativePacking > 0.0 ? std::pow(relativePacking, windE) : 0.0;
+    slopeCoef = packingRatio > 0.0 ? 5.275 * std::pow(packingRatio, -0.3) : 0.0;
+    invWindB = windB > 0.0 ? 1.0 / windB : 0.0;
 }
 
 // ----------------------------------------------------------------------------
 // Wind and slope factors
 // ----------------------------------------------------------------------------
+// phi_w = C U^B (beta/beta_op)^-E (RMRS-GTR-371 Table 6). (beta/beta_op)^-E is cached in relPackingPowNegE;
+// the product is evaluated in the same order as before, (C U^B) x (beta/beta_op)^-E.
 double SurfaceFuelBed::windFactor(double u) const {
     if (u <= 0.0) return 0.0;
-    return windC * std::pow(u, windB) * std::pow(relativePacking, -windE);
+    return windC * std::pow(u, windB) * relPackingPowNegE;
 }
 
+// phi_s = 5.275 beta^-0.3 tan^2(phi) (RMRS-GTR-371 Table 6). 5.275 beta^-0.3 is cached in slopeCoef, and the
+// product keeps its old order, ((5.275 beta^-0.3) tan) tan.
 double SurfaceFuelBed::slopeFactor(double tanSlope) const {
     if (packingRatio <= 0.0) return 0.0;
-    return 5.275 * std::pow(packingRatio, -0.3) * tanSlope * tanSlope;
+    return slopeCoef * tanSlope * tanSlope;
 }
 
-// Inverts the wind factor: U_E = [phi_E (beta/beta_op)^E / C]^(1/B)  (RMRS-GTR-371 section 4.1)
+// Inverts the wind factor: U_E = [phi_E (beta/beta_op)^E / C]^(1/B)  (RMRS-GTR-371 section 4.1).
+// (beta/beta_op)^E and 1/B are cached in relPackingPowE and invWindB.
 double SurfaceFuelBed::effectiveWindSpeed(double phiE) const {
     if (phiE <= 0.0 || windC <= 0.0 || windB <= 0.0) return 0.0;
-    return std::pow(phiE * std::pow(relativePacking, windE) / windC, 1.0 / windB);
+    return std::pow(phiE * relPackingPowE / windC, invWindB);
 }
 
 double unshelteredWaf(double depthFt) {
@@ -214,10 +235,17 @@ double windAdjustmentFactor(double fuelDepthFt, double canopyCoverPct, double ca
 // ellipse's length-to-width ratio Z = 1 + 0.25 U_E (U_E in mi/h) and so its eccentricity.
 SpreadEllipse computeSpread(const SurfaceFuelBed& bed, double midflame, double windX, double windY,
                             double tanSlope, double upX, double upY, bool applyWindLimit) {
+    if (!bed.burnable()) return SpreadEllipse();
+    return computeSpreadWithWindFactor(bed, bed.windFactor(midflame), windX, windY, tanSlope, upX, upY,
+                                       applyWindLimit);
+}
+
+// The body of computeSpread, starting from a wind factor phi_w the caller has already worked out
+SpreadEllipse computeSpreadWithWindFactor(const SurfaceFuelBed& bed, double phiW, double windX, double windY,
+                                          double tanSlope, double upX, double upY, bool applyWindLimit) {
     SpreadEllipse e;
     if (!bed.burnable()) return e;
 
-    const double phiW = bed.windFactor(midflame);
     const double phiS = bed.slopeFactor(tanSlope);
 
     // Resultant of the slope and wind vectors (per unit R_0)
