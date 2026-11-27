@@ -31,9 +31,6 @@ surveys round the fire. README.md has the module table and input-data notes.
   use it.
 - Library layering: only `raster_io` and `terrain` use GDAL; only `renderer` and `main.cpp` use SFML.
   Everything else is in `wf_core`, which must build without either so the tests stay headless.
-- The values in `config.h` (perimeter distances, fire standoffs, drone counts, speeds) are design decisions.
-  Ask before changing them. Distances and speeds are set in metres and converted with `cellsFromMetres`, so
-  changing SIM_CELL_SIZE_M keeps their ground values.
 - Terrain comes from USGS 3DEP 1 m DEM tiles (`USGS_1M_11_x41-42y379-380_*.tif`, UTM zone 11, San Gabriel
   Mountains). They define the simulation grid: GRID_WIDTH x GRID_HEIGHT = 2000 x 2000 cells of SIM_CELL_SIZE_M =
   10 m, i.e. exactly the four tiles. Each cell's elevation, slope (mean of the 1 m slopes) and aspect come from the
@@ -74,7 +71,7 @@ These behaviours were asked for explicitly. Keep them when changing planning cod
   = ceil(one-drone tour time / `ACO_REVISIT_S`). 3-10 sweep and 1-10 ACO drones. Growing is immediate (launch from
   the launch point); a drone is retired only after `SHRINK_REPLANS` re-plans in a row within `SHRINK_MARGIN` of the
   limit with one fewer, and flies a fire-safe route home before it is removed. Drones are found by role and id,
-  never by position in the list. Collision avoidance and batteries are out of scope for now.
+  never by position in the list.
 - The ACO routing only changes when the perimeter does: while no perimeter section has moved, a re-plan keeps the
   Voronoi regions, points of interest and tour order (`SweepFleet::perimeterUnchanged`, from
   `DistanceTransform::version()` of the perimeter's field) and only rebuilds the fire-safe legs.
