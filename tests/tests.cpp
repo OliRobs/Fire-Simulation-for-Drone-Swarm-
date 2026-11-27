@@ -216,6 +216,59 @@ TEST(live_edt_incremental_matches_clamped_full_transform) {
     CHECK(windowWrong == 0);
 }
 
+// The incremental live field lowers distances one source at a time with DistanceTransform::addSource, whose
+// inner loop was rewritten so the compiler can vectorise it, with the disc's row half-widths precomputed. This
+// checks that path against a brute-force answer (minimum squared distance to every source, "very far" beyond
+// the clamp radius) where the real-fire test above cannot reach: discs clipped by every grid edge and corner,
+// sources on the outermost rows and columns, grids narrower than the disc (down to one column), and several clamp radii (1 cell, a
+// small one, and the live field's own LIVE_EDT_RANGE). Sources are added one per compute() so the field takes
+// the per-cell route rather than the full-transform fallback.
+TEST(live_edt_add_source_matches_brute_force_at_edges) {
+    struct Case { int w, h, range; };
+    long long compared = 0, wrong = 0;
+    std::mt19937 rng(20261127);
+    for (const Case c : { Case{ 200, 150, LIVE_EDT_RANGE }, Case{ 45, 300, LIVE_EDT_RANGE }, Case{ 97, 61, 7 },
+                          Case{ 64, 64, 1 }, Case{ 1, 120, 1 } }) {
+        const double cap = (c.range + 1.0) * (c.range + 1.0);
+        DistanceTransform inc(c.w, c.h, c.range, DistanceTransform::Mode::IncrementalClamped);
+        std::vector<std::uint8_t> mask(static_cast<size_t>(c.w) * c.h, 0);
+        GridRect box;
+        std::vector<std::pair<int, int>> sources;
+
+        // Corners, edge midpoints and the cells next to them, then random cells (some on the border rows)
+        std::vector<std::pair<int, int>> order = {
+            { 0, 0 }, { c.w - 1, c.h - 1 }, { c.w - 1, 0 }, { 0, c.h - 1 }, { c.w / 2, 0 }, { c.w / 2, c.h - 1 },
+            { 0, c.h / 2 }, { c.w - 1, c.h / 2 }, { std::min(1, c.w - 1), 1 }, { std::max(0, c.w - 2), c.h - 2 } };
+        std::uniform_int_distribution<int> rx(0, c.w - 1), ry(0, c.h - 1);
+        for (int k = 0; k < 30; ++k) order.push_back({ rx(rng), k % 5 == 0 ? 0 : ry(rng) });
+
+        for (const auto& s : order) {
+            const size_t idx = static_cast<size_t>(s.second) * c.w + s.first;
+            if (mask[idx]) continue;   // Already a source (random picks can repeat)
+            mask[idx] = 1;
+            box.include(s.first, s.second);
+            sources.push_back(s);
+            inc.compute(mask, box);
+
+            // Brute force: the exact squared distance to the nearest source, everywhere on the grid
+            for (int y = 0; y < c.h; ++y)
+                for (int x = 0; x < c.w; ++x) {
+                    double e = std::numeric_limits<double>::infinity();
+                    for (const auto& q : sources) {
+                        const double dx = x - q.first, dy = y - q.second;
+                        e = std::min(e, dx * dx + dy * dy);
+                    }
+                    const double v = inc.squaredDistance(y * c.w + x);
+                    wrong += e <= cap ? v != e : !(v > cap);   // Exact within the clamp, "very far" beyond it
+                    ++compared;
+                }
+        }
+    }
+    std::printf("  (%lld cell values compared)\n", compared);
+    CHECK(compared > 1000000);
+    CHECK(wrong == 0);
+}
+
 // The fire simulation's bounding box must always be exactly the box of its fire mask
 TEST(fire_bounds_track_the_fire_mask) {
     std::vector<Cell> grid(N);

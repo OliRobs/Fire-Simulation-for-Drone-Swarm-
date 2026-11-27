@@ -203,20 +203,43 @@ void DistanceTransform::computeIncremental(const std::vector<std::uint8_t>& sour
 
 // Lowers every value within the clamp radius (maxDistance + 1) of source cell (sx, sy) to its squared distance
 // from that cell, where that is smaller. Cells further away keep their value (see computeIncremental).
+//
+// This runs once for every cell that catches fire (about 3,200 cells per call at the default 31-cell range), so
+// it is the largest per-frame cost of the simulation. Two exact speed-ups over the first version:
+//  - The disc's half-width on each row depends only on the radius and the row offset, so it is worked out once
+//    (discHalf_, built on first use) instead of with a sqrt and two correction loops on every row of every call.
+//  - The inner loop is written so the compiler can vectorise it: the squared distance is built in doubles
+//    (dx*dx + dy*dy of whole numbers below 2^53, so exactly the same value as the integer sum converted), and
+//    the update is an unconditional row[x] = min(row[x], d2). std::min(a, b) returns b only when b < a, which
+//    is exactly the old "if (d2 < row[x]) row[x] = d2". Every cell therefore ends with the same value as before;
+//    the only difference is that unchanged cells are rewritten with their own value.
 void DistanceTransform::addSource(int sx, int sy) {
     const int r = maxDistance_ + 1;
+    if (static_cast<int>(discHalf_.size()) != 2 * r + 1) {
+        // Half-width of the disc on row offset dy: the largest dx with dx^2 + dy^2 <= r^2 (same rule as before,
+        // including the guards against sqrt rounding either way)
+        discHalf_.resize(static_cast<size_t>(2 * r + 1));
+        for (int dy = -r; dy <= r; ++dy) {
+            int half = static_cast<int>(std::sqrt(static_cast<double>(r * r - dy * dy)));
+            while ((half + 1) * (half + 1) + dy * dy <= r * r) ++half;
+            while (half * half + dy * dy > r * r) --half;
+            discHalf_[static_cast<size_t>(dy + r)] = half;
+        }
+    }
     const int y0 = std::max(0, sy - r), y1 = std::min(h_ - 1, sy + r);
     for (int y = y0; y <= y1; ++y) {
         const int dy = y - sy;
-        // Half-width of the disc on this row: the largest dx with dx^2 + dy^2 <= r^2
-        int half = static_cast<int>(std::sqrt(static_cast<double>(r * r - dy * dy)));
-        while ((half + 1) * (half + 1) + dy * dy <= r * r) ++half;   // Guard against sqrt rounding down
-        while (half * half + dy * dy > r * r) --half;                  // ...or up
+        const int half = discHalf_[static_cast<size_t>(dy + r)];
         const int x0 = std::max(0, sx - half), x1 = std::min(w_ - 1, sx + half);
-        double* row = sq_.data() + static_cast<size_t>(y) * w_;
-        for (int x = x0; x <= x1; ++x) {
-            const double d2 = static_cast<double>((x - sx) * (x - sx) + dy * dy);
-            if (d2 < row[x]) row[x] = d2;
+        double* const row = sq_.data() + static_cast<size_t>(y) * w_;
+        const double dy2 = static_cast<double>(dy) * dy;
+        // dx runs from x0 - sx to x1 - sx; d2 = dx^2 + dy^2 exactly (all values are small whole numbers)
+        double dx = static_cast<double>(x0 - sx);
+        const int n = x1 - x0 + 1;
+        double* const out = row + x0;
+        for (int k = 0; k < n; ++k) {
+            const double ddx = dx + k;
+            out[k] = std::min(out[k], ddx * ddx + dy2);   // Same as: if (d2 < out[k]) out[k] = d2
         }
     }
 }
