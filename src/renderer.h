@@ -8,6 +8,7 @@
 #include "mission_types.h"
 #include "types.h"
 #include "viewport.h"
+#include "wind_solver.h"
 
 // All SFML drawing. One RGBA texture for the grid (only changed pixels are rewritten) plus a second
 // transparent texture for the mission overlay, with drones, routes and points of interest drawn on top.
@@ -21,6 +22,7 @@ public:
     bool showMission = true;    // V: Voronoi overlay, points of interest and routes
     bool showRoads = false;     // R: LANDFIRE roads drawn over the elevation shading (call paintAll after toggling).
                                 // Hidden by default; roads still act as fuel breaks either way.
+    bool showWind = false;      // W: terrain wind arrows (wind_overlay.h). Hidden by default; needs setWindField.
 
     void paintAll(const std::vector<Cell>& grid);
     void paintCells(const std::vector<Cell>& grid, const std::vector<int>& cells);
@@ -32,6 +34,14 @@ public:
     // the fleet status line
     void setMissionVisuals(const MissionPlan& plan, const std::vector<Drone>& drones,
                            const DistanceTransform& liveEdt);
+
+    // The terrain wind field to draw as arrows when showWind is on, and the weather's open 20-ft wind the
+    // arrow colours compare against. The field is not copied: it must outlive the renderer's use of it.
+    // nullptr = no field (USE_TERRAIN_WIND off): nothing is drawn.
+    void setWindField(const WindField* field, float openKmh);
+    bool hasWindField() const { return wind_ != nullptr; }
+    float windMaxKmh() const { return windMaxKmh_; }   // Fastest 20-ft wind in the field (the longest arrow)
+    float windMinKmh() const { return windMinKmh_; }   // Slowest
 
     void draw(const MissionPlan& plan, const std::vector<Drone>& drones);
 
@@ -69,6 +79,12 @@ private:
     // draw() sends only these rows to the GPU instead of the whole 2000 x 2000 x 4 = 16 MB image every frame.
     int dirtyY0_ = 0, dirtyY1_ = 0;
     GridRect overlayDrawn_;   // Part of overlayPixels_ the last setMissionVisuals() may have written
+
+    void drawWindArrows(float perPixel);   // The wind arrows inside the view (showWind)
+
+    const WindField* wind_ = nullptr;   // Terrain wind field to draw (owned by main)
+    float windOpenKmh_ = 0.0f;          // Open 20-ft wind: arrows this fast are white
+    float windMinKmh_ = 0.0f, windMaxKmh_ = 0.0f;   // Speed range of the field
 
     std::vector<int> ringCells_;
     sf::CircleShape marker_, sensor_, body_;

@@ -36,7 +36,8 @@ add_library(wf_core STATIC
   src/topography.cpp
   src/viewport.cpp
   src/perimeter.cpp
-  src/wind_solver.cpp)
+  src/wind_solver.cpp
+  src/wind_overlay.cpp)
 target_include_directories(wf_core PUBLIC src)
 wf_warnings(wf_core)
 
