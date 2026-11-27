@@ -36,6 +36,21 @@ constexpr float WIND_ADJUSTMENT_FACTOR = 0.0f; // Midflame / 20-ft wind. <= 0: u
 // Cap the effective wind at Rothermel's "maximum reliable wind" (RMRS-GTR-371 section 3.2.7). On by default:
 // with it on, all 40 fuel models reproduce the spread-rate classes Scott & Burgan (2005) publish for them.
 constexpr bool APPLY_WIND_LIMIT = true;
+// Terrain-adjusted wind (wind_solver.h): the open wind above is adjusted over the terrain by a mass-conserving
+// solver (WindNinja's method), so every cell gets its own 20-ft wind speed and direction: faster over ridges,
+// slower in hollows, turned along valleys. false = the single open wind everywhere, as before.
+constexpr bool USE_TERRAIN_WIND = true;
+constexpr float WIND_COLUMN_SIZE_M = 100.0f;   // Horizontal spacing of the wind mesh (10 x 10 fire cells per column)
+constexpr int WIND_LAYERS = 20;                // Mesh nodes up each column, ground to domain top (WindNinja: 20)
+// Height of the wind mesh's top above the highest summit. The top is an open boundary, so a low top lets the air
+// escape upwards instead of speeding up over the ridges. WindNinja's rule (column width / 400, grown over the
+// layers) puts it only ~160 m up at 100 m columns, which cut the crest speed-up of a 400 m test hill from ~20 %
+// to ~2 %; the result stops changing once the top is ~2.5 km up (wind_solver.h).
+constexpr float WIND_TOP_ABOVE_SUMMIT_M = 2500.0f;
+// Atmospheric stability as alpha = alpha_H / alpha_V: 1 neutral (as WindNinja without its stability option),
+// > 1 unstable (more air goes over hills), < 1 stable (more air goes round them). WindNinja's table runs from
+// 0.2 (Pasquill class F, clear calm night) to 5 (class A, strong sun, light wind).
+constexpr float WIND_STABILITY_ALPHA = 1.0f;
 // Crown fire from the LANDFIRE canopy layers (crown_fire.h). Foliar moisture is NOT in LANDFIRE: 100 % is the
 // usual default (Scott & Reinhardt 2001); RMRS-GTR-220 gives 75-150 % as the normal range.
 constexpr bool ENABLE_CROWN_FIRE = true;

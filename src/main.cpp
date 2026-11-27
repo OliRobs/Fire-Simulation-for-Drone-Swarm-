@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -13,13 +14,14 @@
 #include "raster_io.h"
 #include "renderer.h"
 #include "terrain.h"
+#include "wind_solver.h"
 
 // ============================================================================
 // Main Application Entry Point
 //
 // Integrates simulation components:
 // 1. GeoTIFF ingestion: USGS 1 m DEM tiles (terrain) and LANDFIRE (fuel models, canopy, roads)
-// 2. Rothermel surface fire spread on the cell grid
+// 2. Terrain-adjusted wind (mass-conserving solver) and Rothermel surface fire spread on the cell grid
 // 3. Distance Field Computation (Dynamic No-Fly Zones)
 // 4. Fire Perimeter Tracking & Containment Boundaries
 // 5. Autonomous Multi-Drone Mission Control & Path Re-Planning
@@ -124,7 +126,24 @@ int main(int argc, char** argv) {
     // Rothermel spread needs weather as well as the landscape; see config.h and README for what to supply
     const FireWeather weather;
     printWeather(weather);
-    FireSimulation sim(std::move(terrain.grid), weather, terrain.cellSizeX, terrain.cellSizeY);
+
+    // Terrain-adjusted wind: the open wind is adjusted over the terrain once, before the fire starts, so each
+    // cell gets its own 20-ft wind speed and direction (wind_solver.h). Off: one wind for the whole map.
+    WindField windField;
+    if (USE_TERRAIN_WIND) {
+        const auto t0 = std::chrono::steady_clock::now();
+        windField = solveTerrainWind(terrain.grid, terrain.cellSizeX, terrain.cellSizeY,
+                                     weather.wind20ftKmh, weather.windFromDeg);
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        const auto range = std::minmax_element(windField.speedKmh.begin(), windField.speedKmh.end());
+        std::printf("Terrain wind: %d x %d x %d mesh, %d CG iterations (residual %.1e%s), %.1f s\n"
+                    "  20-ft wind %.1f to %.1f km/h across the map; mass error (RMS div) %.2e -> %.2e 1/s\n",
+                    windField.columnsX, windField.columnsY, windField.layers, windField.iterations,
+                    windField.relResidual, windField.converged ? "" : ", NOT converged", seconds,
+                    *range.first, *range.second, windField.divergenceBefore, windField.divergenceAfter);
+    }
+    FireSimulation sim(std::move(terrain.grid), weather, terrain.cellSizeX, terrain.cellSizeY,
+                       SIM_MINUTES_PER_TICK, USE_TERRAIN_WIND ? &windField : nullptr);
 
     // Initial full-grid visual repaint
     renderer.paintAll(sim.grid());
