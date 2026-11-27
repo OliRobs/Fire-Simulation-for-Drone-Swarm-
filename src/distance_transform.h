@@ -88,4 +88,5 @@ private:
     std::vector<std::uint8_t> seen_;     // Copy of the sources at the previous compute() (to find new ones)
     GridRect seenBox_;                   // Every non-zero cell of seen_ lies inside this rectangle
     std::vector<int> newSources_;        // Scratch: cells that switched on since the previous compute()
+    std::vector<int> discHalf_;          // addSource: half-width of the clamp disc on each row offset -r..r
 };
