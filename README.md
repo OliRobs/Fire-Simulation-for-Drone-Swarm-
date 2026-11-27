@@ -1,8 +1,9 @@
 # Wildfire simulator
 
 Wildfire spread on real terrain using Rothermel's surface fire spread model, driven by USGS 1 m lidar
-elevation (terrain) and LANDFIRE data (Scott & Burgan 40 fuel models, canopy, operational roads). The fire runs on
-10 m cells over a 20 km x 20 km area. A drone swarm surveys round the fire:
+elevation (terrain) and LANDFIRE data (Scott & Burgan 40 fuel models, canopy, operational roads). The wind is
+adjusted over the terrain by a mass-conserving wind solver (WindNinja's method), so each cell has its own wind
+speed and direction (see "Terrain wind"). The fire runs on 10 m cells over a 20 km x 20 km area. A drone swarm surveys round the fire:
 sweep drones fly lanes at right angles to the fire inside the perimeter, each in its own sector, and ACO drones
 share an ant-colony-optimised tour outside it, all kept clear of the fire. The fleet grows and shrinks with the
 fire so every sweep lap and every revisit on the tour stays within 20 minutes (see "Drone survey").
@@ -167,10 +168,147 @@ These are fixed placeholder values in `config.h` / `FireWeather` for now:
 | **Live fuel moisture** herbaceous, woody | 60 / 90 % (scenario L2, two-thirds cured) | National Fuel Moisture Database samples, or a curing / greenness estimate (RMRS-GTR-153 Table 2 converts % cured to herb moisture). Controls the dynamic grass models strongly. |
 | **Foliar moisture** of the canopy | 100 % | Seasonal values from the literature (normal range 75-150 %, RMRS-GTR-220). Lower values make torching much easier. |
 | **Wind speed** at 20 ft | 20 km/h | RAWS observations or a forecast (NWS / HRRR). Decides whether crown fire becomes active. |
-| **Wind direction** | from 225 deg (SW) | As above. Real wind is bent by terrain: a gridded wind (e.g. WindNinja run on the LANDFIRE DEM) would replace the single value. |
+| **Wind direction** | from 225 deg (SW) | As above. This is the open wind above the terrain; the terrain wind solver turns it along valleys and round hills cell by cell (see "Terrain wind"). |
 
 Aspect is not needed as a separate layer: it is computed from the elevation (Horn's method, `topography.cpp`),
 from the 1 m DEM when the tiles are present.
+
+## Terrain wind (`wind_solver.cpp`)
+
+The weather gives one open wind: 20 km/h from 225 deg, 20 ft (6.1 m) above the vegetation (`config.h`). Real
+wind does not stay the same across a mountain range. It speeds up over ridges and summits, slows in hollows and
+on the slopes facing into it, and is turned along valleys and round hills. Fire behaviour follows the wind, so
+`solveTerrainWind` works out a separate 20-ft wind for every cell before the fire starts. It uses the method of
+WindNinja's default "conservation of mass" solver (Forthofer et al. 2014; github.com/firelab/windninja, analysed
+in the project doc "How WindNinja Calculates Wind"). The idea: take a first guess at the wind that ignores the
+terrain, then make the smallest change to it that stops air piling up against hillsides or vanishing out of
+valleys, i.e. that conserves mass.
+
+### How it works
+
+1. **Wind mesh.** The fire grid is grouped into 100 m columns (10 x 10 fire cells each, `WIND_COLUMN_SIZE_M`).
+   Each column gets a stack of 20 nodes (`WIND_LAYERS`) from its mean ground elevation up to a flat top 2.5 km
+   above the highest summit (`WIND_TOP_ABOVE_SUMMIT_M`). The layers are thin near the ground (a few metres) and
+   each is 1.3 x thicker than the one below, so the bottom layers follow the terrain and the top is flat. On the
+   default 1200 x 1000 grid that is 120 x 100 x 20 = 240,000 nodes. Solving on the 10 m fire cells instead would
+   mean ~24 million unknowns, and ridge and valley effects are hundreds of metres across anyway.
+2. **First guess.** The open wind is spread up every column with a neutral logarithmic profile,
+
+       U(z) = U20 * ln((z - d) / z0) / ln((6.1 m + h - d) / z0)
+
+   where h is the vegetation height (the LANDFIRE canopy height where there are trees, else the fuel bed depth of
+   the cell's fuel model), the roughness length is z0 = 0.13 h (at least 1 cm) and the displacement height is
+   d = 0.64 h. These are the same ratios the Albini & Baughman wind adjustment factor in `rothermel.cpp` is built
+   on, so the wind field and the midflame wind agree. Below d + 7 z0 the speed falls linearly to zero; above the
+   boundary-layer top, 0.2 u* / f, it stops increasing. The first guess blows horizontally everywhere, at the
+   same height above the ground, so it blows straight into hillsides: it has divergence (mass errors).
+3. **The adjustment equation.** Find the wind (u, v, w) closest to the first guess (u0, v0, w0) with
+   div(u) = 0. Minimising (u - u0)^2 + (v - v0)^2 + (w - w0)^2 / alpha^2 over the domain, with a Lagrange
+   multiplier Phi for the constraint, gives a single linear equation (Sasaki 1958, Sherman 1978):
+
+       d/dx(Rx dPhi/dx) + d/dy(Ry dPhi/dy) + d/dz(Rz dPhi/dz) = -(du0/dx + dv0/dy + dw0/dz)
+       Rx = Ry = 1/2,   Rz = alpha^2 / 2
+
+   and the corrected wind is u = u0 + Rx dPhi/dx, v = v0 + Ry dPhi/dy, w = w0 + Rz dPhi/dz. The right-hand side
+   is the first guess's mass error; Phi is the "pressure" that pushes the air round and over the terrain to
+   cancel it. alpha (`WIND_STABILITY_ALPHA`) sets how easily air moves vertically compared with horizontally.
+4. **Finite elements.** Each mesh cell is an 8-node (trilinear) hexahedron, integrated with 2 x 2 x 2 Gauss
+   points. Because the mesh is structured, each node is coupled to at most its 27 neighbours, so the matrix is
+   stored as 27 numbers per node. Boundary conditions follow WindNinja:
+   - Ground: nothing imposed (the natural condition), which means no air flows through the ground.
+   - Four sides and the top: Phi = 0, so air flows in and out freely and the first guess is kept there. The
+     edge cells of the map therefore keep the open wind; the effect of the terrain builds up within a column or
+     two of the edge.
+
+   The matrix is symmetric and positive definite, so it is solved with conjugate gradients, preconditioned with
+   symmetric Gauss-Seidel (SSOR with omega = 1, as WindNinja). It stops when the residual is 10^-4 of the
+   right-hand side: about 90 iterations, 1.5 s for the full grid.
+5. **Wind at the nodes.** The gradient of Phi jumps between elements, so each node takes the
+   inverse-distance-weighted average of the gradients at the surrounding Gauss points (WindNinja's "stress
+   smoothing"), and step 3's formulas give u, v, w.
+6. **20-ft wind per fire cell.** In each column the horizontal wind is read 6.1 m above the vegetation:
+   - in the lowest mesh layer, by scaling the first node's wind down the log profile;
+   - higher up, by interpolating wind / ln-profile linearly between the two nodes and multiplying back.
+     Interpolating along the profile rather than in a straight line means an undisturbed log profile comes back
+     exactly; a straight line reads about 1 % low.
+
+   The column winds are then interpolated bilinearly (by component) to every 10 m fire cell, giving a
+   `WindField`: a speed in km/h and a unit direction per cell.
+
+### How the fire uses it
+
+`FireSimulation` takes the `WindField` as an optional last argument (`main.cpp` passes it when
+`USE_TERRAIN_WIND` is on). For each cell it replaces the single open wind with the cell's own 20-ft wind:
+
+- **Speed:** 20-ft wind x wind adjustment factor (fuel depth or canopy sheltering, unchanged) = midflame wind,
+  which sets Rothermel's wind factor phi_w.
+- **Direction:** the wind vector added to the slope vector to give the head fire direction and the spread
+  ellipse, as before.
+- **Crown fire:** the crown spread rate uses 0.4 x the cell's own 20-ft wind.
+
+Without a `WindField` (`USE_TERRAIN_WIND = false`, the tests and the benchmark) every cell gets the single open
+wind as before, with identical results. The startup log reports the mesh, the CG iterations and residual, the
+time taken, the range of 20-ft wind speeds across the map and the mass error (RMS divergence) before and after.
+
+### Settings (`config.h`)
+
+| Setting | Value | Meaning |
+|---|---|---|
+| USE_TERRAIN_WIND | true | Solve the terrain wind; false = one open wind everywhere |
+| WIND_COLUMN_SIZE_M | 100 m | Horizontal spacing of the wind mesh |
+| WIND_LAYERS | 20 | Mesh nodes up each column (WindNinja's default) |
+| WIND_TOP_ABOVE_SUMMIT_M | 2500 m | Height of the mesh top above the highest summit |
+| WIND_STABILITY_ALPHA | 1.0 | Atmospheric stability: 1 neutral, < 1 stable (down to 0.2, clear calm night), > 1 unstable (up to 5, strong sun, light wind) |
+
+**Why the top is higher than WindNinja's.** WindNinja sets its domain top from the cell size (column width /
+400, grown over the 20 layers), which is only ~160 m above the highest summit at 100 m columns. The top is an
+open boundary, so with it that low the air escapes upwards instead of speeding up over the ridges. In tests on
+a 400 m high hill this cut the crest speed-up from ~20 % to ~2 %. The answer stops changing once the top is
+about 2.5 km up, so that is the default; WindNinja's height is still used if it is higher.
+
+**Stability.** With alpha < 1 (stable air, e.g. at night) vertical motion is expensive, so more air is turned
+round hills and the horizontal speed changes are larger. With alpha > 1 (unstable, sunny afternoon) air goes
+over the terrain and the wind changes less. On the test hill the wind on the flank is turned 7 deg round it at
+alpha = 0.3, 2 deg at alpha = 1 and 0.3 deg at alpha = 3. WindNinja picks alpha from the Pasquill stability
+class (sun strength, cloud and wind speed); here it is a fixed setting until weather data is wired in.
+
+### Checks (`wf_tests`)
+
+On 30 m cells with 600 m columns (fast; the full 10 m / 100 m resolution gives the same answers within ~2 %):
+
+| Test | Result |
+|---|---|
+| Flat ground | 0 iterations, the open wind comes back exactly in every cell |
+| 400 m Gaussian hill, wind from the west | Crest +19 % (23.8 km/h), upwind and lee feet -8 %, flanks turned out round the hill by the same amount each side, mass error 19 x smaller |
+| 600 m deep north-south valley, wind from the SW | On the floor the wind slows to 16 km/h and turns from 45 deg to 29 deg, towards the valley axis |
+| Stability | Flank turning: stable > neutral > unstable |
+| Fire model | A field equal to the open wind gives identical spread rates; a field blowing north makes the fire run north |
+
+The mass error is measured from the third layer of elements up. In the lowest two layers the node smoothing
+(step 5) mixes in the ground nodes' slip velocity, so div(u) there reflects the smoothing rather than the solve.
+The solve itself conserves mass in the finite-element sense everywhere.
+
+### Limits
+
+- **No momentum.** A mass-conserving solver has no momentum equation, so it cannot make flow separation,
+  lee-side eddies or reversed flow. In the lee the wind comes out mirroring the windward side, too fast and
+  too steady. In field comparisons the WindNinja mass solver did as well as a CFD solver at ridgetops but worse
+  on lee slopes (Wagenbrenner et al. 2019, Atmosphere 10: 672). Lee-side fire spread and spotting will be off.
+- **Neutral and mechanical only.** There are no daytime upslope or night-time downslope (thermal) winds, which
+  dominate when the open wind is light. WindNinja's diurnal option would be the next step.
+- **Solved once.** The wind is worked out once for the fixed weather. Changing the wind mid-run would mean
+  solving again and recomputing every cell's spread rates while fire arrival times are already queued.
+- **Benchmark.** `wf_bench` still runs on the single open wind, so its checksum is unchanged; the solver has its
+  own tests.
+
+### References
+
+- Forthofer, Butler, Wagenbrenner (2014). A comparison of three approaches for simulating fine-scale surface
+  winds in support of wildland fire management. Part I. Int. J. Wildland Fire 23: 969-981.
+- Sherman (1978). A mass-consistent model for wind fields over complex terrain. J. Appl. Meteorol. 17: 312-319.
+- Wagenbrenner, Forthofer, Page, Butler (2019). Development and evaluation of a Reynolds-averaged Navier-Stokes
+  solver in WindNinja for operational wildland fire applications. Atmosphere 10: 672 (in the project files).
+- Albini & Baughman (1979), via Andrews (2012) RMRS-GTR-266: the z0 = 0.13 h and d = 0.64 h ratios.
 
 ## Layout (src/)
 
@@ -184,6 +322,7 @@ from the 1 m DEM when the tiles are present.
 | crown_fire | Van Wagner torching threshold, active crown fire threshold, fireline intensity and flame length |
 | topography | slope and aspect (upslope direction) from the DEM; 10 m cell terrain from 1 m pixels |
 | fire_model | FireSimulation: per-cell Rothermel rates, fire arrival times in time order |
+| wind_solver | Terrain-adjusted 20-ft wind per cell: mass-conserving finite-element solve on a 100 m terrain-following mesh (WindNinja's method) |
 | distance_transform | exact Euclidean distance transform; optionally range-limited to a window round the fire so the per-frame cost follows the fire size. The live fire's field is incremental (only cells that caught fire since the last frame are added) and reads "very far" beyond `LIVE_EDT_RANGE`, the furthest any reader looks |
 | safe_planner | fire-safe legs: line of sight, A*, string pulling; reports "no safe path" instead of guessing |
 | perimeter | committed fire + sectional perimeter updates; traces the perimeter line into ordered loops |

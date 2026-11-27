@@ -23,10 +23,13 @@ struct FireWeather {
 // Unit vector, in the grid frame (x = east, y = south), that a wind FROM fromDeg blows towards
 Vec2 windTowardGrid(float fromDeg);
 
+struct WindField;   // Per-cell terrain-adjusted 20-ft wind (wind_solver.h)
+
 // Rothermel-driven cellular automaton.
 //
 // Each cell gets a spread ellipse from its fuel model, slope, aspect and the wind (rothermel.h), with the wind
-// reduced under a forest canopy. Where there is canopy and the surface fire is intense enough, the cell becomes
+// reduced under a forest canopy. The wind is either one open wind for the whole map or, with a WindField, the
+// terrain-adjusted wind of each cell. Where there is canopy and the surface fire is intense enough, the cell becomes
 // a passive or active crown fire (crown_fire.h); active crown fire spreads at the crown rate. The rate at
 // which fire crosses from a cell to a neighbour is the harmonic mean of the two cells' rates in that
 // direction (half the step through each cell), so the travel time is exact for the Rothermel rates. Fire
@@ -35,10 +38,13 @@ Vec2 windTowardGrid(float fromDeg);
 // deterministic and independent of the tick length.
 class FireSimulation {
 public:
-    // cellSizeX/Y: ground size of one cell in metres
+    // cellSizeX/Y: ground size of one cell in metres.
+    // windField: optional per-cell 20-ft wind from solveTerrainWind (wind_solver.h). When given, each cell uses
+    // its own wind speed and direction from it, and weather.wind20ftKmh / windFromDeg are not used; when null,
+    // every cell gets the single open wind from `weather`. Only read here, in the constructor.
     FireSimulation(std::vector<Cell> grid, const FireWeather& weather = FireWeather(),
                    float cellSizeX = DEFAULT_CELL_SIZE_M, float cellSizeY = DEFAULT_CELL_SIZE_M,
-                   float minutesPerTick = SIM_MINUTES_PER_TICK);
+                   float minutesPerTick = SIM_MINUTES_PER_TICK, const WindField* windField = nullptr);
 
     bool ignite(int idx);   // Manual ignition (start point, mouse click). False if the cell isn't Unburned or can't burn.
     void step();            // Advance one tick
