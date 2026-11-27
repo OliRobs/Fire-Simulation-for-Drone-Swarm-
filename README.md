@@ -51,6 +51,7 @@ Controls:
 | `0` or Home | Whole map |
 | `P`, `V` | Toggle the perimeter ring, drone mission overlay |
 | `R` | Show/hide roads (hidden by default) |
+| `W` | Show/hide the terrain wind arrows (hidden by default; see "Terrain wind") |
 
 Cell grid lines appear once cells are about 8 pixels or more on screen. The title bar shows simulated time
 (one frame = 10 s), the zoom, the number of sweep drones (with the longest lap) and ACO drones (with the revisit
@@ -250,6 +251,22 @@ Without a `WindField` (`USE_TERRAIN_WIND = false`, the tests and the benchmark) 
 wind as before, with identical results. The startup log reports the mesh, the CG iterations and residual, the
 time taken, the range of 20-ft wind speeds across the map and the mass error (RMS divergence) before and after.
 
+### Seeing it: wind arrows (`W`)
+
+Press `W` to draw the wind field over the map (`wind_overlay.cpp` picks the arrows, `renderer.cpp` draws them):
+
+- **Direction:** each arrow points where the 20-ft wind blows, in the cell under its centre.
+- **Length:** in proportion to the speed; the fastest wind on the map gets the longest arrow (its speed is
+  printed to the console when you turn the arrows on).
+- **Colour:** the speed against the open wind from the weather. White = the same as the open 20 km/h,
+  shading to blue where the terrain slows it (fully blue at 30 % or more slower) and to magenta where it
+  speeds it up (fully magenta at 30 % or more faster). Valleys and lee slopes come out blue, ridges magenta.
+- **Spacing:** the arrows sit on a lattice fixed to the map, about 48-96 screen pixels apart at any zoom, so
+  zooming in shows more of them and panning doesn't move them about. Close in, neighbouring arrows look alike
+  because the wind is solved on 100 m columns.
+
+The key does nothing (and says so in the console) when `USE_TERRAIN_WIND` is off.
+
 ### Settings (`config.h`)
 
 | Setting | Value | Meaning |
@@ -323,6 +340,7 @@ The solve itself conserves mass in the finite-element sense everywhere.
 | topography | slope and aspect (upslope direction) from the DEM; 10 m cell terrain from 1 m pixels |
 | fire_model | FireSimulation: per-cell Rothermel rates, fire arrival times in time order |
 | wind_solver | Terrain-adjusted 20-ft wind per cell: mass-conserving finite-element solve on a 100 m terrain-following mesh (WindNinja's method) |
+| wind_overlay | Which wind arrows to draw for the current view: map-fixed lattice, length by speed, colour against the open wind (`W`) |
 | distance_transform | exact Euclidean distance transform; optionally range-limited to a window round the fire so the per-frame cost follows the fire size. The live fire's field is incremental (only cells that caught fire since the last frame are added) and reads "very far" beyond `LIVE_EDT_RANGE`, the furthest any reader looks |
 | safe_planner | fire-safe legs: line of sight, A*, string pulling; reports "no safe path" instead of guessing |
 | perimeter | committed fire + sectional perimeter updates; traces the perimeter line into ordered loops |

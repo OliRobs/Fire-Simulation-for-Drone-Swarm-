@@ -145,6 +145,9 @@ int main(int argc, char** argv) {
     FireSimulation sim(std::move(terrain.grid), weather, terrain.cellSizeX, terrain.cellSizeY,
                        SIM_MINUTES_PER_TICK, USE_TERRAIN_WIND ? &windField : nullptr);
 
+    // The wind arrows ('W') draw this field; their colours compare each cell with the open wind
+    renderer.setWindField(USE_TERRAIN_WIND ? &windField : nullptr, weather.wind20ftKmh);
+
     // Initial full-grid visual repaint
     renderer.paintAll(sim.grid());
 
@@ -238,6 +241,21 @@ int main(int argc, char** argv) {
                 renderer.frameMask(sim.fireMask());
             }
 
+            // 'W' Key: Toggle the terrain wind arrows (only when a terrain wind field was solved)
+            if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::W) {
+                if (!renderer.hasWindField()) {
+                    std::printf("No terrain wind field to show (USE_TERRAIN_WIND is off in config.h)\n");
+                }
+                else {
+                    renderer.showWind = !renderer.showWind;
+                    if (renderer.showWind) {
+                        std::printf("Wind arrows: 20-ft wind, length by speed (longest = %.1f km/h); white = the open "
+                                    "%.0f km/h wind, blue = slower, magenta = faster (full colour at 30 %%)\n",
+                                    renderer.windMaxKmh(), weather.wind20ftKmh);
+                    }
+                }
+            }
+
             // 'R' Key: Toggle the road overlay (repaints the base map, then the perimeter ring on top)
             if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::R) {
                 renderer.showRoads = !renderer.showRoads;
@@ -293,7 +311,7 @@ int main(int argc, char** argv) {
             lastTitleZoom = renderer.zoom();
             char title[192];
             std::snprintf(title, sizeof(title),
-                          "Wildfire  t = %dh %02dm  zoom %.1fx  |  wheel zoom, right-drag pan, F fire, 0 reset, P V R overlays",
+                          "Wildfire  t = %dh %02dm  zoom %.1fx  |  wheel zoom, right-drag pan, F fire, 0 reset, P V R W overlays",
                           simMinute / 60, simMinute % 60, renderer.zoom());
             // Followed by the drone counts (and any over-limit warning) from the latest plan
             renderer.window().setTitle(std::string(title) + renderer.fleetStatus());

@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "wind_overlay.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -310,6 +311,9 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
         }
     }
 
+    // Terrain wind arrows ('W' key toggle), over the map and mission overlay, under the drones
+    if (showWind) drawWindArrows(perPixel);
+
     // Render drone sensor coverage bubbles and physical drone body markers
     for (const Drone& d : drones) {
         const sf::Color c = d.state == DroneState::Returning ? kReturningColour
@@ -328,6 +332,69 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
 
     window_.display();
 }
+// ============================================================================
+// Terrain wind arrows
+// ============================================================================
+
+// Keeps a pointer to the wind field and works out its speed range once (the longest arrow is the fastest wind)
+void Renderer::setWindField(const WindField* field, float openKmh) {
+    wind_ = field && !field->speedKmh.empty() ? field : nullptr;
+    windOpenKmh_ = openKmh;
+    windMinKmh_ = windMaxKmh_ = 0.0f;
+    if (wind_) {
+        const auto range = std::minmax_element(wind_->speedKmh.begin(), wind_->speedKmh.end());
+        windMinKmh_ = *range.first;
+        windMaxKmh_ = *range.second;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Draws the arrows buildWindArrows picks for the current view. Each arrow is a shaft and two head strokes,
+// drawn as thin rectangles so they can be thicker than SFML's 1-pixel lines: first WIND_OUTLINE_PX wide in
+// translucent black (an outline, so pale arrows still show on the light terrain shading and on the mission
+// overlay), then WIND_STROKE_PX wide in the arrow's colour. Widths are in screen pixels, converted with
+// perPixel, so arrows look the same at every zoom. Rebuilt every frame: a few hundred arrows at most, since
+// their spacing on screen stays about WIND_ARROW_SPACING_PX whatever the zoom.
+// ----------------------------------------------------------------------------
+void Renderer::drawWindArrows(float perPixel) {
+    if (!wind_) return;
+    constexpr float WIND_STROKE_PX = 1.6f;    // Coloured stroke width, screen pixels
+    constexpr float WIND_OUTLINE_PX = 3.6f;   // Dark outline width (1 px each side of the stroke)
+    const std::vector<WindArrow> arrows = buildWindArrows(*wind_, view_, perPixel, windOpenKmh_, windMaxKmh_);
+    sf::VertexArray outline(sf::Quads), strokes(sf::Quads);
+
+    // Appends segment (ax, ay) -> (bx, by) as a rectangle `width` world units wide, extended by half a width
+    // at both ends so the three strokes of an arrow join cleanly at the tip
+    const auto addSegment = [](sf::VertexArray& va, float ax, float ay, float bx, float by, float width, sf::Color c) {
+        float dx = bx - ax, dy = by - ay;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len <= 0.0f) return;
+        dx /= len;
+        dy /= len;
+        const float h = 0.5f * width;
+        const float nx = -dy * h, ny = dx * h;          // Half-width across the segment
+        ax -= dx * h; ay -= dy * h;                      // Extend both ends
+        bx += dx * h; by += dy * h;
+        va.append(sf::Vertex(sf::Vector2f(ax + nx, ay + ny), c));
+        va.append(sf::Vertex(sf::Vector2f(bx + nx, by + ny), c));
+        va.append(sf::Vertex(sf::Vector2f(bx - nx, by - ny), c));
+        va.append(sf::Vertex(sf::Vector2f(ax - nx, ay - ny), c));
+    };
+    // The three strokes of arrow a (shaft and the two head strokes, all ending at the tip)
+    const auto addArrow = [&](sf::VertexArray& va, const WindArrow& a, float width, sf::Color c) {
+        addSegment(va, a.x0, a.y0, a.x1, a.y1, width, c);
+        addSegment(va, a.hx0, a.hy0, a.x1, a.y1, width, c);
+        addSegment(va, a.hx1, a.hy1, a.x1, a.y1, width, c);
+    };
+    const sf::Color shade(0, 0, 0, 170);
+    for (const WindArrow& a : arrows) {
+        addArrow(outline, a, WIND_OUTLINE_PX * perPixel, shade);
+        addArrow(strokes, a, WIND_STROKE_PX * perPixel, sf::Color(a.r, a.g, a.b));
+    }
+    window_.draw(outline);
+    window_.draw(strokes);
+}
+
 // ============================================================================
 // Zoom and Pan
 // ============================================================================

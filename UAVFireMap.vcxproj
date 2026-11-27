@@ -124,6 +124,7 @@ exit /b 0</Command>
     <ClCompile Include="src\topography.cpp" />
     <ClCompile Include="src\viewport.cpp" />
     <ClCompile Include="src\voronoi.cpp" />
+    <ClCompile Include="src\wind_overlay.cpp" />
     <ClCompile Include="src\wind_solver.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -148,6 +149,7 @@ exit /b 0</Command>
     <ClInclude Include="src\viewport.h" />
     <ClInclude Include="src\types.h" />
     <ClInclude Include="src\voronoi.h" />
+    <ClInclude Include="src\wind_overlay.h" />
     <ClInclude Include="src\wind_solver.h" />
   </ItemGroup>
   <ItemGroup>
