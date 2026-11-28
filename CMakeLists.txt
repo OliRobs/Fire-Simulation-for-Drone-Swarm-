@@ -37,7 +37,8 @@ add_library(wf_core STATIC
   src/viewport.cpp
   src/perimeter.cpp
   src/wind_solver.cpp
-  src/wind_overlay.cpp)
+  src/wind_overlay.cpp
+  src/weather.cpp)
 target_include_directories(wf_core PUBLIC src)
 wf_warnings(wf_core)
 
@@ -68,7 +69,8 @@ set(WF_TEST_FILES
   sweep_lanes
   sweep_fleet
   mission
-  grid)
+  grid
+  weather)
 set(WF_TEST_SOURCES tests/test_main.cpp)
 foreach(name IN LISTS WF_TEST_FILES)
   list(APPEND WF_TEST_SOURCES tests/test_${name}.cpp)
@@ -77,6 +79,8 @@ endforeach()
 enable_testing()
 add_executable(wf_tests ${WF_TEST_SOURCES})
 target_link_libraries(wf_tests PRIVATE wf_test_support)
+# The weather tests read scenarios/default.ini from the source tree
+target_compile_definitions(wf_tests PRIVATE WF_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 wf_warnings(wf_tests)
 foreach(name IN LISTS WF_TEST_FILES)
   add_test(NAME ${name} COMMAND wf_tests --file test_${name}.cpp --fast)

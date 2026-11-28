@@ -125,6 +125,7 @@ exit /b 0</Command>
     <ClCompile Include="src\viewport.cpp" />
     <ClCompile Include="src\voronoi.cpp" />
     <ClCompile Include="src\wind_overlay.cpp" />
+    <ClCompile Include="src\weather.cpp" />
     <ClCompile Include="src\wind_solver.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -151,6 +152,7 @@ exit /b 0</Command>
     <ClInclude Include="src\grid.h" />
     <ClInclude Include="src\voronoi.h" />
     <ClInclude Include="src\wind_overlay.h" />
+    <ClInclude Include="src\weather.h" />
     <ClInclude Include="src\wind_solver.h" />
   </ItemGroup>
   <ItemGroup>

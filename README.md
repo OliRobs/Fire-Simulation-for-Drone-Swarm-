@@ -16,6 +16,7 @@ Needs CMake 3.16+, **SFML 2.5 – 2.6** (not SFML 3, the API changed) and GDAL 3
     cmake -S . -B build && cmake --build build
     ./build/wildfire        # run from the repo root (reads the .tif files there, in ./landfire or ./dem)
     ./build/wildfire --data D:/gis/landfire --centre -117.87 34.25   # another folder / window centre
+    ./build/wildfire --weather scenarios/default.ini --wind 35 --wind-from 270   # weather scenario (below)
     ./build/wf_tests        # headless tests (all of them)
     ./build/wf_tests wind   # only the tests whose name contains "wind"; --list lists them
     ctest --test-dir build -j -LE slow   # quick run: every test file in parallel, slow tests left out
@@ -175,7 +176,8 @@ published values (`wf_tests`).
 
 ### Data the model still needs (not in the LANDFIRE layers)
 
-These are fixed placeholder values in `config.h` / `FireWeather` for now:
+These are placeholder values for now: the defaults in `config.h` / `FireWeather`, which a weather scenario
+file can replace at start-up (see "Weather scenario files" below):
 
 | Input | Current value | Where to get it |
 |---|---|---|
@@ -187,6 +189,36 @@ These are fixed placeholder values in `config.h` / `FireWeather` for now:
 
 Aspect is not needed as a separate layer: it is computed from the elevation (Horn's method, `topography.cpp`),
 from the 1 m DEM when the tiles are present.
+
+### Weather scenario files (`--weather`)
+
+`wildfire --weather <file>` reads a scenario on top of the defaults; `--wind <km/h>` and `--wind-from <deg>`
+then override the wind (handy for trying a wind shift without editing a file). The start-up log prints the
+scenario and where it came from. `scenarios/default.ini` holds the defaults, each with its units and source:
+copy it and edit.
+
+    # A hot, dry, windy afternoon          '#' or ';' starts a comment; blank lines are ignored
+    wind_20ft_kmh = 35                     one "key = value" per line
+    wind_from_deg = 270
+    moisture_1h_pct = 3                    moistures in percent (stored as fractions: 3 -> 0.03)
+    crown_fire = true                      true/false, yes/no, on/off or 1/0
+
+| Key | Meaning | Default | Allowed |
+|---|---|---|---|
+| `wind_20ft_kmh` | open wind 20 ft above the vegetation, km/h | 20 | 0 .. 150 |
+| `wind_from_deg` | direction the wind blows from, degrees clockwise from north | 225 | 0 .. 360 |
+| `wind_adjustment_factor` | midflame / 20-ft wind; 0 = from fuel depth and canopy (Andrews 2012) | 0 | 0 .. 1 |
+| `wind_limit` | cap at Rothermel's maximum reliable wind | true | boolean |
+| `wind_stability_alpha` | terrain wind stability (1 neutral, < 1 stable, > 1 unstable) | 1 | 0.05 .. 10 |
+| `moisture_1h_pct`, `moisture_10h_pct`, `moisture_100h_pct` | dead fuel moisture, % | 6, 7, 8 | 1 .. 60 |
+| `moisture_live_herb_pct`, `moisture_live_woody_pct` | live fuel moisture, % | 60, 90 | 30 .. 300 |
+| `crown_fire` | allow torching and crown fire | true | boolean |
+| `foliar_moisture_pct` | canopy foliar moisture, % | 100 | 30 .. 300 |
+
+Keys left out keep their default. An unknown key, a key given twice, a line without `=`, a value that is not a
+number (or not a boolean where one is needed) or out of range stops the program with the file name and line
+number, e.g. `my.ini:3: unknown key 'wind_speed'`, so a typo never silently runs a different scenario. The
+parser is `weather.cpp` (no extra dependency); `wildfire --help` lists the keys.
 
 ## Terrain wind (`wind_solver.cpp`)
 

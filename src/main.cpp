@@ -14,6 +14,7 @@
 #include "raster_io.h"
 #include "renderer.h"
 #include "terrain.h"
+#include "weather.h"
 #include "wind_solver.h"
 
 // ============================================================================
@@ -27,12 +28,16 @@
 // 5. Autonomous Multi-Drone Mission Control & Path Re-Planning
 // 6. Real-time Visualization & User Event Processing (SFML)
 //
-// Usage:  wildfire [--data <folder>] [--centre <lon> <lat>]
-//   --data    folder holding the LANDFIRE .tif files and the USGS 1 m DEM tiles (searched recursively).
-//             Default: ./landfire, then the working folder itself (files such as LF2020_Elev_CONUS.tif placed
-//             in the repo root); DEM tiles (USGS_1M_*.tif) are also looked for in ./dem
-//   --centre  WGS84 longitude/latitude of the simulation window centre, default the centre of the DEM tiles
-//             (or of the LANDFIRE raster without them)
+// Usage:  wildfire [--data <folder>] [--centre <lon> <lat>] [--weather <file>] [--wind <km/h>] [--wind-from <deg>]
+//   --data       folder holding the LANDFIRE .tif files and the USGS 1 m DEM tiles (searched recursively).
+//                Default: ./landfire, then the working folder itself (files such as LF2020_Elev_CONUS.tif placed
+//                in the repo root); DEM tiles (USGS_1M_*.tif) are also looked for in ./dem
+//   --centre     WGS84 longitude/latitude of the simulation window centre, default the centre of the DEM tiles
+//                (or of the LANDFIRE raster without them)
+//   --weather    weather scenario file (key = value lines, see scenarios/default.ini and weather.h); keys it
+//                leaves out keep config.h's defaults
+//   --wind       open 20-ft wind speed, km/h, and --wind-from its direction (blowing FROM, degrees clockwise
+//                from north); applied after --weather
 // Without LANDFIRE data it falls back to elevation_map.tif (+ optional fuel_map.tif) in the working folder.
 // ============================================================================
 
@@ -58,16 +63,18 @@ namespace {
     // ------------------------------------------------------------------------
     // Print the weather assumptions: they are not in the LANDFIRE data, so make them visible
     // ------------------------------------------------------------------------
-    void printWeather(const FireWeather& w) {
-        std::printf("Fire weather (fixed scenario, not from data):\n"
+    // source: where the values came from (the scenario file, or config.h's defaults), plus any overrides
+    void printWeather(const FireWeather& w, const std::string& source) {
+        std::printf("Fire weather (fixed scenario, not from data; %s):\n"
                     "  20-ft wind %.0f km/h from %.0f deg, WAF %s\n"
                     "  fuel moisture: 1-h %.0f%%, 10-h %.0f%%, 100-h %.0f%%, live herb %.0f%%, live woody %.0f%%\n"
-                    "  foliar moisture %.0f%%, crown fire %s\n",
-                    w.wind20ftKmh, w.windFromDeg,
+                    "  foliar moisture %.0f%%, crown fire %s, wind limit %s, terrain wind stability alpha %.2f\n",
+                    source.c_str(), w.wind20ftKmh, w.windFromDeg,
                     w.windAdjustmentFactor > 0 ? std::to_string(w.windAdjustmentFactor).c_str() : "from fuel depth and canopy (Andrews 2012)",
                     w.moisture.dead1h * 100, w.moisture.dead10h * 100, w.moisture.dead100h * 100,
                     w.moisture.liveHerb * 100, w.moisture.liveWoody * 100,
-                    w.foliarMoisturePct, w.crownFire ? "on" : "off");
+                    w.foliarMoisturePct, w.crownFire ? "on" : "off", w.windLimit ? "on" : "off",
+                    w.windStabilityAlpha);
     }
 }
 
@@ -80,6 +87,18 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------------
     std::string dataDir;   // Empty: look in ./landfire, then next to the program's working folder
     WindowRequest window;
+    std::string weatherFile;                  // Empty: config.h's default scenario
+    double windOverride = -1.0, windFromOverride = -1.0;   // < 0: not given
+    // A command-line number, or exit with a message if it isn't one (strtod must use the whole argument)
+    auto numberArg = [](const char* option, const char* text) {
+        char* end = nullptr;
+        const double v = std::strtod(text, &end);
+        if (end == text || *end != '\0' || !std::isfinite(v) || v < 0.0) {
+            std::cerr << option << " needs a number >= 0, got '" << text << "'\n";
+            std::exit(1);
+        }
+        return v;
+    };
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
             dataDir = argv[++i];
@@ -89,10 +108,47 @@ int main(int argc, char** argv) {
             window.lon = std::atof(argv[++i]);
             window.lat = std::atof(argv[++i]);
         }
+        else if (std::strcmp(argv[i], "--weather") == 0 && i + 1 < argc) {
+            weatherFile = argv[++i];
+        }
+        else if (std::strcmp(argv[i], "--wind") == 0 && i + 1 < argc) {
+            windOverride = numberArg("--wind", argv[++i]);
+        }
+        else if (std::strcmp(argv[i], "--wind-from") == 0 && i + 1 < argc) {
+            windFromOverride = numberArg("--wind-from", argv[++i]);
+            if (windFromOverride > 360.0) { std::cerr << "--wind-from needs 0 .. 360 degrees\n"; return 1; }
+        }
         else {
-            std::cerr << "Usage: wildfire [--data <folder>] [--centre <lon> <lat>]\n";
+            // --help / -h: the usage on stdout, success; anything else: the usage on stderr, failure
+            const bool help = std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0;
+            (help ? std::cout : std::cerr)
+                << "Usage: wildfire [--data <folder>] [--centre <lon> <lat>] [--weather <file>] [--wind <km/h>]"
+                   " [--wind-from <deg>]\n"
+                   "Weather file keys (key = value, # comments; see scenarios/default.ini):\n" << weatherKeysHelp();
+            return help ? 0 : 1;
+        }
+    }
+
+    // --- Weather scenario: config.h's defaults, then the file, then the command-line overrides ---
+    FireWeather weather = defaultWeather();
+    std::string weatherSource = "config.h defaults";
+    if (!weatherFile.empty()) {
+        try {
+            weather = loadWeatherFile(weatherFile);
+        }
+        catch (const WeatherFileError& e) {
+            std::cerr << "Weather file error: " << e.what() << "\n";
             return 1;
         }
+        weatherSource = "from " + weatherFile;
+    }
+    if (windOverride >= 0.0) {
+        weather.wind20ftKmh = static_cast<float>(windOverride);
+        weatherSource += ", --wind";
+    }
+    if (windFromOverride >= 0.0) {
+        weather.windFromDeg = static_cast<float>(windFromOverride);
+        weatherSource += ", --wind-from";
     }
 
     // Where the LANDFIRE .tif files are: --data folder, else a landfire/ folder (and its sub-folders), else
@@ -126,16 +182,17 @@ int main(int argc, char** argv) {
     // Set up rendering engine with the elevation shading (white = highest)
     Renderer renderer(grid, computeTerrainShade(terrain.grid));
 
-    // Rothermel spread needs weather as well as the landscape; see config.h and README for what to supply
-    const FireWeather weather;
-    printWeather(weather);
+    // Rothermel spread needs weather as well as the landscape (read above; see weather.h and README)
+    printWeather(weather, weatherSource);
 
     // Terrain-adjusted wind: the open wind is adjusted over the terrain once, before the fire starts, so each
     // cell gets its own 20-ft wind speed and direction (wind_solver.h). Off: one wind for the whole map.
     WindField windField;
     if (USE_TERRAIN_WIND) {
         const auto t0 = std::chrono::steady_clock::now();
-        windField = solveTerrainWind(grid, terrain.grid, weather.wind20ftKmh, weather.windFromDeg);
+        WindSolverSettings windSettings;
+        windSettings.alpha = weather.windStabilityAlpha;
+        windField = solveTerrainWind(grid, terrain.grid, weather.wind20ftKmh, weather.windFromDeg, windSettings);
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         const auto range = std::minmax_element(windField.speedKmh.begin(), windField.speedKmh.end());
         std::printf("Terrain wind: %d x %d x %d mesh, %d CG iterations (residual %.1e%s), %.1f s\n"

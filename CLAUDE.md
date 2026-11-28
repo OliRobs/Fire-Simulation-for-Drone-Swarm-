@@ -56,7 +56,9 @@ surveys round the fire. README.md has the module table and input-data notes.
 - Fire spread is Rothermel (`rothermel.cpp`), equations from Andrews 2018 (RMRS-GTR-371); canopy wind sheltering
   from Andrews 2012; crown fire (`crown_fire.cpp`) is the Finney 1998 method (Van Wagner 1977 thresholds, Rothermel
   1991 crown rate). Weather (fuel moisture, foliar moisture, wind) is not in the LANDFIRE data; the placeholders
-  are in `config.h` / `FireWeather` (README lists them).
+  are in `config.h` / `FireWeather` (README lists them). A scenario file replaces them at start-up
+  (`--weather <file>`, parsed by `weather.cpp`; `scenarios/default.ini` holds the defaults), so a new weather
+  input goes in FireWeather, the key table in `weather.cpp`, `scenarios/default.ini` and the README table.
 
 ## Drone survey design
 

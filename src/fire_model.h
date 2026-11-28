@@ -9,8 +9,9 @@
 #include "grid.h"
 #include "types.h"
 
-// Weather inputs to the Rothermel model. None of these are in the LANDFIRE layers: the defaults are a
-// fixed scenario (config.h, and Scott & Burgan's D2L2 moisture) until real weather data is wired in.
+// Weather inputs to the Rothermel model and the terrain wind. None of these are in the LANDFIRE layers: the
+// defaults are a fixed scenario (config.h, and Scott & Burgan's D2L2 moisture) until real weather data is wired
+// in. A scenario file can replace any of them at start-up (weather.h, wildfire --weather <file>).
 struct FireWeather {
     FuelMoisture moisture;                          // Dead 1/10/100-h and live herb/woody, fractions
     float wind20ftKmh = WIND_SPEED_20FT_KMH;        // Open wind at 20 ft
@@ -19,6 +20,7 @@ struct FireWeather {
     bool windLimit = APPLY_WIND_LIMIT;
     bool crownFire = ENABLE_CROWN_FIRE;              // Allow torching / crown fire where there is canopy
     float foliarMoisturePct = FOLIAR_MOISTURE_PCT;   // Live canopy foliage moisture, %
+    float windStabilityAlpha = WIND_STABILITY_ALPHA; // Terrain wind only (WindSolverSettings::alpha); not read by FireSimulation
 };
 
 // Unit vector, in the grid frame (x = east, y = south), that a wind FROM fromDeg blows towards
