@@ -10,7 +10,7 @@
 // it into an sf::View. World units are window pixels at zoom 1 (cells x CELL_SIZE).
 // ============================================================================
 
-constexpr float VIEW_MAX_ZOOM = GRID_WIDTH / 10.0f;   // Zoom in until 10 cells (100 m) fill the view: 200x on 2000 cells
+constexpr float VIEW_MAX_ZOOM = GRID_WIDTH / 10.0f;   // Zoom in until 10 cells (100 m) fill the view: 120x on 1200 cells
 constexpr float VIEW_ZOOM_STEP = 1.25f;  // One mouse-wheel notch or +/- key press
 
 class Viewport {

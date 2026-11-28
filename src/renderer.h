@@ -76,7 +76,7 @@ private:
     std::string fleetStatus_;
 
     // Rows of pixels_ changed since the last upload, [dirtyY0_, dirtyY1_) (empty when dirtyY1_ <= dirtyY0_).
-    // draw() sends only these rows to the GPU instead of the whole 2000 x 2000 x 4 = 16 MB image every frame.
+    // draw() sends only these rows to the GPU instead of the whole 1200 x 1000 x 4 = 4.8 MB image every frame.
     int dirtyY0_ = 0, dirtyY1_ = 0;
     GridRect overlayDrawn_;   // Part of overlayPixels_ the last setMissionVisuals() may have written
 
