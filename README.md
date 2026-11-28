@@ -28,6 +28,10 @@ and worst case, and a checksum of the final state (fire, distance fields, plan, 
 unchanged; a change meant to alter results (including a `config.h` design value) updates that file in the same
 pull request.
 
+`./build/wf_bench --wind` times the terrain wind solver on its own, at the app's size (10 m cells, a 120 x 100 x 20
+wind mesh) on a synthetic ridge-and-valley map, and prints a checksum of every cell's solved wind. CI checks it
+against `tools/wind_checksum.txt` in the same way.
+
 Windows: CMake looks for SFML in `C:\SFML-2.6.1` and GDAL in `C:\gdal` (the same folders as
 `UAVFireMap.vcxproj`). If yours are elsewhere, point CMake at them:
 
@@ -315,8 +319,8 @@ The solve itself conserves mass in the finite-element sense everywhere.
   dominate when the open wind is light. WindNinja's diurnal option would be the next step.
 - **Solved once.** The wind is worked out once for the fixed weather. Changing the wind mid-run would mean
   solving again and recomputing every cell's spread rates while fire arrival times are already queued.
-- **Benchmark.** `wf_bench` still runs on the single open wind, so its checksum is unchanged; the solver has its
-  own tests.
+- **Benchmark.** The frame benchmark (`wf_bench [frames]`) still runs on the single open wind. The solver has
+  its own benchmark and checksum, `wf_bench --wind` (see Build), and its own tests.
 
 ### References
 

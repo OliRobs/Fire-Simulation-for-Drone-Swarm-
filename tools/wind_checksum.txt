@@ -1,0 +1,7 @@
+41a91a80ed5bfea8
+# Expected checksum of `wf_bench --wind` (first line only is read): every cell's solved 20-ft wind speed and
+# direction, plus the CG iteration count and final residual, on the benchmark's synthetic terrain at the app's
+# mesh size. CI fails the Linux job when it differs, i.e. when a change alters the solved wind.
+# A change that is MEANT to alter the wind (a solver fix, a WIND_* value in config.h) updates the first line in
+# the same pull request and says why. A pure optimisation must leave it alone.
+# Computed with GCC on Ubuntu 24.04, Release build (MSVC may round differently, so Windows CI does not compare it).

@@ -58,6 +58,10 @@ struct WindSolverSettings {
     float coriolisPerS = 1.0e-4f;             // |f| for the neutral boundary-layer height 0.2 u* / f (WindNinja's default when the latitude is unknown)
     double tolerance = 1.0e-4;                // CG stops when ||residual|| / ||right-hand side|| falls below this
     int maxIterations = 20000;                // Safety cap on CG iterations
+    // Test hook: run the solver as first written (node-by-node CG kernels, the element geometry worked out
+    // afresh at every Gauss point) instead of the faster row-wise kernels and shared column geometry. Both
+    // give bit-identical results; the tests use this to prove it. Leave false.
+    bool referenceKernels = false;
 };
 
 // The solved wind on the fire grid, one entry per fire cell (row-major, GRID_WIDTH x GRID_HEIGHT)

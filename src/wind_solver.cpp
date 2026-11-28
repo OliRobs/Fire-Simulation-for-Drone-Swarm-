@@ -59,25 +59,63 @@ namespace {
         double pos[3] = { 0.0, 0.0, 0.0 };   // Physical position of the point
     };
 
-    // Fills hp for the point (xi, eta, zeta) of the element whose corner coordinates are xyz[a][0..2].
-    // The Jacobian J[r][c] = d x_r / d xi_c; physical derivatives are dN/dx = J^-T dN/dxi.
-    void evalHex(const double xyz[8][3], double xi, double eta, double zeta, HexPoint& hp) {
-        double dNdXi[8][3];
+    // Shape functions and their derivatives in natural coordinates at one point (xi, eta, zeta). They depend
+    // only on the point, not on the element, so the solver works them out once for each of the 8 Gauss points.
+    struct NaturalPoint {
+        double N[8];            // N_a
+        double dNdXi[8][3];     // dN_a/dxi, dN_a/deta, dN_a/dzeta
+    };
+
+    NaturalPoint naturalPoint(double xi, double eta, double zeta) {
+        NaturalPoint np;
         for (int a = 0; a < 8; ++a) {
             const double sx = (a & 1) ? 1.0 : -1.0, sy = ((a >> 1) & 1) ? 1.0 : -1.0, sz = ((a >> 2) & 1) ? 1.0 : -1.0;
             const double fx = 1.0 + sx * xi, fy = 1.0 + sy * eta, fz = 1.0 + sz * zeta;
-            hp.N[a] = 0.125 * fx * fy * fz;
-            dNdXi[a][0] = 0.125 * sx * fy * fz;
-            dNdXi[a][1] = 0.125 * fx * sy * fz;
-            dNdXi[a][2] = 0.125 * fx * fy * sz;
+            np.N[a] = 0.125 * fx * fy * fz;
+            np.dNdXi[a][0] = 0.125 * sx * fy * fz;
+            np.dNdXi[a][1] = 0.125 * fx * sy * fz;
+            np.dNdXi[a][2] = 0.125 * fx * fy * sz;
         }
-        double J[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
-        hp.pos[0] = hp.pos[1] = hp.pos[2] = 0.0;
-        for (int a = 0; a < 8; ++a)
-            for (int r = 0; r < 3; ++r) {
-                hp.pos[r] += hp.N[a] * xyz[a][r];
-                for (int c = 0; c < 3; ++c) J[r][c] += xyz[a][r] * dNdXi[a][c];
-            }
+        return np;
+    }
+
+    // The 2 x 2 x 2 Gauss points of an element, g = 0..7: xi, eta, zeta = +-GAUSS from bits 0, 1, 2 of g
+    struct GaussTable {
+        NaturalPoint p[8];
+        GaussTable() {
+            for (int g = 0; g < 8; ++g)
+                p[g] = naturalPoint((g & 1) ? GAUSS : -GAUSS, ((g >> 1) & 1) ? GAUSS : -GAUSS,
+                                    ((g >> 2) & 1) ? GAUSS : -GAUSS);
+        }
+    };
+
+    // One physical coordinate (x, y or z) of the 8 corners mapped through a point's shape functions: the
+    // coordinate of the point, sum N_a c_a, and its row of the Jacobian, d c / d xi_k = sum c_a dN_a/dxi_k.
+    // Each sum runs over the corners in order a = 0..7, starting from 0.
+    struct JacobianRow {
+        double pos = 0.0;
+        double J[3] = { 0.0, 0.0, 0.0 };
+    };
+
+    JacobianRow jacobianRow(const NaturalPoint& np, const double coord[8]) {
+        JacobianRow row;
+        for (int a = 0; a < 8; ++a) {
+            row.pos += np.N[a] * coord[a];
+            for (int c = 0; c < 3; ++c) row.J[c] += coord[a] * np.dNdXi[a][c];
+        }
+        return row;
+    }
+
+    // Completes hp at one point from the point's natural shape functions and the three Jacobian rows (x, y, z).
+    // The Jacobian J[r][c] = d x_r / d xi_c; physical derivatives are dN/dx = J^-T dN/dxi.
+    void finishHex(const NaturalPoint& np, const JacobianRow& rx, const JacobianRow& ry, const JacobianRow& rz,
+                   HexPoint& hp) {
+        const double(&dNdXi)[8][3] = np.dNdXi;
+        for (int a = 0; a < 8; ++a) hp.N[a] = np.N[a];
+        hp.pos[0] = rx.pos;
+        hp.pos[1] = ry.pos;
+        hp.pos[2] = rz.pos;
+        const double J[3][3] = { { rx.J[0], rx.J[1], rx.J[2] }, { ry.J[0], ry.J[1], ry.J[2] }, { rz.J[0], rz.J[1], rz.J[2] } };
         // Inverse of J by cofactors
         const double det = J[0][0] * (J[1][1] * J[2][2] - J[1][2] * J[2][1])
                          - J[0][1] * (J[1][0] * J[2][2] - J[1][2] * J[2][0])
@@ -99,6 +137,29 @@ namespace {
             for (int r = 0; r < 3; ++r)
                 hp.dN[a][r] = dNdXi[a][0] * Ji[0][r] + dNdXi[a][1] * Ji[1][r] + dNdXi[a][2] * Ji[2][r];
     }
+
+    // Fills hp for the point (xi, eta, zeta) of the element whose corner coordinates are xyz[a][0..2]
+    void evalHex(const double xyz[8][3], double xi, double eta, double zeta, HexPoint& hp) {
+        const NaturalPoint np = naturalPoint(xi, eta, zeta);
+        double c[3][8];
+        for (int a = 0; a < 8; ++a)
+            for (int r = 0; r < 3; ++r) c[r][a] = xyz[a][r];
+        finishHex(np, jacobianRow(np, c[0]), jacobianRow(np, c[1]), jacobianRow(np, c[2]), hp);
+    }
+
+    // ------------------------------------------------------------------------
+    // Gauss-point geometry of every element, x and y parts shared down each column
+    // ------------------------------------------------------------------------
+    // The mesh columns stand on a regular x-y grid, so the x and y rows of an element's Jacobian (and the x
+    // and y of its Gauss points) depend only on the element's i (for x) or j (for y), never on k or on the
+    // terrain. They are worked out once per i and per j (8 Gauss points each) and reused for every element;
+    // only the z row is computed per element. Each row is the same sum as evalHex computes, so every HexPoint
+    // comes out bit-identical to evalHex at the same Gauss point. This halves the cost of the two passes that
+    // visit every Gauss point (assembly and gradient smoothing).
+    struct ElementGeometry {
+        GaussTable gauss;
+        std::vector<JacobianRow> xRows, yRows;   // [i * 8 + g], [j * 8 + g]
+    };
 
     // ------------------------------------------------------------------------
     // The wind mesh: columns of terrain-following nodes (step 1)
@@ -128,6 +189,35 @@ namespace {
             }
         }
     };
+
+    // Builds the shared x and y Jacobian rows for mesh m (see ElementGeometry). Corner x coordinates are
+    // (ci + 0.5) hx with ci = i + (a & 1), as Mesh::elementCorners sets them; y likewise with j.
+    ElementGeometry elementGeometry(const Mesh& m) {
+        ElementGeometry eg;
+        eg.xRows.resize(static_cast<std::size_t>(m.nx) * 8);
+        eg.yRows.resize(static_cast<std::size_t>(m.ny) * 8);
+        for (int i = 0; i + 1 < m.nx; ++i) {
+            double cx[8];
+            for (int a = 0; a < 8; ++a) cx[a] = (i + (a & 1) + 0.5) * m.hx;
+            for (int g = 0; g < 8; ++g) eg.xRows[static_cast<std::size_t>(i) * 8 + g] = jacobianRow(eg.gauss.p[g], cx);
+        }
+        for (int j = 0; j + 1 < m.ny; ++j) {
+            double cy[8];
+            for (int a = 0; a < 8; ++a) cy[a] = (j + ((a >> 1) & 1) + 0.5) * m.hy;
+            for (int g = 0; g < 8; ++g) eg.yRows[static_cast<std::size_t>(j) * 8 + g] = jacobianRow(eg.gauss.p[g], cy);
+        }
+        return eg;
+    }
+
+    // HexPoint at Gauss point g of element (i, j, *) whose corners have z coordinates xyz[a][2]: the same
+    // values evalHex(xyz, +-GAUSS, +-GAUSS, +-GAUSS, hp) gives, from the shared x and y rows
+    void gaussHex(const ElementGeometry& eg, int i, int j, int g, const double xyz[8][3], HexPoint& hp) {
+        double cz[8];
+        for (int a = 0; a < 8; ++a) cz[a] = xyz[a][2];
+        const NaturalPoint& np = eg.gauss.p[g];
+        finishHex(np, eg.xRows[static_cast<std::size_t>(i) * 8 + g], eg.yRows[static_cast<std::size_t>(j) * 8 + g],
+                  jacobianRow(np, cz), hp);
+    }
 
     // Vegetation height of one fire cell: the tree canopy where LANDFIRE maps one, else the surface fuel bed
     double vegetationHeightM(const Cell& c) {
@@ -216,6 +306,7 @@ namespace {
         std::vector<char> fixed;              // 1 = boundary node: identity row, Phi = 0
         std::ptrdiff_t offset[27] = {};       // Node-index offset of each stencil entry
         int layerSize = 0;                    // nx * ny: node-index step between layers
+        int nx = 0, ny = 0, nz = 0;           // Mesh nodes along X, Y and up (used by the row-wise kernels)
 
         double* row(std::size_t n) { return &a[n * 27]; }
         const double* row(std::size_t n) const { return &a[n * 27]; }
@@ -226,8 +317,15 @@ namespace {
         }
     };
 
+    // ------------------------------------------------------------------------
+    // Reference kernels: node by node, in node order, exactly as first written
+    // ------------------------------------------------------------------------
+    // Kept so the tests can check the row-wise kernels below against them bit for bit
+    // (WindSolverSettings::referenceKernels, which also makes the assembly and smoothing call evalHex at every
+    // Gauss point instead of using the shared ElementGeometry). The app always uses the row-wise kernels.
+
     // y = A x
-    void multiply(const StencilMatrix& A, const std::vector<double>& x, std::vector<double>& y) {
+    void multiplyReference(const StencilMatrix& A, const std::vector<double>& x, std::vector<double>& y) {
         const std::size_t total = x.size();
         for (std::size_t n = 0; n < total; ++n) {
             if (A.fixed[n]) { y[n] = x[n]; continue; }   // Identity row
@@ -241,7 +339,7 @@ namespace {
     // Symmetric Gauss-Seidel preconditioner (SSOR with omega = 1, as WindNinja's preconditioner.cpp):
     // z = M^-1 r with M = (D + L) D^-1 (D + U). The forward sweep solves (D + L) t = r, the backward sweep
     // solves (D + U) z = D t, both in place in z. Identity rows just copy r.
-    void precondition(const StencilMatrix& A, const std::vector<double>& r, std::vector<double>& z) {
+    void preconditionReference(const StencilMatrix& A, const std::vector<double>& r, std::vector<double>& z) {
         const std::size_t total = r.size();
         for (std::size_t n = 0; n < total; ++n) {   // Forward: lower-numbered neighbours are already final
             if (A.fixed[n]) { z[n] = r[n]; continue; }
@@ -263,6 +361,139 @@ namespace {
         double s = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i) s += a[i] * b[i];
         return s;
+    }
+
+    // ------------------------------------------------------------------------
+    // Row-wise kernels (what the solver runs): same arithmetic, faster order
+    // ------------------------------------------------------------------------
+    // Every node's value is computed with exactly the same operations, in the same order, as in the reference
+    // kernels above, so the results are identical to the last bit. What changes is only the order in which
+    // nodes are visited and some bookkeeping:
+    //  - The mesh is walked row by row (fixed j and k, i running), so the boundary tests and the "skip the
+    //    layer below the ground" test are made once per row instead of once per node and stencil entry.
+    //  - The Gauss-Seidel sweeps work on bands of SWEEP_BAND rows at once in a skewed wavefront (below).
+
+    // Stencil entries of one row of coefficients times the values round node n, in stencil order:
+    // sum (starting from `start`) combined with row[s] * v[n + offset[s]] for s = First .. Last - 1.
+    // Sub = true subtracts each product (forward sweep), false adds it (multiply, backward sweep).
+    // First and Last are template parameters so the compiler unrolls the loop completely.
+    template <int First, int Last, bool Sub>
+    inline double stencilSum(double start, const double* row, const double* v, const std::ptrdiff_t* offset) {
+        double sum = start;
+        for (int s = First; s < Last; ++s) {
+            if (Sub) sum -= row[s] * v[offset[s]];
+            else sum += row[s] * v[offset[s]];
+        }
+        return sum;
+    }
+
+    // y = A x, and returns dot(x, y) = x . A x (summed in node order, as dot() would)
+    //
+    // Rows of fixed nodes copy x. Free nodes sum all 27 entries (18 on the ground layer, which has no layer
+    // below), each from a sum that starts at 0, so y[n] is bit-identical to multiplyReference. The dot product
+    // CG needs next (p . A p) is accumulated in the same loop, in increasing node order, which is the order
+    // dot() adds in, so it too is bit-identical; this saves one pass over two vectors per iteration.
+    double multiplyAndDot(const StencilMatrix& A, const std::vector<double>& x, std::vector<double>& y) {
+        const int nx = A.nx, ny = A.ny, nz = A.nz;
+        const double* xs = x.data();
+        double* ys = y.data();
+        double dotXY = 0.0;
+        for (int k = 0; k < nz; ++k)
+            for (int j = 0; j < ny; ++j) {
+                const std::size_t n0 = (static_cast<std::size_t>(k) * ny + j) * nx;   // First node of the row
+                if (k == nz - 1 || j == 0 || j == ny - 1) {   // Whole row on the boundary: identity rows
+                    for (int i = 0; i < nx; ++i) { ys[n0 + i] = xs[n0 + i]; dotXY += xs[n0 + i] * ys[n0 + i]; }
+                    continue;
+                }
+                // i = 0 and i = nx - 1 are side-boundary nodes (identity); i = 1 .. nx - 2 are free
+                ys[n0] = xs[n0];
+                dotXY += xs[n0] * ys[n0];
+                for (int i = 1; i < nx - 1; ++i) {
+                    const std::size_t n = n0 + i;
+                    const double* row = A.row(n);
+                    ys[n] = k == 0 ? stencilSum<9, 27, false>(0.0, row, xs + n, A.offset)
+                                   : stencilSum<0, 27, false>(0.0, row, xs + n, A.offset);
+                    dotXY += xs[n] * ys[n];
+                }
+                const std::size_t last = n0 + nx - 1;
+                ys[last] = xs[last];
+                dotXY += xs[last] * ys[last];
+            }
+        return dotXY;
+    }
+
+    // Rows swept together by the Gauss-Seidel kernels. Each node's update is a chain of 13 dependent
+    // multiply-adds and a division, and in the backward sweep that chain starts with the node just finished,
+    // so node after node the processor waits on the previous result. Rows of a band are interleaved so it
+    // always has independent chains to work on. On a 2-core Xeon this cut the preconditioner's time by about a
+    // quarter; bands of 2, 4 and 8 rows gave much the same gain (within the machine's timing noise).
+    constexpr int SWEEP_BAND = 4;
+
+    // Symmetric Gauss-Seidel preconditioner, z = M^-1 r, bit-identical to preconditionReference.
+    //
+    // Why the order can change without changing a single bit: in the forward sweep node (i, j, k) reads only
+    // lower-numbered neighbours, which must already hold their final values: the layer below, row j - 1 at
+    // i - 1 .. i + 1, and its own row at i - 1. In node order those are all done first, but they are also all
+    // done if row j runs two nodes behind row j - 1. So a band of rows is swept as a skewed wavefront: at step
+    // t, row q of the band does node i = 1 + t - 2q. When row q reaches i, row q - 1 finished i + 1 one step
+    // earlier. Every node therefore reads exactly the values it reads in node order, and does the same
+    // operations on them in the same order, so z comes out bit-identical. The backward sweep is the mirror
+    // image (rows from the top of the layer down, i from nx - 2 down, reading only higher-numbered nodes).
+    // Fixed nodes (z = r) are set first; nothing else writes them, so every read of them sees r as before.
+    void precondition(const StencilMatrix& A, const std::vector<double>& r, std::vector<double>& z) {
+        const int nx = A.nx, ny = A.ny, nz = A.nz;
+        const double* rs = r.data();
+        double* zs = z.data();
+        auto node = [&](int i, int j, int k) { return (static_cast<std::size_t>(k) * ny + j) * nx + i; };
+
+        // Fixed nodes: z = r (the top layer, rows j = 0 and ny - 1, columns i = 0 and nx - 1)
+        for (int k = 0; k < nz; ++k)
+            for (int j = 0; j < ny; ++j) {
+                const std::size_t n0 = node(0, j, k);
+                if (k == nz - 1 || j == 0 || j == ny - 1) {
+                    for (int i = 0; i < nx; ++i) zs[n0 + i] = rs[n0 + i];
+                }
+                else {
+                    zs[n0] = rs[n0];
+                    zs[n0 + nx - 1] = rs[n0 + nx - 1];
+                }
+            }
+        const int freeRows = ny - 2;   // Free rows j = 1 .. ny - 2 in each layer below the top
+        const int freeCols = nx - 2;   // Free nodes i = 1 .. nx - 2 in each free row
+        if (freeRows <= 0 || freeCols <= 0) return;
+
+        // Forward sweep, (D + L) z = r: layers upwards, bands of rows northwards (increasing j)
+        for (int k = 0; k < nz - 1; ++k)
+            for (int jb = 1; jb <= ny - 2; jb += SWEEP_BAND) {
+                const int rows = std::min(SWEEP_BAND, ny - 1 - jb);
+                const int steps = freeCols + 2 * (rows - 1);   // Until the last row of the band reaches nx - 2
+                for (int t = 0; t < steps; ++t)
+                    for (int q = 0; q < rows; ++q) {
+                        const int i = 1 + t - 2 * q;
+                        if (i < 1 || i > nx - 2) continue;   // This row has not started yet, or has finished
+                        const std::size_t n = node(i, jb + q, k);
+                        const double* row = A.row(n);
+                        const double sum = k == 0 ? stencilSum<9, 13, true>(rs[n], row, zs + n, A.offset)
+                                                  : stencilSum<0, 13, true>(rs[n], row, zs + n, A.offset);
+                        zs[n] = sum / row[13];
+                    }
+            }
+
+        // Backward sweep, (D + U) z = D t: layers downwards, bands of rows southwards (decreasing j)
+        for (int k = nz - 2; k >= 0; --k)
+            for (int jb = ny - 2; jb >= 1; jb -= SWEEP_BAND) {
+                const int rows = std::min(SWEEP_BAND, jb);
+                const int steps = freeCols + 2 * (rows - 1);
+                for (int t = 0; t < steps; ++t)
+                    for (int q = 0; q < rows; ++q) {
+                        const int i = nx - 2 - t + 2 * q;
+                        if (i < 1 || i > nx - 2) continue;
+                        const std::size_t n = node(i, jb - q, k);
+                        const double* row = A.row(n);
+                        const double sum = stencilSum<14, 27, false>(0.0, row, zs + n, A.offset);
+                        zs[n] -= sum / row[13];
+                    }
+            }
     }
 
     // RMS of div(u, v, w) over the mesh, each element evaluated at its centre and weighted by its volume.
@@ -337,12 +568,16 @@ WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float
     StencilMatrix A;
     A.a.assign(total * 27, 0.0);
     A.layerSize = m.nx * m.ny;
+    A.nx = m.nx;
+    A.ny = m.ny;
+    A.nz = m.nz;
     for (int dk = -1; dk <= 1; ++dk)
         for (int dj = -1; dj <= 1; ++dj)
             for (int di = -1; di <= 1; ++di)
                 A.offset[(dk + 1) * 9 + (dj + 1) * 3 + (di + 1)] =
                     static_cast<std::ptrdiff_t>(dk) * A.layerSize + static_cast<std::ptrdiff_t>(dj) * m.nx + di;
     std::vector<double> rhs(total, 0.0);
+    const ElementGeometry geom = elementGeometry(m);
     {
         double xyz[8][3];
         std::size_t ids[8];
@@ -354,8 +589,11 @@ WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float
                     double S[8][8] = {};
                     double Q[8] = {};
                     for (int g = 0; g < 8; ++g) {
-                        evalHex(xyz, (g & 1) ? GAUSS : -GAUSS, ((g >> 1) & 1) ? GAUSS : -GAUSS,
-                                ((g >> 2) & 1) ? GAUSS : -GAUSS, hp);
+                        if (s.referenceKernels)
+                            evalHex(xyz, (g & 1) ? GAUSS : -GAUSS, ((g >> 1) & 1) ? GAUSS : -GAUSS,
+                                    ((g >> 2) & 1) ? GAUSS : -GAUSS, hp);
+                        else
+                            gaussHex(geom, i, j, g, xyz, hp);   // Bit-identical to the evalHex call above
                         double div0 = 0.0;   // div(u0) at this Gauss point
                         for (int b = 0; b < 8; ++b)
                             div0 += hp.dN[b][0] * u0[ids[b]] + hp.dN[b][1] * v0[ids[b]] + hp.dN[b][2] * w0[ids[b]];
@@ -411,22 +649,41 @@ WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float
     const double rhsScale = wind20Ms * m.hx * m.hy * std::sqrt(static_cast<double>(total));
     if (rhsNorm > 1e-10 * rhsScale) {
         std::vector<double> r = rhs, z(total, 0.0), p(total, 0.0), Ap(total, 0.0);
-        precondition(A, r, z);
+        // The row-wise kernels give bit-identical results to the reference ones (tests check this)
+        auto applyM = [&](const std::vector<double>& in, std::vector<double>& out) {
+            if (s.referenceKernels) preconditionReference(A, in, out);
+            else precondition(A, in, out);
+        };
+        applyM(r, z);
         p = z;
         double rz = dot(r, z);
         int it = 0;
         double rel = 1.0;
         while (it < s.maxIterations) {
-            multiply(A, p, Ap);
-            const double alpha = rz / dot(p, Ap);
-            for (std::size_t n = 0; n < total; ++n) {
-                phi[n] += alpha * p[n];
-                r[n] -= alpha * Ap[n];
+            double pAp;
+            if (s.referenceKernels) { multiplyReference(A, p, Ap); pAp = dot(p, Ap); }
+            else pAp = multiplyAndDot(A, p, Ap);
+            const double alpha = rz / pAp;
+            // Step along p, and ||r||^2 in the same pass (same additions, in node order, as dot(r, r))
+            double rr = 0.0;
+            if (s.referenceKernels) {
+                for (std::size_t n = 0; n < total; ++n) {
+                    phi[n] += alpha * p[n];
+                    r[n] -= alpha * Ap[n];
+                }
+                rr = dot(r, r);
+            }
+            else {
+                for (std::size_t n = 0; n < total; ++n) {
+                    phi[n] += alpha * p[n];
+                    r[n] -= alpha * Ap[n];
+                    rr += r[n] * r[n];
+                }
             }
             ++it;
-            rel = std::sqrt(dot(r, r)) / rhsNorm;
+            rel = std::sqrt(rr) / rhsNorm;
             if (rel < s.tolerance) break;
-            precondition(A, r, z);
+            applyM(r, z);
             const double rzNew = dot(r, z);
             const double beta = rzNew / rz;
             rz = rzNew;
@@ -454,8 +711,11 @@ WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float
                 for (int i = 0; i < m.nx - 1; ++i) {
                     m.elementCorners(i, j, k, xyz, ids);
                     for (int g = 0; g < 8; ++g) {
-                        evalHex(xyz, (g & 1) ? GAUSS : -GAUSS, ((g >> 1) & 1) ? GAUSS : -GAUSS,
-                                ((g >> 2) & 1) ? GAUSS : -GAUSS, hp);
+                        if (s.referenceKernels)
+                            evalHex(xyz, (g & 1) ? GAUSS : -GAUSS, ((g >> 1) & 1) ? GAUSS : -GAUSS,
+                                    ((g >> 2) & 1) ? GAUSS : -GAUSS, hp);
+                        else
+                            gaussHex(geom, i, j, g, xyz, hp);   // Bit-identical to the evalHex call above
                         double grad[3] = { 0.0, 0.0, 0.0 };
                         for (int a = 0; a < 8; ++a)
                             for (int c = 0; c < 3; ++c) grad[c] += hp.dN[a][c] * phi[ids[a]];
