@@ -469,7 +469,7 @@ bool loadFineTopography(const char* demPath, const RasterGrid& grid, std::vector
     };
 
     // --- Read strip by strip and summarise each strip's cells ---
-    constexpr int STRIP_CELL_ROWS = 50;                  // 50 cell rows: (2000 x 10 + 2) x 502 floats = 40 MB
+    constexpr int STRIP_CELL_ROWS = 50;                  // 50 cell rows: (1200 x 10 + 2) x 502 floats = 24 MB
     const int bufW = grid.width * factor + 2;
     out.assign(static_cast<size_t>(grid.width) * grid.height, CellTopography{});
     std::vector<float> buf;
@@ -489,7 +489,7 @@ bool loadFineTopography(const char* demPath, const RasterGrid& grid, std::vector
                                 static_cast<float>(finePixelM), stripOut);
         std::copy(stripOut.begin(), stripOut.end(), out.begin() + static_cast<size_t>(r0) * grid.width);
 
-        // Progress: four 1 m tiles are 400 million pixels, so this takes a little while
+        // Progress: the window is 120 million 1 m pixels, so this takes a little while
         const int pct = 100 * (r0 + rows) / grid.height;
         if (pct / 10 != lastReported) {
             lastReported = pct / 10;

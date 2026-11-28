@@ -7,8 +7,8 @@ surveys round the fire. README.md has the module table and input-data notes.
 
 - Full build: `cmake -S . -B build && cmake --build build`, then run `./build/wildfire` from the repo root
   (it loads the LANDFIRE layers from the repo root or `landfire/`, falling back to `elevation_map.tif`).
-- Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 25 s (most of
-  it the end-to-end mission test on the 2000 x 2000 grid).
+- Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 20 s (most of
+  it the end-to-end mission test on the full 1200 x 1000 grid).
 - Core and tests only, without SFML or GDAL: add `-DWF_BUILD_APP=OFF`.
 - Benchmark: `./build/wf_bench [frames]` prints per-phase times and a results checksum. CI (Linux) fails if the
   checksum differs from `tools/bench_checksum.txt`. Optimisations must leave it unchanged; a change meant to alter
@@ -32,10 +32,11 @@ surveys round the fire. README.md has the module table and input-data notes.
 - Library layering: only `raster_io` and `terrain` use GDAL; only `renderer` and `main.cpp` use SFML.
   Everything else is in `wf_core`, which must build without either so the tests stay headless.
 - Terrain comes from USGS 3DEP 1 m DEM tiles (`USGS_1M_11_x41-42y379-380_*.tif`, UTM zone 11, San Gabriel
-  Mountains). They define the simulation grid: GRID_WIDTH x GRID_HEIGHT = 2000 x 2000 cells of SIM_CELL_SIZE_M =
-  10 m, i.e. exactly the four tiles. Each cell's elevation, slope (mean of the 1 m slopes) and aspect come from the
+  Mountains). The simulation grid is GRID_WIDTH x GRID_HEIGHT = 1200 x 1000 cells of SIM_CELL_SIZE_M =
+  10 m (12 km x 10 km), a window cut from the 20 km x 20 km mosaic of the four tiles and centred on it
+  (`--centre` moves it). Each cell's elevation, slope (mean of the 1 m slopes) and aspect come from the
   1 m pixels inside it (`aggregateFineTopography`), read in strips so the 1 m data is never all in memory. Do not
-  run the fire on 1 m cells (400 M cells, ~16 GB, and below Rothermel's scale).
+  run the fire on 1 m cells (120 M cells for this window, ~5 GB, and below Rothermel's scale).
 - Other input data is LANDFIRE (US only, EPSG:5070 Albers, 30 m): FBFM40 fuel models, operational roads and the
   canopy layers CC (%), CH (m x 10), CBH (m x 10), CBD (kg/m3 x 100), plus elevation and slope (degrees), which are
   used only where there are no DEM tiles. Files are found by name in `--data`, else `landfire/` (DEM tiles also in

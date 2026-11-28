@@ -1,11 +1,13 @@
 #pragma once
 
 // --- Simulation grid ---
-// The fire runs on GRID_WIDTH x GRID_HEIGHT cells of SIM_CELL_SIZE_M metres: 2000 x 10 m = 20 km square, the
-// area of four USGS 1 m DEM tiles (2 x 2 tiles of 10 km). Terrain (elevation, slope, aspect) is worked out
-// from the 1 m DEM and averaged into each 10 m cell; the 30 m LANDFIRE fuel and canopy layers are resampled
-// onto the same cells. 1 m cells would be 400 million cells (~16 GB) and are finer than the Rothermel model
-// is meant for (a uniform fuel bed), so the DEM detail goes into the slope instead.
+// The fire runs on GRID_WIDTH x GRID_HEIGHT cells of SIM_CELL_SIZE_M metres: 1200 x 1000 cells of 10 m =
+// 12 km east-west by 10 km north-south. That is a window cut from the four USGS 1 m DEM tiles (2 x 2 tiles of
+// 10 km, 20 km square together), centred on them, so the tiles reach about 4 km past the window east and west
+// and 5 km north and south. Terrain (elevation, slope, aspect) is worked out from the 1 m DEM and averaged into
+// each 10 m cell; the 30 m LANDFIRE fuel and canopy layers are resampled onto the same cells. 1 m cells would
+// be 120 million cells for this window (~5 GB) and are finer than the Rothermel model is meant for (a uniform
+// fuel bed), so the DEM detail goes into the slope instead.
 // The window is centred on the DEM (or the LANDFIRE raster without one) unless --centre <lon> <lat> is given.
 constexpr int GRID_WIDTH = 1200;
 constexpr int GRID_HEIGHT = 1000;

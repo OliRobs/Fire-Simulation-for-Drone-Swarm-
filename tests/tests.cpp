@@ -57,7 +57,7 @@ namespace {
     int at(int x, int y) { return y * GRID_WIDTH + x; }
 
     // Centre of the grid. Tests with large fires (whose search area reaches ~2 km past the fire) put them here
-    // rather than at fixed cells, so they fit on any grid size in config.h, square or not (e.g. 2000 x 2000 or
+    // rather than at fixed cells, so they fit on any grid size in config.h, square or not (e.g. the current
     // 1200 x 1000 cells).
     constexpr int CX = GRID_WIDTH / 2;
     constexpr int CY = GRID_HEIGHT / 2;

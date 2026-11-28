@@ -90,7 +90,7 @@ void DistanceTransform::computeIn(const std::vector<std::uint8_t>& sources, cons
     // --- Pass 1: distance to the nearest source in the same COLUMN ---
     // The input is binary (0 or INF), so the 1D transform down a column is just the squared gap to the
     // nearest source above or below. That is found with two row-by-row sweeps (down, then up), which read
-    // memory in order: much faster than walking each column (a 2000-cell stride per step on a 2000 x 2000
+    // memory in order: much faster than walking each column (a 1200-cell stride per step on a 1200 x 1000
     // grid), and the result is identical to running edt1d on every column.
     lastSource_.assign(w_, -1);   // Row of the last source seen in each column, -1 = none yet
     for (int y = wy0; y < wy1; ++y) {

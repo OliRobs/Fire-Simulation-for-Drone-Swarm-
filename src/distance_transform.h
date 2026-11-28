@@ -10,7 +10,7 @@
 //
 // Optional range limit: when maxDistance > 0, only the cells within maxDistance of the sources' bounding box are
 // worked out (the window). Distances inside the window are still exact; cells outside it, which are all more
-// than maxDistance from every source, read as "very far" (INF). The fire covers a tiny part of the 2000 x 2000
+// than maxDistance from every source, read as "very far" (INF). The fire covers a tiny part of the 1200 x 1000
 // grid for most of a run, so this cuts the per-frame cost from the whole grid to a window round the fire.
 // Use it only where every reader compares the distance against thresholds no bigger than maxDistance.
 //

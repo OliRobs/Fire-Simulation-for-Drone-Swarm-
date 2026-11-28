@@ -3,7 +3,8 @@
 Wildfire spread on real terrain using Rothermel's surface fire spread model, driven by USGS 1 m lidar
 elevation (terrain) and LANDFIRE data (Scott & Burgan 40 fuel models, canopy, operational roads). The wind is
 adjusted over the terrain by a mass-conserving wind solver (WindNinja's method), so each cell has its own wind
-speed and direction (see "Terrain wind"). The fire runs on 10 m cells over a 20 km x 20 km area. A drone swarm surveys round the fire:
+speed and direction (see "Terrain wind"). The fire runs on 10 m cells over a 12 km x 10 km area
+(1200 x 1000 cells). A drone swarm surveys round the fire:
 sweep drones fly lanes at right angles to the fire inside the perimeter, each in its own sector, and ACO drones
 share an ant-colony-optimised tour outside it, all kept clear of the fire. The fleet grows and shrinks with the
 fire so every sweep lap and every revisit on the tour stays within 20 minutes (see "Drone survey").
@@ -86,14 +87,17 @@ When tiles are found they replace LANDFIRE's 30 m elevation and slope:
 
 - **Grid.** The tiles are joined into one mosaic (an in-memory GDAL VRT) and the simulation grid is a
   GRID_WIDTH x GRID_HEIGHT window of 10 m cells cut from it in its UTM zone (already north-up), centred on the
-  tiles: 2000 x 2000 cells = exactly the four tiles. `--centre` moves the window.
+  tiles. GRID_WIDTH x GRID_HEIGHT is 1200 x 1000 cells (12 km x 10 km), so the window covers the middle of
+  the 20 km x 20 km mosaic: about easting 414-426 km and northing 3785-3795 km, leaving 4 km of tile east and
+  west and 5 km north and south. `--centre` moves the window; it is still cut on the DEM's own grid (edges on
+  whole metres), and cells moved off the tiles use the LANDFIRE elevation and slope.
 - **Terrain per cell.** Slope is worked out on every 1 m pixel (Horn's method) and averaged into the cell, so a
   cell crossing a gully or steep bank keeps that steepness (slope from 10 m averaged elevations would smooth it
   away, and Rothermel's slope factor grows with tan^2 of the slope). Elevation is the mean of the 100 pixels; the
   upslope direction (aspect) is that of the mean gradient. See `aggregateFineTopography` in `topography.cpp`.
-- **Memory.** The 400 million pixels are read in strips of 50 cell rows (~40 MB each), never all at once.
-  Loading takes roughly 20 s.
-- **Why not 1 m cells?** 400 million cells would need ~16 GB and tiny time steps, and 1 m is below the scale the
+- **Memory.** The window's 120 million 1 m pixels are read in strips of 50 cell rows (~24 MB each), never all
+  at once. Loading takes several seconds (roughly 20 s when the window was the whole 20 km mosaic).
+- **Why not 1 m cells?** 120 million cells for this window would need ~5 GB and tiny time steps, and 1 m is below the scale the
   Rothermel model is meant for (a uniform fuel bed); the LANDFIRE fuel data is 30 m anyway.
 - Cells the tiles don't cover (only if the window is moved off them) fall back to the LANDFIRE elevation and slope.
 
@@ -358,7 +362,7 @@ Library layering: wf_core (everything except GDAL/SFML) <- wf_io (GDAL), wf_rend
 
 ## Key settings (config.h)
 
-The grid is GRID_WIDTH x GRID_HEIGHT = 2000 x 2000 cells of SIM_CELL_SIZE_M = 10 m. The drone and perimeter
+The grid is GRID_WIDTH x GRID_HEIGHT = 1200 x 1000 cells of SIM_CELL_SIZE_M = 10 m (12 km x 10 km). The drone and perimeter
 distances are set in metres and converted to cells with `cellsFromMetres`, so they keep the same ground
 distances they had on the original 30 m cells:
 
