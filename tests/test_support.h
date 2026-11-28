@@ -127,3 +127,8 @@ std::vector<Cell> gaussianHill();
 
 // Compass heading (degrees clockwise from north) that a grid-frame vector points to
 double headingDeg(Vec2 v);
+
+// FNV-1a hash of a solved wind field: the CG iteration count, the final residual, then every cell's speed and
+// direction (x, y), as raw bytes. Equal hashes = the same field to the last bit. wf_bench --wind prints this
+// hash as its checksum (tools/wind_checksum.txt), and the wind tests compare it with recorded values.
+std::uint64_t windFieldHash(const WindField& f);

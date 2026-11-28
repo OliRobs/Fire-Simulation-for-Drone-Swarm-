@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 #include "fire_model.h"    // windTowardGrid
 #include "fuel_models.h"
 #include "rothermel.h"     // FT_PER_M
@@ -153,9 +154,9 @@ namespace {
     // The mesh columns stand on a regular x-y grid, so the x and y rows of an element's Jacobian (and the x
     // and y of its Gauss points) depend only on the element's i (for x) or j (for y), never on k or on the
     // terrain. They are worked out once per i and per j (8 Gauss points each) and reused for every element;
-    // only the z row is computed per element. Each row is the same sum as evalHex computes, so every HexPoint
-    // comes out bit-identical to evalHex at the same Gauss point. This halves the cost of the two passes that
-    // visit every Gauss point (assembly and gradient smoothing).
+    // only the z row is computed per element. Each row is the same sum evalHex computes, so a HexPoint is the
+    // same either way, and the two passes that visit every Gauss point (assembly and gradient smoothing) do
+    // about half the work.
     struct ElementGeometry {
         GaussTable gauss;
         std::vector<JacobianRow> xRows, yRows;   // [i * 8 + g], [j * 8 + g]
@@ -178,32 +179,35 @@ namespace {
         bool boundary(int i, int j, int k) const {
             return i == 0 || j == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1;
         }
+        // Horizontal position of column i (x) and column row j (y), m: the centre of its block of fire cells
+        double columnX(int i) const { return (i + 0.5) * hx; }
+        double columnY(int j) const { return (j + 0.5) * hy; }
         // Corner coordinates of element (i, j, k), corner order as in evalHex
         void elementCorners(int i, int j, int k, double xyz[8][3], std::size_t ids[8]) const {
             for (int a = 0; a < 8; ++a) {
                 const int ci = i + (a & 1), cj = j + ((a >> 1) & 1), ck = k + ((a >> 2) & 1);
                 ids[a] = node(ci, cj, ck);
-                xyz[a][0] = (ci + 0.5) * hx;
-                xyz[a][1] = (cj + 0.5) * hy;
+                xyz[a][0] = columnX(ci);
+                xyz[a][1] = columnY(cj);
                 xyz[a][2] = z[ids[a]];
             }
         }
     };
 
-    // Builds the shared x and y Jacobian rows for mesh m (see ElementGeometry). Corner x coordinates are
-    // (ci + 0.5) hx with ci = i + (a & 1), as Mesh::elementCorners sets them; y likewise with j.
+    // Builds the shared x and y Jacobian rows for mesh m (see ElementGeometry), from the same corner coordinates
+    // Mesh::elementCorners uses (columnX of i + (a & 1), columnY of j + ((a >> 1) & 1)).
     ElementGeometry elementGeometry(const Mesh& m) {
         ElementGeometry eg;
         eg.xRows.resize(static_cast<std::size_t>(m.nx) * 8);
         eg.yRows.resize(static_cast<std::size_t>(m.ny) * 8);
         for (int i = 0; i + 1 < m.nx; ++i) {
             double cx[8];
-            for (int a = 0; a < 8; ++a) cx[a] = (i + (a & 1) + 0.5) * m.hx;
+            for (int a = 0; a < 8; ++a) cx[a] = m.columnX(i + (a & 1));
             for (int g = 0; g < 8; ++g) eg.xRows[static_cast<std::size_t>(i) * 8 + g] = jacobianRow(eg.gauss.p[g], cx);
         }
         for (int j = 0; j + 1 < m.ny; ++j) {
             double cy[8];
-            for (int a = 0; a < 8; ++a) cy[a] = (j + ((a >> 1) & 1) + 0.5) * m.hy;
+            for (int a = 0; a < 8; ++a) cy[a] = m.columnY(j + ((a >> 1) & 1));
             for (int g = 0; g < 8; ++g) eg.yRows[static_cast<std::size_t>(j) * 8 + g] = jacobianRow(eg.gauss.p[g], cy);
         }
         return eg;
@@ -307,7 +311,7 @@ namespace {
         std::vector<char> fixed;              // 1 = boundary node: identity row, Phi = 0
         std::ptrdiff_t offset[27] = {};       // Node-index offset of each stencil entry
         int layerSize = 0;                    // nx * ny: node-index step between layers
-        int nx = 0, ny = 0, nz = 0;           // Mesh nodes along X, Y and up (used by the row-wise kernels)
+        int nx = 0, ny = 0, nz = 0;           // Mesh nodes along X, Y and up (used by the CG kernels)
 
         double* row(std::size_t n) { return &a[n * 27]; }
         const double* row(std::size_t n) const { return &a[n * 27]; }
@@ -318,46 +322,7 @@ namespace {
         }
     };
 
-    // ------------------------------------------------------------------------
-    // Reference kernels: node by node, in node order, exactly as first written
-    // ------------------------------------------------------------------------
-    // Kept so the tests can check the row-wise kernels below against them bit for bit
-    // (WindSolverSettings::referenceKernels, which also makes the assembly and smoothing call evalHex at every
-    // Gauss point instead of using the shared ElementGeometry). The app always uses the row-wise kernels.
-
-    // y = A x
-    void multiplyReference(const StencilMatrix& A, const std::vector<double>& x, std::vector<double>& y) {
-        const std::size_t total = x.size();
-        for (std::size_t n = 0; n < total; ++n) {
-            if (A.fixed[n]) { y[n] = x[n]; continue; }   // Identity row
-            const double* row = A.row(n);
-            double sum = 0.0;
-            for (int s = A.firstEntry(n); s < 27; ++s) sum += row[s] * x[A.neighbour(n, s)];
-            y[n] = sum;
-        }
-    }
-
-    // Symmetric Gauss-Seidel preconditioner (SSOR with omega = 1, as WindNinja's preconditioner.cpp):
-    // z = M^-1 r with M = (D + L) D^-1 (D + U). The forward sweep solves (D + L) t = r, the backward sweep
-    // solves (D + U) z = D t, both in place in z. Identity rows just copy r.
-    void preconditionReference(const StencilMatrix& A, const std::vector<double>& r, std::vector<double>& z) {
-        const std::size_t total = r.size();
-        for (std::size_t n = 0; n < total; ++n) {   // Forward: lower-numbered neighbours are already final
-            if (A.fixed[n]) { z[n] = r[n]; continue; }
-            const double* row = A.row(n);
-            double sum = r[n];
-            for (int s = A.firstEntry(n); s < 13; ++s) sum -= row[s] * z[A.neighbour(n, s)];
-            z[n] = sum / row[13];
-        }
-        for (std::size_t n = total; n-- > 0;) {     // Backward: higher-numbered neighbours are already final
-            if (A.fixed[n]) continue;
-            const double* row = A.row(n);
-            double sum = 0.0;
-            for (int s = 14; s < 27; ++s) sum += row[s] * z[A.neighbour(n, s)];
-            z[n] -= sum / row[13];
-        }
-    }
-
+    // Dot product, summed in node order
     double dot(const std::vector<double>& a, const std::vector<double>& b) {
         double s = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i) s += a[i] * b[i];
@@ -365,38 +330,54 @@ namespace {
     }
 
     // ------------------------------------------------------------------------
-    // Row-wise kernels (what the solver runs): same arithmetic, faster order
+    // CG kernels: matrix-vector product and the SSOR preconditioner
     // ------------------------------------------------------------------------
-    // Every node's value is computed with exactly the same operations, in the same order, as in the reference
-    // kernels above, so the results are identical to the last bit. What changes is only the order in which
-    // nodes are visited and some bookkeeping:
-    //  - The mesh is walked row by row (fixed j and k, i running), so the boundary tests and the "skip the
-    //    layer below the ground" test are made once per row instead of once per node and stencil entry.
-    //  - The Gauss-Seidel sweeps work on bands of SWEEP_BAND rows at once in a skewed wavefront (below).
+    // Both walk the mesh row by row (fixed j and k, i running), so the boundary tests and the "skip the layer
+    // below the ground" test are made once per row instead of once per node and stencil entry. Each node's sum
+    // runs over its stencil entries in stencil order (s = 0 .. 26), the order that defines the result.
 
-    // Stencil entries of one row of coefficients times the values round node n, in stencil order:
-    // sum (starting from `start`) combined with row[s] * v[n + offset[s]] for s = First .. Last - 1.
-    // Sub = true subtracts each product (forward sweep), false adds it (multiply, backward sweep).
-    // First and Last are template parameters so the compiler unrolls the loop completely.
-    template <int First, int Last, bool Sub>
-    inline double stencilSum(double start, const double* row, const double* v, const std::ptrdiff_t* offset) {
-        double sum = start;
-        for (int s = First; s < Last; ++s) {
-            if (Sub) sum -= row[s] * v[offset[s]];
-            else sum += row[s] * v[offset[s]];
-        }
+    // Node-index offset of stencil entry S, for rows nx nodes long and layers `layer` nodes big:
+    // (di, dj, dk) = (S % 3 - 1, S / 3 % 3 - 1, S / 9 - 1), i.e. dk * layer + dj * nx + di
+    template <int S>
+    inline std::ptrdiff_t stencilOffset(std::ptrdiff_t nx, std::ptrdiff_t layer) {
+        return (S / 9 - 1) * layer + (S / 3 % 3 - 1) * nx + (S % 3 - 1);
+    }
+
+    // One stencil term: sum -= row[S] * v[neighbour S] (Sub) or sum += it
+    template <bool Sub, int S>
+    inline void stencilTerm(double& sum, const double* row, const double* v, std::ptrdiff_t nx, std::ptrdiff_t layer) {
+        if (Sub) sum -= row[S] * v[stencilOffset<S>(nx, layer)];
+        else sum += row[S] * v[stencilOffset<S>(nx, layer)];
+    }
+
+    template <int First, bool Sub, int... K>
+    inline double stencilSumImpl(double sum, const double* row, const double* v, std::ptrdiff_t nx,
+                                 std::ptrdiff_t layer, std::integer_sequence<int, K...>) {
+        (stencilTerm<Sub, First + K>(sum, row, v, nx, layer), ...);   // Left to right: S = First, First + 1, ...
         return sum;
+    }
+
+    // Stencil entries of one row of coefficients times the values round node n, in stencil order: sum
+    // (starting from `start`) combined with row[S] * v[neighbour S] for S = First .. Last - 1, v pointing at
+    // node n. Sub = true subtracts each product (forward sweep), false adds it (multiply, backward sweep).
+    // The terms are expanded at compile time, in order, so each offset is a constant combination of nx and
+    // layer (no table read per term) and the sum is taken in exactly the stencil order.
+    template <int First, int Last, bool Sub>
+    inline double stencilSum(double start, const double* row, const double* v, std::ptrdiff_t nx, std::ptrdiff_t layer) {
+        return stencilSumImpl<First, Sub>(start, row, v, nx, layer, std::make_integer_sequence<int, Last - First>());
     }
 
     // y = A x, and returns dot(x, y) = x . A x (summed in node order, as dot() would)
     //
     // Rows of fixed nodes copy x. Free nodes sum all 27 entries (18 on the ground layer, which has no layer
-    // below), each from a sum that starts at 0, so y[n] is bit-identical to multiplyReference. The dot product
-    // CG needs next (p . A p) is accumulated in the same loop, in increasing node order, which is the order
-    // dot() adds in, so it too is bit-identical; this saves one pass over two vectors per iteration.
+    // below), from a sum that starts at 0. The dot product CG needs next (p . A p) is accumulated in the same
+    // loop, in increasing node order (the order dot() adds in, so it is the same value to the last bit); this
+    // saves one pass over two vectors per iteration.
     double multiplyAndDot(const StencilMatrix& A, const std::vector<double>& x, std::vector<double>& y) {
         const int nx = A.nx, ny = A.ny, nz = A.nz;
         const double* xs = x.data();
+        const double* const coef = A.a.data();
+        const std::ptrdiff_t rowLen = nx, layer = A.layerSize;   // Node-index steps between rows and layers
         double* ys = y.data();
         double dotXY = 0.0;
         for (int k = 0; k < nz; ++k)
@@ -411,9 +392,9 @@ namespace {
                 dotXY += xs[n0] * ys[n0];
                 for (int i = 1; i < nx - 1; ++i) {
                     const std::size_t n = n0 + i;
-                    const double* row = A.row(n);
-                    ys[n] = k == 0 ? stencilSum<9, 27, false>(0.0, row, xs + n, A.offset)
-                                   : stencilSum<0, 27, false>(0.0, row, xs + n, A.offset);
+                    const double* row = coef + n * 27;
+                    ys[n] = k == 0 ? stencilSum<9, 27, false>(0.0, row, xs + n, rowLen, layer)
+                                   : stencilSum<0, 27, false>(0.0, row, xs + n, rowLen, layer);
                     dotXY += xs[n] * ys[n];
                 }
                 const std::size_t last = n0 + nx - 1;
@@ -426,24 +407,28 @@ namespace {
     // Rows swept together by the Gauss-Seidel kernels. Each node's update is a chain of 13 dependent
     // multiply-adds and a division, and in the backward sweep that chain starts with the node just finished,
     // so node after node the processor waits on the previous result. Rows of a band are interleaved so it
-    // always has independent chains to work on. On a 2-core Xeon this cut the preconditioner's time by about a
-    // quarter; bands of 2, 4 and 8 rows gave much the same gain (within the machine's timing noise).
+    // always has independent chains to work on. Bands of 2, 4 and 8 rows perform about the same; 4 is between.
     constexpr int SWEEP_BAND = 4;
 
-    // Symmetric Gauss-Seidel preconditioner, z = M^-1 r, bit-identical to preconditionReference.
+    // Symmetric Gauss-Seidel preconditioner (SSOR with omega = 1, as WindNinja's preconditioner.cpp):
+    // z = M^-1 r with M = (D + L) D^-1 (D + U). The forward sweep solves (D + L) t = r, the backward sweep
+    // solves (D + U) z = D t, both in place in z. Fixed (boundary) rows are identity rows: z = r there.
     //
-    // Why the order can change without changing a single bit: in the forward sweep node (i, j, k) reads only
-    // lower-numbered neighbours, which must already hold their final values: the layer below, row j - 1 at
-    // i - 1 .. i + 1, and its own row at i - 1. In node order those are all done first, but they are also all
-    // done if row j runs two nodes behind row j - 1. So a band of rows is swept as a skewed wavefront: at step
-    // t, row q of the band does node i = 1 + t - 2q. When row q reaches i, row q - 1 finished i + 1 one step
-    // earlier. Every node therefore reads exactly the values it reads in node order, and does the same
-    // operations on them in the same order, so z comes out bit-identical. The backward sweep is the mirror
-    // image (rows from the top of the layer down, i from nx - 2 down, reading only higher-numbered nodes).
-    // Fixed nodes (z = r) are set first; nothing else writes them, so every read of them sees r as before.
+    // A Gauss-Seidel sweep is defined node by node in node order: in the forward sweep node (i, j, k) uses the
+    // new values of its lower-numbered neighbours (the layer below, row j - 1 at i - 1 .. i + 1, and its own row
+    // at i - 1), in the backward sweep those of its higher-numbered ones. Those are also all final if each row
+    // runs two nodes behind the row before it, so a band of SWEEP_BAND rows is swept as a skewed wavefront: at
+    // step t, row q of the band does node i = 1 + t - 2q (forward). When row q reaches i, row q - 1 finished
+    // i + 1 one step earlier, so every node reads exactly the values node order gives it and z is the same to
+    // the last bit; the nodes of one step are independent, which keeps the processor busy. The backward sweep
+    // is the mirror image (rows from the top of the layer down, i from nx - 2 down). At each step only the rows
+    // that have started and not yet finished take part (qFirst .. qLast), so no node is tested for being out of
+    // range. Fixed nodes (z = r) are set first; nothing else writes them.
     void precondition(const StencilMatrix& A, const std::vector<double>& r, std::vector<double>& z) {
         const int nx = A.nx, ny = A.ny, nz = A.nz;
         const double* rs = r.data();
+        const double* const coef = A.a.data();
+        const std::ptrdiff_t rowLen = nx, layer = A.layerSize;   // Node-index steps between rows and layers
         double* zs = z.data();
         auto node = [&](int i, int j, int k) { return (static_cast<std::size_t>(k) * ny + j) * nx + i; };
 
@@ -468,16 +453,18 @@ namespace {
             for (int jb = 1; jb <= ny - 2; jb += SWEEP_BAND) {
                 const int rows = std::min(SWEEP_BAND, ny - 1 - jb);
                 const int steps = freeCols + 2 * (rows - 1);   // Until the last row of the band reaches nx - 2
-                for (int t = 0; t < steps; ++t)
-                    for (int q = 0; q < rows; ++q) {
+                for (int t = 0; t < steps; ++t) {
+                    // Rows working at step t: row q is at 1 + t - 2q, which must lie in 1 .. freeCols
+                    const int qFirst = std::max(0, (t - freeCols + 2) / 2), qLast = std::min(rows - 1, t / 2);
+                    for (int q = qFirst; q <= qLast; ++q) {
                         const int i = 1 + t - 2 * q;
-                        if (i < 1 || i > nx - 2) continue;   // This row has not started yet, or has finished
                         const std::size_t n = node(i, jb + q, k);
-                        const double* row = A.row(n);
-                        const double sum = k == 0 ? stencilSum<9, 13, true>(rs[n], row, zs + n, A.offset)
-                                                  : stencilSum<0, 13, true>(rs[n], row, zs + n, A.offset);
+                        const double* row = coef + n * 27;
+                        const double sum = k == 0 ? stencilSum<9, 13, true>(rs[n], row, zs + n, rowLen, layer)
+                                                  : stencilSum<0, 13, true>(rs[n], row, zs + n, rowLen, layer);
                         zs[n] = sum / row[13];
                     }
+                }
             }
 
         // Backward sweep, (D + U) z = D t: layers downwards, bands of rows southwards (decreasing j)
@@ -485,15 +472,17 @@ namespace {
             for (int jb = ny - 2; jb >= 1; jb -= SWEEP_BAND) {
                 const int rows = std::min(SWEEP_BAND, jb);
                 const int steps = freeCols + 2 * (rows - 1);
-                for (int t = 0; t < steps; ++t)
-                    for (int q = 0; q < rows; ++q) {
+                for (int t = 0; t < steps; ++t) {
+                    // Rows working at step t: row q is at nx - 2 - t + 2q, which must lie in 1 .. freeCols
+                    const int qFirst = std::max(0, (t - freeCols + 2) / 2), qLast = std::min(rows - 1, t / 2);
+                    for (int q = qFirst; q <= qLast; ++q) {
                         const int i = nx - 2 - t + 2 * q;
-                        if (i < 1 || i > nx - 2) continue;
                         const std::size_t n = node(i, jb - q, k);
-                        const double* row = A.row(n);
-                        const double sum = stencilSum<14, 27, false>(0.0, row, zs + n, A.offset);
+                        const double* row = coef + n * 27;
+                        const double sum = stencilSum<14, 27, false>(0.0, row, zs + n, rowLen, layer);
                         zs[n] -= sum / row[13];
                     }
+                }
             }
     }
 
@@ -534,55 +523,60 @@ namespace {
         f.converged = true;
         return f;
     }
-}
 
-// ----------------------------------------------------------------------------
-// Solve the terrain wind (steps 1-6 of wind_solver.h)
-// ----------------------------------------------------------------------------
-WindField solveTerrainWind(const GridSpec& spec, const std::vector<Cell>& grid, float wind20Kmh, float windFromDeg,
-                           const WindSolverSettings& s) {
-    requireGridSize(grid, spec, "solveTerrainWind cells");
-    const float cellSizeX = spec.cellSizeX, cellSizeY = spec.cellSizeY;   // Ground size of a fire cell, m
-    const Vec2 toward = windTowardGrid(windFromDeg);
-    const double wind20Ms = wind20Kmh / KMH_PER_MS;
-    if (wind20Ms <= 0.0) return uniformField(spec, toward, 0.0);
+    // ========================================================================
+    // The solve, step by step (wind_solver.h numbers the steps)
+    // ========================================================================
+    // Weights of the three wind components in the adjustment: Rx = Ry = 1/2, Rz = alpha^2 / 2
+    struct Weights {
+        double Rx = 0.5, Ry = 0.5, Rz = 0.5;
+    };
 
-    // --- Step 1: mesh ---
-    const Mesh m = buildMesh(spec, grid, wind20Ms, s);
-    if (m.nx < 3 || m.ny < 3) return uniformField(spec, toward, wind20Kmh);   // No interior nodes to solve for
-    const std::size_t total = m.count();
+    // A wind vector at every mesh node (u east, v south, w up), m/s
+    struct NodeWind {
+        std::vector<double> u, v, w;
+    };
 
-    // --- Step 2: first guess, the open wind spread up each column with the log profile ---
-    std::vector<double> u0(total, 0.0), v0(total, 0.0), w0(total, 0.0);
-    for (int j = 0; j < m.ny; ++j)
-        for (int i = 0; i < m.nx; ++i) {
-            const Column& col = m.cols[static_cast<std::size_t>(j) * m.nx + i];
-            const double sRef = profileShape(col, WIND_REF_HEIGHT_M + col.vegH);
-            for (int k = 1; k < m.nz; ++k) {   // k = 0 is the ground: no wind there
-                const std::size_t n = m.node(i, j, k);
-                const double speed = wind20Ms * profileShape(col, m.z[n] - col.ground) / sRef;
-                u0[n] = speed * toward.x;
-                v0[n] = speed * toward.y;
+    // ------------------------------------------------------------------------
+    // Step 2: first guess, the open wind spread up each column with the log profile (no vertical wind)
+    // ------------------------------------------------------------------------
+    NodeWind firstGuess(const Mesh& m, Vec2 toward, double wind20Ms) {
+        const std::size_t total = m.count();
+        NodeWind g{ std::vector<double>(total, 0.0), std::vector<double>(total, 0.0), std::vector<double>(total, 0.0) };
+        for (int j = 0; j < m.ny; ++j)
+            for (int i = 0; i < m.nx; ++i) {
+                const Column& col = m.cols[static_cast<std::size_t>(j) * m.nx + i];
+                const double sRef = profileShape(col, WIND_REF_HEIGHT_M + col.vegH);
+                for (int k = 1; k < m.nz; ++k) {   // k = 0 is the ground: no wind there
+                    const std::size_t n = m.node(i, j, k);
+                    const double speed = wind20Ms * profileShape(col, m.z[n] - col.ground) / sRef;
+                    g.u[n] = speed * toward.x;
+                    g.v[n] = speed * toward.y;
+                }
             }
-        }
+        return g;
+    }
 
-    // --- Step 4: assemble K Phi = Q (step 3's equation in weak form) ---
-    // K_ab = integral of Rx dNa/dX dNb/dX + Ry dNa/dY dNb/dY + Rz dNa/dZ dNb/dZ;  Q_a = integral of N_a div(u0)
-    const double Rx = 0.5, Ry = 0.5, Rz = 0.5 * s.alpha * s.alpha;
-    StencilMatrix A;
-    A.a.assign(total * 27, 0.0);
-    A.layerSize = m.nx * m.ny;
-    A.nx = m.nx;
-    A.ny = m.ny;
-    A.nz = m.nz;
-    for (int dk = -1; dk <= 1; ++dk)
-        for (int dj = -1; dj <= 1; ++dj)
-            for (int di = -1; di <= 1; ++di)
-                A.offset[(dk + 1) * 9 + (dj + 1) * 3 + (di + 1)] =
-                    static_cast<std::ptrdiff_t>(dk) * A.layerSize + static_cast<std::ptrdiff_t>(dj) * m.nx + di;
-    std::vector<double> rhs(total, 0.0);
-    const ElementGeometry geom = elementGeometry(m);
-    {
+    // ------------------------------------------------------------------------
+    // Step 4a: assemble K Phi = Q, step 3's equation in weak form
+    // ------------------------------------------------------------------------
+    // K_ab = integral of Rx dNa/dX dNb/dX + Ry dNa/dY dNb/dY + Rz dNa/dZ dNb/dZ;  Q_a = integral of N_a div(u0),
+    // each by 2 x 2 x 2 Gauss quadrature, element by element, added into the 27-point rows (A) and rhs.
+    void assemble(const Mesh& m, const ElementGeometry& geom, const NodeWind& u0, const Weights& R,
+                  StencilMatrix& A, std::vector<double>& rhs) {
+        const std::size_t total = m.count();
+        A.a.assign(total * 27, 0.0);
+        A.layerSize = m.nx * m.ny;
+        A.nx = m.nx;
+        A.ny = m.ny;
+        A.nz = m.nz;
+        for (int dk = -1; dk <= 1; ++dk)
+            for (int dj = -1; dj <= 1; ++dj)
+                for (int di = -1; di <= 1; ++di)
+                    A.offset[(dk + 1) * 9 + (dj + 1) * 3 + (di + 1)] =
+                        static_cast<std::ptrdiff_t>(dk) * A.layerSize + static_cast<std::ptrdiff_t>(dj) * m.nx + di;
+        rhs.assign(total, 0.0);
+
         double xyz[8][3];
         std::size_t ids[8];
         HexPoint hp;
@@ -593,19 +587,15 @@ WindField solveTerrainWind(const GridSpec& spec, const std::vector<Cell>& grid, 
                     double S[8][8] = {};
                     double Q[8] = {};
                     for (int g = 0; g < 8; ++g) {
-                        if (s.referenceKernels)
-                            evalHex(xyz, (g & 1) ? GAUSS : -GAUSS, ((g >> 1) & 1) ? GAUSS : -GAUSS,
-                                    ((g >> 2) & 1) ? GAUSS : -GAUSS, hp);
-                        else
-                            gaussHex(geom, i, j, g, xyz, hp);   // Bit-identical to the evalHex call above
+                        gaussHex(geom, i, j, g, xyz, hp);
                         double div0 = 0.0;   // div(u0) at this Gauss point
                         for (int b = 0; b < 8; ++b)
-                            div0 += hp.dN[b][0] * u0[ids[b]] + hp.dN[b][1] * v0[ids[b]] + hp.dN[b][2] * w0[ids[b]];
+                            div0 += hp.dN[b][0] * u0.u[ids[b]] + hp.dN[b][1] * u0.v[ids[b]] + hp.dN[b][2] * u0.w[ids[b]];
                         for (int a = 0; a < 8; ++a) {
                             Q[a] += hp.N[a] * div0 * hp.detJ;
                             for (int b = 0; b < 8; ++b)
-                                S[a][b] += (Rx * hp.dN[a][0] * hp.dN[b][0] + Ry * hp.dN[a][1] * hp.dN[b][1]
-                                          + Rz * hp.dN[a][2] * hp.dN[b][2]) * hp.detJ;
+                                S[a][b] += (R.Rx * hp.dN[a][0] * hp.dN[b][0] + R.Ry * hp.dN[a][1] * hp.dN[b][1]
+                                          + R.Rz * hp.dN[a][2] * hp.dN[b][2]) * hp.detJ;
                         }
                     }
                     // Scatter into the stencil rows: corner b is at offset (bx - ax, by - ay, bz - az) from a
@@ -621,93 +611,101 @@ WindField solveTerrainWind(const GridSpec& spec, const std::vector<Cell>& grid, 
                 }
     }
 
-    // Boundary conditions: Phi = 0 on the sides and top. Their rows become identity rows with a 0 right-hand
-    // side, and every other row drops its coupling to them (the known Phi = 0 moves to the right-hand side as
-    // 0). This keeps the matrix symmetric. The ground needs nothing: the natural condition is no flux.
-    A.fixed.assign(total, 0);
-    for (int k = 0; k < m.nz; ++k)
-        for (int j = 0; j < m.ny; ++j)
-            for (int i = 0; i < m.nx; ++i)
-                A.fixed[m.node(i, j, k)] = m.boundary(i, j, k) ? 1 : 0;
-    for (std::size_t n = 0; n < total; ++n) {
-        double* row = A.row(n);
-        if (A.fixed[n]) {
-            std::fill(row, row + 27, 0.0);
-            row[13] = 1.0;
-            rhs[n] = 0.0;
-            continue;
+    // ------------------------------------------------------------------------
+    // Step 4b: boundary conditions
+    // ------------------------------------------------------------------------
+    // Phi = 0 on the sides and top. Their rows become identity rows with a 0 right-hand side, and every other
+    // row drops its coupling to them (the known Phi = 0 moves to the right-hand side as 0). This keeps the
+    // matrix symmetric. The ground needs nothing: the natural condition is no flux through it.
+    void applyDirichlet(const Mesh& m, StencilMatrix& A, std::vector<double>& rhs) {
+        const std::size_t total = m.count();
+        A.fixed.assign(total, 0);
+        for (int k = 0; k < m.nz; ++k)
+            for (int j = 0; j < m.ny; ++j)
+                for (int i = 0; i < m.nx; ++i)
+                    A.fixed[m.node(i, j, k)] = m.boundary(i, j, k) ? 1 : 0;
+        for (std::size_t n = 0; n < total; ++n) {
+            double* row = A.row(n);
+            if (A.fixed[n]) {
+                std::fill(row, row + 27, 0.0);
+                row[13] = 1.0;
+                rhs[n] = 0.0;
+                continue;
+            }
+            for (int s2 = A.firstEntry(n); s2 < 27; ++s2)
+                if (s2 != 13 && A.fixed[A.neighbour(n, s2)]) row[s2] = 0.0;
         }
-        for (int s2 = A.firstEntry(n); s2 < 27; ++s2)
-            if (s2 != 13 && A.fixed[A.neighbour(n, s2)]) row[s2] = 0.0;
     }
 
-    // --- Step 4: preconditioned conjugate gradients ---
-    WindField field;
-    field.grid = spec;
-    field.columnsX = m.nx;
-    field.columnsY = m.ny;
-    field.layers = m.nz;
-    std::vector<double> phi(total, 0.0);
-    // Nothing to correct when the first guess is already mass-conserving (flat ground with even roughness):
-    // the right-hand side is then only rounding noise, far below the size of a real term (wind x column area)
-    const double rhsNorm = std::sqrt(dot(rhs, rhs));
-    const double rhsScale = wind20Ms * m.hx * m.hy * std::sqrt(static_cast<double>(total));
-    if (rhsNorm > 1e-10 * rhsScale) {
+    // ------------------------------------------------------------------------
+    // Step 4c: preconditioned conjugate gradients
+    // ------------------------------------------------------------------------
+    // Solves A phi = rhs from phi = 0 until ||r|| / ||rhs|| < s.tolerance (or s.maxIterations). rhsScale is the
+    // size of a real right-hand side (wind x column area x sqrt(nodes)): when ||rhs|| is far below it the first
+    // guess is already mass-conserving (flat ground with even roughness), the right-hand side is only rounding
+    // noise, and phi stays 0 (reported as converged after 0 iterations).
+    struct PcgResult {
+        std::vector<double> phi;
+        int iterations = 0;
+        double relResidual = 0.0;
+        bool converged = true;
+    };
+
+    PcgResult solvePcg(const StencilMatrix& A, const std::vector<double>& rhs, double rhsScale,
+                       const WindSolverSettings& s) {
+        const std::size_t total = rhs.size();
+        PcgResult out;
+        out.phi.assign(total, 0.0);
+        const double rhsNorm = std::sqrt(dot(rhs, rhs));
+        if (rhsNorm <= 1e-10 * rhsScale) return out;   // Nothing to correct
+
+        std::vector<double>& phi = out.phi;
         std::vector<double> r = rhs, z(total, 0.0), p(total, 0.0), Ap(total, 0.0);
-        // The row-wise kernels give bit-identical results to the reference ones (tests check this)
-        auto applyM = [&](const std::vector<double>& in, std::vector<double>& out) {
-            if (s.referenceKernels) preconditionReference(A, in, out);
-            else precondition(A, in, out);
-        };
-        applyM(r, z);
+        precondition(A, r, z);
         p = z;
         double rz = dot(r, z);
         int it = 0;
         double rel = 1.0;
         while (it < s.maxIterations) {
-            double pAp;
-            if (s.referenceKernels) { multiplyReference(A, p, Ap); pAp = dot(p, Ap); }
-            else pAp = multiplyAndDot(A, p, Ap);
+            const double pAp = multiplyAndDot(A, p, Ap);
             const double alpha = rz / pAp;
             // Step along p, and ||r||^2 in the same pass (same additions, in node order, as dot(r, r))
             double rr = 0.0;
-            if (s.referenceKernels) {
-                for (std::size_t n = 0; n < total; ++n) {
-                    phi[n] += alpha * p[n];
-                    r[n] -= alpha * Ap[n];
-                }
-                rr = dot(r, r);
-            }
-            else {
-                for (std::size_t n = 0; n < total; ++n) {
-                    phi[n] += alpha * p[n];
-                    r[n] -= alpha * Ap[n];
-                    rr += r[n] * r[n];
-                }
+            for (std::size_t n = 0; n < total; ++n) {
+                phi[n] += alpha * p[n];
+                r[n] -= alpha * Ap[n];
+                rr += r[n] * r[n];
             }
             ++it;
             rel = std::sqrt(rr) / rhsNorm;
             if (rel < s.tolerance) break;
-            applyM(r, z);
+            precondition(A, r, z);
             const double rzNew = dot(r, z);
             const double beta = rzNew / rz;
             rz = rzNew;
             for (std::size_t n = 0; n < total; ++n) p[n] = z[n] + beta * p[n];
         }
-        field.iterations = it;
-        field.relResidual = rel;
-        field.converged = rel < s.tolerance;
+        out.iterations = it;
+        out.relResidual = rel;
+        out.converged = rel < s.tolerance;
+        return out;
     }
-    else {
-        field.converged = true;   // The first guess is already mass-conserving (e.g. flat ground)
-    }
-    A.a.clear();
-    A.a.shrink_to_fit();   // Free the matrix before the next step allocates
 
-    // --- Step 5: wind at the nodes, u = u0 + Rx dPhi/dx etc., gradients smoothed onto the nodes ---
-    // Each Gauss point's gradient goes to the element's 8 corners, weighted by 1 / distance
-    std::vector<double> gx(total, 0.0), gy(total, 0.0), gz(total, 0.0), wsum(total, 0.0);
-    {
+    // ------------------------------------------------------------------------
+    // Step 5a: gradients of Phi smoothed onto the nodes
+    // ------------------------------------------------------------------------
+    // dPhi/dx etc. are discontinuous between elements, so each Gauss point's gradient goes to its element's 8
+    // corners weighted by 1 / distance (WindNinja's "stress smoothing"). Returns the weighted sums per node in
+    // `sum` (x, y, z) and the weights in `weight`.
+    struct NodeGradient {
+        NodeWind sum;                 // Weighted gradient sums, one per component
+        std::vector<double> weight;   // Sum of the weights
+    };
+
+    NodeGradient smoothGradients(const Mesh& m, const ElementGeometry& geom, const std::vector<double>& phi) {
+        const std::size_t total = m.count();
+        NodeGradient g{ { std::vector<double>(total, 0.0), std::vector<double>(total, 0.0), std::vector<double>(total, 0.0) },
+                        std::vector<double>(total, 0.0) };
         double xyz[8][3];
         std::size_t ids[8];
         HexPoint hp;
@@ -715,85 +713,145 @@ WindField solveTerrainWind(const GridSpec& spec, const std::vector<Cell>& grid, 
             for (int j = 0; j < m.ny - 1; ++j)
                 for (int i = 0; i < m.nx - 1; ++i) {
                     m.elementCorners(i, j, k, xyz, ids);
-                    for (int g = 0; g < 8; ++g) {
-                        if (s.referenceKernels)
-                            evalHex(xyz, (g & 1) ? GAUSS : -GAUSS, ((g >> 1) & 1) ? GAUSS : -GAUSS,
-                                    ((g >> 2) & 1) ? GAUSS : -GAUSS, hp);
-                        else
-                            gaussHex(geom, i, j, g, xyz, hp);   // Bit-identical to the evalHex call above
+                    for (int gp = 0; gp < 8; ++gp) {
+                        gaussHex(geom, i, j, gp, xyz, hp);
                         double grad[3] = { 0.0, 0.0, 0.0 };
                         for (int a = 0; a < 8; ++a)
                             for (int c = 0; c < 3; ++c) grad[c] += hp.dN[a][c] * phi[ids[a]];
                         for (int a = 0; a < 8; ++a) {
                             const double dx = xyz[a][0] - hp.pos[0], dy = xyz[a][1] - hp.pos[1], dz = xyz[a][2] - hp.pos[2];
                             const double wgt = 1.0 / std::sqrt(dx * dx + dy * dy + dz * dz);
-                            gx[ids[a]] += wgt * grad[0];
-                            gy[ids[a]] += wgt * grad[1];
-                            gz[ids[a]] += wgt * grad[2];
-                            wsum[ids[a]] += wgt;
+                            g.sum.u[ids[a]] += wgt * grad[0];
+                            g.sum.v[ids[a]] += wgt * grad[1];
+                            g.sum.w[ids[a]] += wgt * grad[2];
+                            g.weight[ids[a]] += wgt;
                         }
                     }
                 }
+        return g;
     }
-    std::vector<double> u(total), v(total), w(total);
-    for (std::size_t n = 0; n < total; ++n) {
-        u[n] = u0[n] + Rx * gx[n] / wsum[n];
-        v[n] = v0[n] + Ry * gy[n] / wsum[n];
-        w[n] = w0[n] + Rz * gz[n] / wsum[n];
-    }
-    field.divergenceBefore = rmsDivergence(m, u0, v0, w0);
-    field.divergenceAfter = rmsDivergence(m, u, v, w);
 
-    // --- Step 6a: horizontal wind 6.1 m above the vegetation in each column (WindNinja's interp_uvw) ---
-    std::vector<double> colU(static_cast<std::size_t>(m.nx) * m.ny), colV(colU.size());
-    for (int j = 0; j < m.ny; ++j)
-        for (int i = 0; i < m.nx; ++i) {
-            const std::size_t c = static_cast<std::size_t>(j) * m.nx + i;
-            const Column& col = m.cols[c];
-            const double hRef = WIND_REF_HEIGHT_M + col.vegH;   // Sampling height above the ground
-            int k = 1;
-            while (k < m.nz - 1 && m.z[m.node(i, j, k)] - col.ground < hRef) ++k;
-            const std::size_t nk = m.node(i, j, k);
-            if (k == 1) {
-                // Inside the lowest mesh cell: scale the first node's wind down the log profile
-                const double ratio = profileShape(col, hRef) / profileShape(col, m.z[nk] - col.ground);
-                colU[c] = u[nk] * ratio;
-                colV[c] = v[nk] * ratio;
+    // ------------------------------------------------------------------------
+    // Step 5b: the adjusted wind at the nodes, u = u0 + Rx dPhi/dx, v = v0 + Ry dPhi/dy, w = w0 + Rz dPhi/dz
+    // ------------------------------------------------------------------------
+    NodeWind windAtNodes(const NodeWind& u0, const NodeGradient& g, const Weights& R) {
+        const std::size_t total = u0.u.size();
+        NodeWind out{ std::vector<double>(total), std::vector<double>(total), std::vector<double>(total) };
+        for (std::size_t n = 0; n < total; ++n) {
+            out.u[n] = u0.u[n] + R.Rx * g.sum.u[n] / g.weight[n];
+            out.v[n] = u0.v[n] + R.Ry * g.sum.v[n] / g.weight[n];
+            out.w[n] = u0.w[n] + R.Rz * g.sum.w[n] / g.weight[n];
+        }
+        return out;
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 6a: horizontal wind 6.1 m above the vegetation in each column (WindNinja's interp_uvw)
+    // ------------------------------------------------------------------------
+    // Inside the lowest mesh cell the first node's wind is scaled down the log profile. Higher up, wind / S
+    // (height) is interpolated linearly between the nodes either side and multiplied by S at the sampling
+    // height: plain linear interpolation of a log profile reads ~1 % low between nodes, this way an undisturbed
+    // log profile (flat ground) comes back exactly. colU, colV: one value per column, row-major.
+    void columnWindAt20ft(const Mesh& m, const NodeWind& wind, std::vector<double>& colU, std::vector<double>& colV) {
+        colU.assign(static_cast<std::size_t>(m.nx) * m.ny, 0.0);
+        colV.assign(colU.size(), 0.0);
+        for (int j = 0; j < m.ny; ++j)
+            for (int i = 0; i < m.nx; ++i) {
+                const std::size_t c = static_cast<std::size_t>(j) * m.nx + i;
+                const Column& col = m.cols[c];
+                const double hRef = WIND_REF_HEIGHT_M + col.vegH;   // Sampling height above the ground
+                int k = 1;
+                while (k < m.nz - 1 && m.z[m.node(i, j, k)] - col.ground < hRef) ++k;
+                const std::size_t nk = m.node(i, j, k);
+                if (k == 1) {
+                    const double ratio = profileShape(col, hRef) / profileShape(col, m.z[nk] - col.ground);
+                    colU[c] = wind.u[nk] * ratio;
+                    colV[c] = wind.v[nk] * ratio;
+                }
+                else {
+                    const std::size_t nb = m.node(i, j, k - 1);
+                    const double h1 = m.z[nb] - col.ground, h2 = m.z[nk] - col.ground;
+                    const double t = std::clamp((hRef - h1) / (h2 - h1), 0.0, 1.0);
+                    const double s1 = profileShape(col, h1), s2 = profileShape(col, h2), sRef = profileShape(col, hRef);
+                    colU[c] = sRef * ((1.0 - t) * wind.u[nb] / s1 + t * wind.u[nk] / s2);
+                    colV[c] = sRef * ((1.0 - t) * wind.v[nb] / s1 + t * wind.v[nk] / s2);
+                }
             }
-            else {
-                // Between nodes k - 1 and k: interpolate wind / S(height) linearly, then multiply by S at the
-                // sampling height. Plain linear interpolation of a log profile reads ~1 % low between nodes;
-                // this way an undisturbed log profile (flat ground) comes back exactly.
-                const std::size_t nb = m.node(i, j, k - 1);
-                const double h1 = m.z[nb] - col.ground, h2 = m.z[nk] - col.ground;
-                const double t = std::clamp((hRef - h1) / (h2 - h1), 0.0, 1.0);
-                const double s1 = profileShape(col, h1), s2 = profileShape(col, h2), sRef = profileShape(col, hRef);
-                colU[c] = sRef * ((1.0 - t) * u[nb] / s1 + t * u[nk] / s2);
-                colV[c] = sRef * ((1.0 - t) * v[nb] / s1 + t * v[nk] / s2);
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 6: the 20-ft wind of every fire cell
+    // ------------------------------------------------------------------------
+    // The columns' 20-ft wind (step 6a), interpolated bilinearly from the column centres to every fire cell.
+    // Writes field.speedKmh and field.toward; where the wind has died away the open wind's direction is kept.
+    void sampleAt20ft(const GridSpec& spec, const Mesh& m, const NodeWind& wind, Vec2 toward, WindField& field) {
+        std::vector<double> colU, colV;
+        columnWindAt20ft(m, wind, colU, colV);
+        const float cellSizeX = spec.cellSizeX, cellSizeY = spec.cellSizeY;   // Ground size of a fire cell, m
+        field.toward.resize(spec.count());
+        field.speedKmh.resize(field.toward.size());
+        for (int y = 0; y < spec.height; ++y) {
+            const double ty = std::clamp((y + 0.5) * cellSizeY / m.hy - 0.5, 0.0, m.ny - 1.0);
+            const int j0 = std::min(static_cast<int>(ty), m.ny - 2);
+            const double fy = ty - j0;
+            for (int x = 0; x < spec.width; ++x) {
+                const double tx = std::clamp((x + 0.5) * cellSizeX / m.hx - 0.5, 0.0, m.nx - 1.0);
+                const int i0 = std::min(static_cast<int>(tx), m.nx - 2);
+                const double fx = tx - i0;
+                const std::size_t c00 = static_cast<std::size_t>(j0) * m.nx + i0, c10 = c00 + 1;
+                const std::size_t c01 = c00 + m.nx, c11 = c01 + 1;
+                const double cu = (1 - fy) * ((1 - fx) * colU[c00] + fx * colU[c10]) + fy * ((1 - fx) * colU[c01] + fx * colU[c11]);
+                const double cv = (1 - fy) * ((1 - fx) * colV[c00] + fx * colV[c10]) + fy * ((1 - fx) * colV[c01] + fx * colV[c11]);
+                const double speed = std::sqrt(cu * cu + cv * cv);
+                const std::size_t idx = static_cast<std::size_t>(y) * spec.width + x;
+                field.speedKmh[idx] = static_cast<float>(speed * KMH_PER_MS);
+                field.toward[idx] = speed > 1e-6 ? Vec2(static_cast<float>(cu / speed), static_cast<float>(cv / speed)) : toward;
             }
         }
-
-    // --- Step 6b: bilinear interpolation from the column centres to every fire cell ---
-    field.toward.resize(spec.count());
-    field.speedKmh.resize(field.toward.size());
-    for (int y = 0; y < spec.height; ++y) {
-        const double ty = std::clamp((y + 0.5) * cellSizeY / m.hy - 0.5, 0.0, m.ny - 1.0);
-        const int j0 = std::min(static_cast<int>(ty), m.ny - 2);
-        const double fy = ty - j0;
-        for (int x = 0; x < spec.width; ++x) {
-            const double tx = std::clamp((x + 0.5) * cellSizeX / m.hx - 0.5, 0.0, m.nx - 1.0);
-            const int i0 = std::min(static_cast<int>(tx), m.nx - 2);
-            const double fx = tx - i0;
-            const std::size_t c00 = static_cast<std::size_t>(j0) * m.nx + i0, c10 = c00 + 1;
-            const std::size_t c01 = c00 + m.nx, c11 = c01 + 1;
-            const double cu = (1 - fy) * ((1 - fx) * colU[c00] + fx * colU[c10]) + fy * ((1 - fx) * colU[c01] + fx * colU[c11]);
-            const double cv = (1 - fy) * ((1 - fx) * colV[c00] + fx * colV[c10]) + fy * ((1 - fx) * colV[c01] + fx * colV[c11]);
-            const double speed = std::sqrt(cu * cu + cv * cv);
-            const std::size_t idx = static_cast<std::size_t>(y) * spec.width + x;
-            field.speedKmh[idx] = static_cast<float>(speed * KMH_PER_MS);
-            // Direction of the solved wind; keep the open wind's direction where the wind has died away
-            field.toward[idx] = speed > 1e-6 ? Vec2(static_cast<float>(cu / speed), static_cast<float>(cv / speed)) : toward;
-        }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Solve the terrain wind (steps 1-6 of wind_solver.h)
+// ----------------------------------------------------------------------------
+WindField solveTerrainWind(const GridSpec& spec, const std::vector<Cell>& grid, float wind20Kmh, float windFromDeg,
+                           const WindSolverSettings& s) {
+    requireGridSize(grid, spec, "solveTerrainWind cells");
+    const Vec2 toward = windTowardGrid(windFromDeg);
+    const double wind20Ms = wind20Kmh / KMH_PER_MS;
+    if (wind20Ms <= 0.0) return uniformField(spec, toward, 0.0);
+
+    // Step 1: the mesh (and nothing to solve on a map too small for interior nodes)
+    const Mesh m = buildMesh(spec, grid, wind20Ms, s);
+    if (m.nx < 3 || m.ny < 3) return uniformField(spec, toward, wind20Kmh);
+    const ElementGeometry geom = elementGeometry(m);
+    Weights R;
+    R.Rz = 0.5 * s.alpha * s.alpha;
+
+    // Step 2: first guess; steps 3-4: adjust it to conserve mass (the matrix is freed as soon as it is solved)
+    const NodeWind u0 = firstGuess(m, toward, wind20Ms);
+    PcgResult solved;
+    {
+        StencilMatrix A;
+        std::vector<double> rhs;
+        assemble(m, geom, u0, R, A, rhs);
+        applyDirichlet(m, A, rhs);
+        const double rhsScale = wind20Ms * m.hx * m.hy * std::sqrt(static_cast<double>(m.count()));
+        solved = solvePcg(A, rhs, rhsScale, s);
+    }
+
+    // Step 5: the adjusted wind at the nodes; step 6: the 20-ft wind of every fire cell
+    const NodeWind wind = windAtNodes(u0, smoothGradients(m, geom, solved.phi), R);
+    WindField field;
+    field.grid = spec;
+    field.columnsX = m.nx;
+    field.columnsY = m.ny;
+    field.layers = m.nz;
+    field.iterations = solved.iterations;
+    field.relResidual = solved.relResidual;
+    field.converged = solved.converged;
+    field.divergenceBefore = rmsDivergence(m, u0.u, u0.v, u0.w);
+    field.divergenceAfter = rmsDivergence(m, wind.u, wind.v, wind.w);
+    sampleAt20ft(spec, m, wind, toward, field);
     return field;
 }

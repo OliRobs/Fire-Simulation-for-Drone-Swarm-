@@ -31,7 +31,7 @@
 #include "mission_controller.h"
 #include "perimeter.h"
 #include "wind_solver.h"
-#include "test_support.h"   // ridgeValleyTerrain / windBenchTerrain, shared with the wind tests
+#include "test_support.h"   // ridgeValleyTerrain / windBenchTerrain / windFieldHash, shared with the wind tests
 
 namespace {
     // ------------------------------------------------------------------------
@@ -53,15 +53,15 @@ namespace {
         return d2 < cap ? d2 : cap;
     }
 
-    // Prints the checksum and, with --expect, returns 1 when it differs from the expected one
-    int reportChecksum(const char* expect, const char* what) {
+    // Prints `hash` as the checksum and, with --expect, returns 1 when it differs from the expected one.
+    // what: which results the checksum covers; checksumFile: the file in tools/ that holds the expected value.
+    int reportChecksum(std::uint64_t hash, const char* expect, const char* what, const char* checksumFile) {
         char sum[32];
-        std::snprintf(sum, sizeof(sum), "%016llx", static_cast<unsigned long long>(g_hash));
+        std::snprintf(sum, sizeof(sum), "%016llx", static_cast<unsigned long long>(hash));
         std::printf("checksum %s\n", sum);
         if (expect && std::strcmp(expect, sum) != 0) {
             std::printf("CHECKSUM MISMATCH: expected %s. %s results changed: if that is intended, update "
-                        "tools/%s and say why in the pull request.\n", expect, what,
-                        std::strcmp(what, "Terrain wind") == 0 ? "wind_checksum.txt" : "bench_checksum.txt");
+                        "tools/%s and say why in the pull request.\n", expect, what, checksumFile);
             return 1;
         }
         return 0;
@@ -89,10 +89,7 @@ namespace {
                     f.converged ? "" : ", NOT converged", ms(t0, t1));
         std::printf("mass error (RMS div) %.3e -> %.3e 1/s\n", f.divergenceBefore, f.divergenceAfter);
 
-        mix(f.iterations);
-        mix(f.relResidual);
-        for (size_t i = 0; i < f.speedKmh.size(); ++i) { mix(f.speedKmh[i]); mix(f.toward[i].x); mix(f.toward[i].y); }
-        return reportChecksum(expect, "Terrain wind");
+        return reportChecksum(windFieldHash(f), expect, "Terrain wind", "wind_checksum.txt");
     }
 }
 
@@ -189,5 +186,5 @@ int main(int argc, char** argv) {
                 tStep / frames, tLive / frames, tPerim / frames, ringCalls ? tRing / ringCalls : 0.0, ringCalls);
     std::printf("mission [ms]: normal frame %.3f, re-plan average %.1f, worst %.1f\n",
                 flyFrames ? tFly / flyFrames : 0.0, replans ? tReplan / replans : 0.0, worstReplan);
-    return reportChecksum(expect, "Simulation or planning");
+    return reportChecksum(g_hash, expect, "Simulation or planning", "bench_checksum.txt");
 }

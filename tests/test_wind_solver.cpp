@@ -4,6 +4,7 @@
 // ============================================================================
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -92,50 +93,54 @@ SLOW_TEST(terrain_wind_stability_changes_how_much_air_goes_round) {
     CHECK(turn[0] > turn[1] && turn[1] > turn[2]);
 }
 
-// The solver's fast paths (row-wise CG kernels with the wavefront Gauss-Seidel sweeps, and the element
-// geometry shared down each mesh column) must give exactly what the solver gives as first written
-// (WindSolverSettings::referenceKernels), to the last bit, on any mesh shape. The cases cover: square and
-// non-square cells; meshes whose free rows are and are not a multiple of the sweep band (4 rows); meshes
-// narrower than the band's skew (2 free nodes per row); 3 to 20 layers; stable, neutral and unstable air
-// (alpha 0.3 / 1 / 3, so Rz is not always a power of two); and mixed roughness (a forest patch).
-namespace {
-    // True when two solved fields are identical to the last bit, diagnostics included
-    bool sameWindField(const WindField& a, const WindField& b) {
-        return a.iterations == b.iterations && a.converged == b.converged && a.columnsX == b.columnsX
-            && a.columnsY == b.columnsY && a.layers == b.layers
-            && std::memcmp(&a.relResidual, &b.relResidual, sizeof(double)) == 0
-            && std::memcmp(&a.divergenceBefore, &b.divergenceBefore, sizeof(double)) == 0
-            && std::memcmp(&a.divergenceAfter, &b.divergenceAfter, sizeof(double)) == 0
-            && a.speedKmh.size() == b.speedKmh.size() && a.toward.size() == b.toward.size()
-            && std::memcmp(a.speedKmh.data(), b.speedKmh.data(), a.speedKmh.size() * sizeof(float)) == 0
-            && std::memcmp(a.toward.data(), b.toward.data(), a.toward.size() * sizeof(Vec2)) == 0;
-    }
-}
+// Golden results: six solves recorded before the reference kernels (the solver as first written) were removed,
+// when the fast paths were proven to give the reference's results bit for bit on exactly these meshes. Each is
+// a hash of the whole solved field (windFieldHash: iterations, residual, every cell's speed and direction), so
+// any change to the solved wind, down to the last bit, fails here. The cases cover: square and non-square
+// cells; meshes whose free rows are and are not a multiple of the sweep band (4 rows); meshes narrower than the
+// band's skew (2 free nodes per row); 3 to 20 layers; stable, neutral and unstable air (alpha 0.3 / 1 / 3, so
+// Rz is not always a power of two); and mixed roughness (a forest patch).
+//
+// The hashes depend on the compiler's floating point (and libm, which builds the terrain), so they are only
+// compared where they were recorded: GCC on x86-64 Linux without FMA contraction, as in the Linux CI job (the
+// same condition as tools/wind_checksum.txt). Elsewhere (MSVC CI) the solves still run and must converge.
+// A change MEANT to alter the wind updates these values and tools/wind_checksum.txt together, and says why.
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && defined(__linux__) && !defined(__FMA__)
+#define WF_COMPARE_WIND_GOLDEN 1
+#else
+#define WF_COMPARE_WIND_GOLDEN 0
+#endif
 
-SLOW_TEST(terrain_wind_fast_kernels_match_the_reference_solver_bit_for_bit) {
-    struct Case { float cellX, cellY, columnM; int layers; float alpha; float fromDeg; bool hill; };
+SLOW_TEST(terrain_wind_matches_the_recorded_golden_fields) {
+    struct Case { float cellX, cellY, columnM; int layers; float alpha; float fromDeg; bool hill; std::uint64_t golden; };
     const Case cases[] = {
-        { 30.0f, 30.0f, 600.0f, 20, 1.0f, 270.0f, true },     // 60 x 50 x 20 nodes: 48 free rows (a multiple of 4)
-        { 30.0f, 30.0f, 600.0f, 20, 0.3f, 225.0f, false },    // Stable air, rugged terrain with a forest patch
-        { 30.0f, 25.0f, 750.0f, 7, 3.0f, 200.0f, false },     // Non-square cells, unstable air: 48 x 34 x 7 (32 free rows)
-        { 30.0f, 30.0f, 1500.0f, 5, 1.0f, 135.0f, false },    // 24 x 20 x 5: 18 free rows (4 bands + 2)
-        { 30.0f, 30.0f, 6000.0f, 4, 1.0f, 45.0f, false },     // 6 x 5 x 4: 3 free rows (one partial band)
-        { 30.0f, 30.0f, 9000.0f, 3, 1.0f, 315.0f, false },    // 4 x 4 x 3: 2 free nodes per row, narrower than the skew
+        // 60 x 50 x 20 nodes: 48 free rows (a multiple of 4)
+        { 30.0f, 30.0f, 600.0f, 20, 1.0f, 270.0f, true, 0x7602f37c60349b30ULL },
+        // Stable air, rugged terrain with a forest patch
+        { 30.0f, 30.0f, 600.0f, 20, 0.3f, 225.0f, false, 0x4de32e12c1bf6794ULL },
+        // Non-square cells, unstable air: 48 x 34 x 7 (32 free rows)
+        { 30.0f, 25.0f, 750.0f, 7, 3.0f, 200.0f, false, 0x224151796e88663eULL },
+        // 24 x 20 x 5: 18 free rows (4 bands + 2)
+        { 30.0f, 30.0f, 1500.0f, 5, 1.0f, 135.0f, false, 0xd1a40a20e3ee939cULL },
+        // 6 x 5 x 4: 3 free rows (one partial band)
+        { 30.0f, 30.0f, 6000.0f, 4, 1.0f, 45.0f, false, 0xbdd5fa1e54f6f02dULL },
+        // 4 x 4 x 3: 2 free nodes per row, narrower than the skew
+        { 30.0f, 30.0f, 9000.0f, 3, 1.0f, 315.0f, false, 0x26ba2bdd8b011e7bULL },
     };
     int checked = 0;
     for (const Case& c : cases) {
         const std::vector<Cell> grid = c.hill ? gaussianHill() : ruggedWindTerrain(c.cellX, c.cellY);
-        WindSolverSettings fast = windTestSettings(c.alpha);
-        fast.columnSizeM = c.columnM;
-        fast.layers = c.layers;
-        WindSolverSettings reference = fast;
-        reference.referenceKernels = true;
-        const WindField a = solveTerrainWind(gridWithCells(c.cellX, c.cellY), grid, 20.0f, c.fromDeg, fast);
-        const WindField b = solveTerrainWind(gridWithCells(c.cellX, c.cellY), grid, 20.0f, c.fromDeg, reference);
-        std::printf("  (%d x %d x %d mesh, alpha %.1f: %d CG iterations, %s)\n", a.columnsX, a.columnsY, a.layers,
-                    c.alpha, a.iterations, sameWindField(a, b) ? "identical" : "DIFFERENT");
-        CHECK(a.iterations > 0);   // The solve really ran (not the flat-ground shortcut)
-        CHECK(sameWindField(a, b));
+        WindSolverSettings s = windTestSettings(c.alpha);
+        s.columnSizeM = c.columnM;
+        s.layers = c.layers;
+        const WindField f = solveTerrainWind(gridWithCells(c.cellX, c.cellY), grid, 20.0f, c.fromDeg, s);
+        const std::uint64_t hash = windFieldHash(f);
+        std::printf("  (%d x %d x %d mesh, alpha %.1f: %d CG iterations, hash %016llx%s)\n", f.columnsX, f.columnsY,
+                    f.layers, c.alpha, f.iterations, static_cast<unsigned long long>(hash),
+                    !WF_COMPARE_WIND_GOLDEN ? ", not compared on this compiler" : hash == c.golden ? "" : " DIFFERENT");
+        CHECK(f.iterations > 0);   // The solve really ran (not the flat-ground shortcut)
+        CHECK(f.converged);
+        if (WF_COMPARE_WIND_GOLDEN) CHECK(hash == c.golden);
         ++checked;
     }
     CHECK(checked == 6);
