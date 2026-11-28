@@ -34,8 +34,10 @@ namespace wf_test {
 namespace {
     // The file name without its directories, for --list and --file (__FILE__ may be a full path)
     std::string baseName(const char* path) {
-        const char* slash = std::max(std::strrchr(path, '/'), std::strrchr(path, '\\'));
-        return slash ? slash + 1 : path;
+        const char* name = path;
+        for (const char* p = path; *p; ++p)
+            if (*p == '/' || *p == '\\') name = p + 1;   // Last directory separator, either style
+        return name;
     }
 }
 
