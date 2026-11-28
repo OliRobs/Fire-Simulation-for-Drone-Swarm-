@@ -19,11 +19,11 @@ TEST(viewport_zooms_about_the_cursor) {
     CHECK(v.zoom() == 4.0f && v.width() == 250.0f);
     CHECK(std::fabs((300.0f - v.left()) / v.width() - 0.3f) < 1e-5f);
     CHECK(std::fabs((700.0f - v.top()) / v.height() - 0.7f) < 1e-5f);
-    // Can't zoom out past the whole map, or in past VIEW_MAX_ZOOM
+    // Can't zoom out past the whole map, or in past maxZoom()
     v.zoomAt(500.0f, 500.0f, 0.01f);
     CHECK(v.zoom() == 1.0f && v.centreX() == 500.0f && v.centreY() == 500.0f);
     v.zoomAt(500.0f, 500.0f, 1000.0f);
-    CHECK(v.zoom() == VIEW_MAX_ZOOM);
+    CHECK(v.zoom() == v.maxZoom());
 }
 
 TEST(viewport_stays_inside_the_map) {

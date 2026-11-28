@@ -14,7 +14,9 @@
 // transparent texture for the mission overlay, with drones, routes and points of interest drawn on top.
 class Renderer {
 public:
-    explicit Renderer(const std::vector<std::uint8_t>& terrainShade);
+    // A window showing grid `spec` (one pixel per cell at zoom 1 when CELL_SIZE is 1), shaded by terrainShade
+    // (one value per cell)
+    Renderer(const GridSpec& spec, const std::vector<std::uint8_t>& terrainShade);
 
     sf::RenderWindow& window() { return window_; }
 
@@ -62,7 +64,8 @@ private:
     void setColor(int idx, std::uint8_t r, std::uint8_t g, std::uint8_t b);
     void paintBase(int idx, const std::vector<Cell>& grid);
 
-    sf::RenderWindow window_;   // Must be first: textures need the GL context it creates
+    const int W_, H_;           // Grid size, cells (plain ints: safe to set before the window)
+    sf::RenderWindow window_;   // Must come before the textures: they need the GL context it creates
     std::vector<std::uint8_t> terrainShade_;
     std::vector<sf::Uint8> pixels_;
     sf::Texture texture_;
@@ -76,7 +79,7 @@ private:
     std::string fleetStatus_;
 
     // Rows of pixels_ changed since the last upload, [dirtyY0_, dirtyY1_) (empty when dirtyY1_ <= dirtyY0_).
-    // draw() sends only these rows to the GPU instead of the whole 1200 x 1000 x 4 = 4.8 MB image every frame.
+    // draw() sends only these rows to the GPU instead of the whole image (4.8 MB on a 1200 x 1000 grid) every frame.
     int dirtyY0_ = 0, dirtyY1_ = 0;
     GridRect overlayDrawn_;   // Part of overlayPixels_ the last setMissionVisuals() may have written
 

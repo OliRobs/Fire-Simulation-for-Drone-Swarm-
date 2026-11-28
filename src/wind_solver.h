@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include "config.h"
+#include "grid.h"
 #include "types.h"
 
 // ============================================================================
@@ -64,8 +65,9 @@ struct WindSolverSettings {
     bool referenceKernels = false;
 };
 
-// The solved wind on the fire grid, one entry per fire cell (row-major, GRID_WIDTH x GRID_HEIGHT)
+// The solved wind on the fire grid, one entry per fire cell (row-major, grid.width x grid.height)
 struct WindField {
+    GridSpec grid;                 // The fire grid the field covers
     std::vector<Vec2> toward;      // Unit vector the 20-ft wind blows TOWARDS (grid frame: x = east, y = south)
     std::vector<float> speedKmh;   // 20-ft wind speed (6.1 m above the vegetation), km/h
 
@@ -79,7 +81,7 @@ struct WindField {
 };
 
 // Solves the terrain wind for an open 20-ft wind of wind20Kmh blowing FROM windFromDeg (meteorological,
-// clockwise from north). grid: GRID_WIDTH x GRID_HEIGHT cells with elevation, fuel model and canopy height
-// filled in; cellSizeX/Y: ground size of one fire cell in metres.
-WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float cellSizeY,
-                           float wind20Kmh, float windFromDeg, const WindSolverSettings& settings = WindSolverSettings());
+// clockwise from north). spec: the fire grid (its cell size in metres); grid: one Cell per cell of spec, with
+// elevation, fuel model and canopy height filled in. Throws std::invalid_argument if the sizes differ.
+WindField solveTerrainWind(const GridSpec& spec, const std::vector<Cell>& grid, float wind20Kmh, float windFromDeg,
+                           const WindSolverSettings& settings = WindSolverSettings());

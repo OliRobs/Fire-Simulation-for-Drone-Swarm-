@@ -323,14 +323,17 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     SweepFleet fleet;
     for (int i = 0; i < SWEEP_DRONES; ++i) {
         fleet.ids.push_back(i);
-        fleet.positions.push_back(Vec2(0.5f, GRID_HEIGHT - 0.5f));
+        fleet.positions.push_back(Vec2(0.5f, liveEdt.grid().height - 0.5f));   // Bottom-left corner
     }
     return planMission(liveEdt, perimEdt, planner, rng, fleet);
 }
 
 MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransform& perimEdt,
     SafePlanner& planner, std::mt19937& rng, const SweepFleet& fleet) {
-    constexpr int N = GRID_WIDTH * GRID_HEIGHT;
+    const GridSpec& grid = perimEdt.grid();
+    if (liveEdt.grid() != grid) throw std::invalid_argument("planMission: live and perimeter fields on different grids");
+    const int N = static_cast<int>(grid.count());
+    const int W = grid.width;
     constexpr double innerHi = (PERIMETER_DISTANCE + 0.5) * (PERIMETER_DISTANCE + 0.5);
     constexpr double outerHi = (SEARCH_DISTANCE + 0.5) * (SEARCH_DISTANCE + 0.5);
     const int numSweep = static_cast<int>(fleet.ids.size());
@@ -345,9 +348,9 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     if (old && old->label.size() == static_cast<size_t>(N) && old->zone.size() == static_cast<size_t>(N)) {
         const GridRect b = old->bounds;
         const bool hasOwner = old->owner.size() == static_cast<size_t>(N);
-        for (int y = std::max(0, b.y0); y < std::min(GRID_HEIGHT, b.y1); ++y) {
-            const size_t from = static_cast<size_t>(y) * GRID_WIDTH + std::max(0, b.x0);
-            const size_t to = static_cast<size_t>(y) * GRID_WIDTH + std::min(GRID_WIDTH, b.x1);
+        for (int y = std::max(0, b.y0); y < std::min(grid.height, b.y1); ++y) {
+            const size_t from = static_cast<size_t>(y) * W + std::max(0, b.x0);
+            const size_t to = static_cast<size_t>(y) * W + std::min(W, b.x1);
             if (from >= to) continue;
             std::fill(old->label.begin() + from, old->label.begin() + to, -1);
             std::fill(old->zone.begin() + from, old->zone.begin() + to, std::uint8_t(0));
@@ -381,7 +384,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     const GridRect win = perimEdt.window();
     plan.bounds = win;
     for (int y = win.y0; y < win.y1; ++y) {
-        for (int i = y * GRID_WIDTH + win.x0, end = y * GRID_WIDTH + win.x1; i < end; ++i) {
+        for (int i = y * W + win.x0, end = y * W + win.x1; i < end; ++i) {
             // Exclude cells inside the no-fly standoff zone around the active fire
             if (liveEdt.squaredDistance(i) < NO_FLY_SQ) continue;
 
@@ -437,7 +440,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         const int S = std::min(std::clamp(static_cast<int>(outer.size()) / TARGET_REGION_CELLS, MIN_SITES, MAX_SITES),
             static_cast<int>(outer.size()));
 
-        const Voronoi voronoi = buildVoronoi(outer, S, rng);
+        const Voronoi voronoi = buildVoronoi(grid, outer, S, rng);
 
         // Label each outer-zone cell with its assigned Voronoi site index
         for (size_t i = 0; i < outer.size(); ++i) {
@@ -451,7 +454,7 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         for (int idx : outer) {
             Region& rg = plan.regions[plan.label[idx]];
             ++rg.outerCount;
-            rg.outerSum += cellCentre(idx);
+            rg.outerSum += grid.centre(idx);
         }
         for (Region& rg : plan.regions) {
             if (rg.outerCount > 0) rg.outerCentroid = rg.outerSum / static_cast<float>(rg.outerCount);
@@ -460,10 +463,10 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
         // Snap outer Point of Interest (POI) to the nearest actual cell in the outer region
         for (int idx : outer) {
             Region& rg = plan.regions[plan.label[idx]];
-            const float dd = sqDist(cellCentre(idx), rg.outerCentroid);
+            const float dd = sqDist(grid.centre(idx), rg.outerCentroid);
             if (dd < rg.poiDist) {
                 rg.poiDist = dd;
-                rg.poi = cellCentre(idx);
+                rg.poi = grid.centre(idx);
             }
         }
     }   // End of Steps 2-3 (new regions)
@@ -607,12 +610,12 @@ MissionPlan planMission(const DistanceTransform& liveEdt, const DistanceTransfor
     // Ownership: each band cell to its nearest lane's sector, then sectors to drones by shared land
     const long long bandCells = static_cast<long long>(band.size());
     if (ownerBuffer.size() == static_cast<size_t>(N)) {
-        buildOwnerMapUsingZone(plan.lanes, zone, win, ownerBuffer, bandCells);   // Recycled buffer, already all -1
+        buildOwnerMapUsingZone(grid, plan.lanes, zone, win, ownerBuffer, bandCells);   // Recycled buffer, already all -1
         plan.owner = std::move(ownerBuffer);
     }
     else {
         plan.owner.assign(N, -1);
-        buildOwnerMapUsingZone(plan.lanes, zone, win, plan.owner, bandCells);
+        buildOwnerMapUsingZone(grid, plan.lanes, zone, win, plan.owner, bandCells);
     }
     plan.sectorDrone = matchSectors(plan, plan.sweepRoutes, fleet, band);
 

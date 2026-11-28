@@ -33,6 +33,11 @@ surveys round the fire. README.md has the module table and input-data notes.
   use it.
 - Library layering: only `raster_io` and `terrain` use GDAL; only `renderer` and `main.cpp` use SFML.
   Everything else is in `wf_core`, which must build without either so the tests stay headless.
+- The grid size is a run-time `GridSpec` (`grid.h`). `GRID_WIDTH` / `GRID_HEIGHT` in `config.h` are only the app's
+  default, read by `main.cpp` and `wf_bench`; nothing else in `src/` may use them (`grep -rn GRID_ src/`).
+  Classes sized by the grid take a GridSpec in their constructor; code that is given a `DistanceTransform`
+  reads the grid from it (`grid()`). Entry points that take a per-cell vector check its size
+  (`requireGridSize`).
 - Terrain comes from USGS 3DEP 1 m DEM tiles (`USGS_1M_11_x41-42y379-380_*.tif`, UTM zone 11, San Gabriel
   Mountains). The simulation grid is GRID_WIDTH x GRID_HEIGHT = 1200 x 1000 cells of SIM_CELL_SIZE_M =
   10 m (12 km x 10 km), a window cut from the 20 km x 20 km mosaic of the four tiles and centred on it

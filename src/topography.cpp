@@ -15,18 +15,21 @@
 //
 // The gradient (dz/dx, dz/dy) points uphill; its length is tan(slope).
 // ============================================================================
-void computeTopography(std::vector<Cell>& grid, float cellSizeX, float cellSizeY, bool haveSlopeLayer) {
+void computeTopography(const GridSpec& spec, std::vector<Cell>& grid, bool haveSlopeLayer) {
     constexpr float RAD_TO_DEG = 57.2957795f;
+    requireGridSize(grid, spec, "computeTopography cells");
+    const int W = spec.width, H = spec.height;
+    const float cellSizeX = spec.cellSizeX, cellSizeY = spec.cellSizeY;
 
     // Elevation at (x, y), clamped at the map edge so edge cells use a one-sided difference
     auto z = [&](int x, int y) {
-        x = std::clamp(x, 0, GRID_WIDTH - 1);
-        y = std::clamp(y, 0, GRID_HEIGHT - 1);
-        return grid[y * GRID_WIDTH + x].elevation;
+        x = std::clamp(x, 0, W - 1);
+        y = std::clamp(y, 0, H - 1);
+        return grid[y * W + x].elevation;
     };
 
-    for (int y = 0; y < GRID_HEIGHT; ++y) {
-        for (int x = 0; x < GRID_WIDTH; ++x) {
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
             const float a = z(x - 1, y - 1), b = z(x, y - 1), c = z(x + 1, y - 1);
             const float d = z(x - 1, y),                     f = z(x + 1, y);
             const float g = z(x - 1, y + 1), h = z(x, y + 1), i = z(x + 1, y + 1);
@@ -35,7 +38,7 @@ void computeTopography(std::vector<Cell>& grid, float cellSizeX, float cellSizeY
             const float dzdy = ((g + 2 * h + i) - (a + 2 * b + c)) / (8.0f * cellSizeY);
             const float tanSlope = std::sqrt(dzdx * dzdx + dzdy * dzdy);
 
-            Cell& cell = grid[y * GRID_WIDTH + x];
+            Cell& cell = grid[y * W + x];
             if (tanSlope > 1e-6f) {
                 cell.upslopeX = dzdx / tanSlope;
                 cell.upslopeY = dzdy / tanSlope;

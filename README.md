@@ -346,6 +346,7 @@ The solve itself conserves mass in the finite-element sense everywhere.
 | Module | Responsibility |
 |---|---|
 | config.h, types.h | constants, neighbour tables, Vec2, Cell |
+| grid.h | GridSpec: the grid's size and cell size, passed at run time (config.h's GRID_WIDTH x GRID_HEIGHT is only the app's default) |
 | raster_io, terrain | GDAL loading: finds the DEM tiles and LANDFIRE layers, cuts the window, reads the 1 m DEM in strips, warps every layer onto the grid (only code using GDAL) |
 | viewport | Zoom and pan maths (headless, tested); the renderer turns it into an sf::View |
 | fuel_models | The 40 Scott & Burgan fuel models (Table 7 of RMRS-GTR-153), looked up by FBFM40 code |
@@ -368,7 +369,10 @@ Library layering: wf_core (everything except GDAL/SFML) <- wf_io (GDAL), wf_rend
 
 ## Key settings (config.h)
 
-The grid is GRID_WIDTH x GRID_HEIGHT = 1200 x 1000 cells of SIM_CELL_SIZE_M = 10 m (12 km x 10 km). The drone and perimeter
+The app's grid is GRID_WIDTH x GRID_HEIGHT = 1200 x 1000 cells of SIM_CELL_SIZE_M = 10 m (12 km x 10 km). Only
+`main.cpp` and the benchmark read GRID_WIDTH / GRID_HEIGHT: they build a `GridSpec` (grid.h) and everything else
+takes it (or reads it from a `DistanceTransform` built with it), so tests also run on small and non-square
+grids. The drone and perimeter
 distances are set in metres and converted to cells with `cellsFromMetres`, so they keep the same ground
 distances they had on the original 30 m cells:
 

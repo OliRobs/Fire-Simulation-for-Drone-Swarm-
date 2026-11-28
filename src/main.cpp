@@ -41,13 +41,14 @@ namespace {
     // Nearest burnable cell to idx (spiral search), so the start fire doesn't land on a road or a town
     // ------------------------------------------------------------------------
     int nearestBurnable(const FireSimulation& sim, int idx) {
-        const int cx = idx % GRID_WIDTH, cy = idx / GRID_WIDTH;
-        for (int r = 0; r < GRID_WIDTH; ++r) {
+        const GridSpec& g = sim.gridSpec();
+        const int cx = g.xOf(idx), cy = g.yOf(idx);
+        for (int r = 0; r < std::max(g.width, g.height); ++r) {
             for (int y = cy - r; y <= cy + r; ++y) {
                 for (int x = cx - r; x <= cx + r; ++x) {
                     if (std::max(std::abs(x - cx), std::abs(y - cy)) != r) continue;   // Ring of radius r only
-                    if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) continue;
-                    if (sim.canBurn(y * GRID_WIDTH + x)) return y * GRID_WIDTH + x;
+                    if (!g.inside(x, y)) continue;
+                    if (sim.canBurn(g.index(x, y))) return g.index(x, y);
                 }
             }
         }
@@ -118,10 +119,12 @@ int main(int argc, char** argv) {
         paths.elevation = "elevation_map.tif";
         paths.fuel = "fuel_map.tif";
     }
-    Terrain terrain = loadTerrain(paths, window);
+    // The app's grid size is config.h's GRID_WIDTH x GRID_HEIGHT; everything below takes it from terrain.spec
+    Terrain terrain = loadTerrain(paths, window, GRID_WIDTH, GRID_HEIGHT);
+    const GridSpec grid = terrain.spec;
 
     // Set up rendering engine with the elevation shading (white = highest)
-    Renderer renderer(computeTerrainShade(terrain.grid));
+    Renderer renderer(grid, computeTerrainShade(terrain.grid));
 
     // Rothermel spread needs weather as well as the landscape; see config.h and README for what to supply
     const FireWeather weather;
@@ -132,8 +135,7 @@ int main(int argc, char** argv) {
     WindField windField;
     if (USE_TERRAIN_WIND) {
         const auto t0 = std::chrono::steady_clock::now();
-        windField = solveTerrainWind(terrain.grid, terrain.cellSizeX, terrain.cellSizeY,
-                                     weather.wind20ftKmh, weather.windFromDeg);
+        windField = solveTerrainWind(grid, terrain.grid, weather.wind20ftKmh, weather.windFromDeg);
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         const auto range = std::minmax_element(windField.speedKmh.begin(), windField.speedKmh.end());
         std::printf("Terrain wind: %d x %d x %d mesh, %d CG iterations (residual %.1e%s), %.1f s\n"
@@ -142,8 +144,8 @@ int main(int argc, char** argv) {
                     windField.relResidual, windField.converged ? "" : ", NOT converged", seconds,
                     *range.first, *range.second, windField.divergenceBefore, windField.divergenceAfter);
     }
-    FireSimulation sim(std::move(terrain.grid), weather, terrain.cellSizeX, terrain.cellSizeY,
-                       SIM_MINUTES_PER_TICK, USE_TERRAIN_WIND ? &windField : nullptr);
+    FireSimulation sim(grid, std::move(terrain.grid), weather, SIM_MINUTES_PER_TICK,
+                       USE_TERRAIN_WIND ? &windField : nullptr);
 
     // The wind arrows ('W') draw this field; their colours compare each cell with the open wind
     renderer.setWindField(USE_TERRAIN_WIND ? &windField : nullptr, weather.wind20ftKmh);
@@ -152,10 +154,10 @@ int main(int argc, char** argv) {
     renderer.paintAll(sim.grid());
 
     // Seed the start fire at the centre of the map, or the nearest cell that can burn
-    const int start = nearestBurnable(sim, (GRID_HEIGHT / 2) * GRID_WIDTH + GRID_WIDTH / 2);
+    const int start = nearestBurnable(sim, grid.index(grid.width / 2, grid.height / 2));
     // Summarise how the landscape would burn under this weather (crown fire needs the canopy layers)
     int passive = 0, active = 0, burnableCells = 0;
-    for (int i = 0; i < GRID_WIDTH * GRID_HEIGHT; ++i) {
+    for (int i = 0; i < static_cast<int>(grid.count()); ++i) {
         if (!sim.canBurn(i)) continue;
         ++burnableCells;
         passive += sim.grid()[i].fireType == static_cast<std::uint8_t>(FireType::Passive) ? 1 : 0;
@@ -167,7 +169,7 @@ int main(int argc, char** argv) {
     if (start >= 0) {
         sim.ignite(start);
         std::printf("Ignition at cell (%d, %d): fuel model %d, head fire %.1f m/min\n",
-                    start % GRID_WIDTH, start / GRID_WIDTH, sim.grid()[start].fuelModel, sim.headRos(start));
+                    grid.xOf(start), grid.yOf(start), sim.grid()[start].fuelModel, sim.headRos(start));
     }
     else {
         std::cerr << "No burnable cell on the map (check the fuel layer and fuel moisture)\n";
@@ -184,14 +186,14 @@ int main(int argc, char** argv) {
     // static_assert below keeps inside the range.
     static_assert(NO_FLY_SQ < (LIVE_EDT_RANGE + 1.0) * (LIVE_EDT_RANGE + 1.0) && HARD_NO_FLY_SQ <= NO_FLY_SQ,
                   "the live distance field must reach every threshold its readers compare it with");
-    DistanceTransform liveEdt(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE, DistanceTransform::Mode::IncrementalClamped);
+    DistanceTransform liveEdt(grid, LIVE_EDT_RANGE, DistanceTransform::Mode::IncrementalClamped);
 
     // Manages committed containment perimeter boundaries
-    Perimeter perimeter(sim.fireMask());
+    Perimeter perimeter(grid, sim.fireMask());
 
     // Central controller managing autonomous drone fleet, task allocation, and routing
     MissionController mission(liveEdt, perimeter.distance(),
-        Vec2(2.5f, GRID_HEIGHT - 2.5f)); // Base station location (bottom-left)
+        Vec2(2.5f, grid.height - 2.5f)); // Base station location (bottom-left)
 
     bool ringDirty = true; // Flag indicating UI/Visual perimeter ring needs updating
     int lastTitleMinute = -1; // Simulated minute last shown in the window title
@@ -220,8 +222,8 @@ int main(int argc, char** argv) {
                     sf::Vector2i(event.mouseButton.x, event.mouseButton.y));
                 const int cx = static_cast<int>(std::floor(world.x / CELL_SIZE));
                 const int cy = static_cast<int>(std::floor(world.y / CELL_SIZE));
-                if (cx >= 0 && cx < GRID_WIDTH && cy >= 0 && cy < GRID_HEIGHT) {
-                    sim.ignite(cy * GRID_WIDTH + cx);
+                if (grid.inside(cx, cy)) {
+                    sim.ignite(grid.index(cx, cy));
                 }
             }
 

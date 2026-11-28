@@ -21,7 +21,7 @@
 // The fire simulation's bounding box must always be exactly the box of its fire mask
 TEST(fire_bounds_track_the_fire_mask) {
     std::vector<Cell> grid(N);
-    FireSimulation sim(grid);
+    FireSimulation sim(G, grid);
     CHECK(sim.fireBounds().empty());
     sim.ignite(at(300, 400));
     for (int t = 0; t < 900; ++t) {
@@ -57,7 +57,7 @@ TEST(topography_from_elevation) {
     std::vector<Cell> grid(N);
     for (int y = 0; y < GRID_HEIGHT; ++y)
         for (int x = 0; x < GRID_WIDTH; ++x) grid[at(x, y)].elevation = (GRID_HEIGHT - y) * 30.0f;
-    computeTopography(grid, 30.0f, 30.0f, false);
+    computeTopography(gridWithCells(30.0f), grid, false);
     const Cell& c = grid[at(250, 250)];
     CHECK(std::fabs(c.slopeDeg - 45.0f) < 0.01f);
     CHECK(std::fabs(c.upslopeX) < 1e-5f && std::fabs(c.upslopeY + 1.0f) < 1e-5f);
@@ -107,7 +107,7 @@ TEST(fine_dem_keeps_steep_detail) {
     std::vector<Cell> coarse(N);
     for (int i = 0; i < N; ++i) coarse[i].elevation = 101.0f;
     for (int k = 0; k < 4; ++k) coarse[at(k % 2, k / 2)].elevation = out[k].elevation;
-    computeTopography(coarse, 10.0f, 10.0f, false);
+    computeTopography(gridWithCells(10.0f), coarse, false);
     CHECK(coarse[at(0, 0)].slopeDeg < 5.0f);
 }
 
@@ -128,7 +128,7 @@ TEST(fine_dem_skips_missing_pixels) {
 TEST(fire_front_moves_at_rothermel_rate) {
     std::vector<Cell> grid(N);
     for (Cell& c : grid) c.fuelModel = 109;
-    FireSimulation sim(grid, calm(), 30.0f, 30.0f);
+    FireSimulation sim(gridWithCells(30.0f), grid, calm());
     CHECK(sim.ignite(at(250, 250)));
     const int ticks = 1200;                          // 200 minutes
     for (int t = 0; t < ticks; ++t) sim.step();
@@ -148,7 +148,7 @@ TEST(fire_spreads_downwind_and_upslope) {
         std::vector<Cell> grid(N);
         FireWeather w;
         w.windFromDeg = 270.0f;
-        FireSimulation sim(grid, w, 30.0f, 30.0f);
+        FireSimulation sim(gridWithCells(30.0f), grid, w);
         sim.ignite(at(250, 250));
         for (int t = 0; t < 1500; ++t) sim.step();
         CHECK(reach(sim, 250, 250, 1, 0) > 3 * std::max(1, reach(sim, 250, 250, -1, 0)));
@@ -158,8 +158,8 @@ TEST(fire_spreads_downwind_and_upslope) {
         std::vector<Cell> grid(N);
         for (int y = 0; y < GRID_HEIGHT; ++y)
             for (int x = 0; x < GRID_WIDTH; ++x) grid[at(x, y)].elevation = (GRID_HEIGHT - y) * 15.0f;
-        computeTopography(grid, 30.0f, 30.0f, false);
-        FireSimulation sim(grid, calm(), 30.0f, 30.0f);
+        computeTopography(gridWithCells(30.0f), grid, false);
+        FireSimulation sim(gridWithCells(30.0f), grid, calm());
         sim.ignite(at(250, 250));
         for (int t = 0; t < 3000; ++t) sim.step();
         CHECK(reach(sim, 250, 250, 0, -1) > 2 * std::max(1, reach(sim, 250, 250, 0, 1)));
@@ -175,7 +175,7 @@ TEST(fire_never_enters_nonburnable_cells) {
 
     FireWeather w;
     w.windFromDeg = 270.0f;                          // Wind blowing towards the water
-    FireSimulation sim(grid, w);
+    FireSimulation sim(G, grid, w);
     CHECK(sim.ignite(at(230, 250)));
     CHECK(!sim.ignite(at(242, 250)));               // Can't light water by clicking on it
     for (int t = 0; t < 3000; ++t) sim.step();
@@ -196,7 +196,7 @@ TEST(roads_are_fuel_breaks_even_diagonally) {
 
     FireWeather w;
     w.windFromDeg = 315.0f;                          // From the NW, straight at the road
-    FireSimulation sim(grid, w);
+    FireSimulation sim(G, grid, w);
     // Positions relative to the map size, so the test holds for any grid in config.h:
     // k + k = S - 2 is the diagonal just north-west of the road
     const int k = (S - 2) / 2;
@@ -213,12 +213,12 @@ TEST(roads_are_fuel_breaks_even_diagonally) {
 
 TEST(fire_is_deterministic) {
     std::vector<Cell> grid(N);
-    FireSimulation a(grid), b(grid);
+    FireSimulation a(G, grid), b(G, grid);
     a.ignite(at(250, 250)); b.ignite(at(250, 250));
     for (int t = 0; t < 600; ++t) { a.step(); b.step(); }
     CHECK(a.fireMask() == b.fireMask());
     // The tick length only changes how often we look, not where the fire goes
-    FireSimulation c(grid, FireWeather(), DEFAULT_CELL_SIZE_M, DEFAULT_CELL_SIZE_M, SIM_MINUTES_PER_TICK * 4);
+    FireSimulation c(G, grid, FireWeather(), SIM_MINUTES_PER_TICK * 4);
     c.ignite(at(250, 250));
     for (int t = 0; t < 150; ++t) c.step();
     CHECK(c.fireMask() == a.fireMask());

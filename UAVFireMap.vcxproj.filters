@@ -140,6 +140,9 @@
     <ClInclude Include="src\types.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\grid.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\voronoi.h">
       <Filter>Header Files</Filter>
     </ClInclude>

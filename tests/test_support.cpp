@@ -9,21 +9,25 @@
 // ----------------------------------------------------------------------------
 // Synthetic fires
 // ----------------------------------------------------------------------------
-std::vector<std::uint8_t> discFire(int cx, int cy, int r) {
-    std::vector<std::uint8_t> m(N, 0);
-    for (int y = 0; y < GRID_HEIGHT; ++y)
-        for (int x = 0; x < GRID_WIDTH; ++x)
-            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) m[at(x, y)] = 1;
+std::vector<std::uint8_t> discFire(int cx, int cy, int r) { return discFire(G, cx, cy, r); }
+
+std::vector<std::uint8_t> discFire(const GridSpec& spec, int cx, int cy, int r) {
+    std::vector<std::uint8_t> m(spec.count(), 0);
+    for (int y = 0; y < spec.height; ++y)
+        for (int x = 0; x < spec.width; ++x)
+            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) m[spec.index(x, y)] = 1;
     return m;
 }
 
-bool crossesFire(const std::vector<std::uint8_t>& fire, Vec2 a, Vec2 b) {
+bool crossesFire(const std::vector<std::uint8_t>& fire, Vec2 a, Vec2 b) { return crossesFire(G, fire, a, b); }
+
+bool crossesFire(const GridSpec& spec, const std::vector<std::uint8_t>& fire, Vec2 a, Vec2 b) {
     const float len = std::sqrt(sqDist(a, b));
     const int steps = std::max(1, static_cast<int>(len / 0.1f));
     for (int i = 0; i <= steps; ++i) {
         const Vec2 p = a + (b - a) * (static_cast<float>(i) / steps);
         const int x = static_cast<int>(std::floor(p.x)), y = static_cast<int>(std::floor(p.y));
-        if (x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT && fire[at(x, y)]) return true;
+        if (spec.inside(x, y) && fire[spec.index(x, y)]) return true;
     }
     return false;
 }
@@ -61,7 +65,7 @@ std::vector<std::vector<std::uint8_t>> exactnessFires() {
 // ----------------------------------------------------------------------------
 // Planning
 // ----------------------------------------------------------------------------
-SweepSetup::SweepSetup(const std::vector<std::uint8_t>& fire) : perim(fire), sp(live) {
+SweepSetup::SweepSetup(const std::vector<std::uint8_t>& fire) : perim(G, fire), sp(live) {
     live.compute(fire);
     std::mt19937 rng(2024);
     plan = planMission(live, perim.distance(), sp, rng);

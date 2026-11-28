@@ -22,7 +22,7 @@
 // Flat ground with even fuel: the open wind is already mass-conserving, so nothing may change
 TEST(terrain_wind_keeps_the_open_wind_on_flat_ground) {
     std::vector<Cell> grid(N);   // Flat, GR2 everywhere
-    const WindField f = solveTerrainWind(grid, WIND_TEST_CELL_M, WIND_TEST_CELL_M, 20.0f, 225.0f, windTestSettings());
+    const WindField f = solveTerrainWind(gridWithCells(WIND_TEST_CELL_M), grid, 20.0f, 225.0f, windTestSettings());
     const Vec2 open = windTowardGrid(225.0f);
     double worstSpeed = 0.0, worstDir = 0.0;
     for (int i = 0; i < N; ++i) {
@@ -39,7 +39,7 @@ TEST(terrain_wind_keeps_the_open_wind_on_flat_ground) {
 // Wind from the west over a round hill: faster over the crest, slower at the upwind foot and in the lee, turned
 // out round both flanks, mirror-symmetric north/south, and mass conserved far better than the first guess
 TEST(terrain_wind_speeds_up_over_a_hill_and_turns_round_it) {
-    const WindField f = solveTerrainWind(gaussianHill(), WIND_TEST_CELL_M, WIND_TEST_CELL_M, 20.0f, 270.0f, windTestSettings());
+    const WindField f = solveTerrainWind(gridWithCells(WIND_TEST_CELL_M), gaussianHill(), 20.0f, 270.0f, windTestSettings());
     const int d = static_cast<int>(2.0 * 2000.0 / WIND_TEST_CELL_M);   // Two standard deviations, in cells
     const float crest = f.speedKmh[at(CX, CY)], upwind = f.speedKmh[at(CX - d, CY)], lee = f.speedKmh[at(CX + d, CY)];
     const Vec2 nw = f.toward[at(CX - d, CY - d)], sw = f.toward[at(CX - d, CY + d)];
@@ -68,7 +68,7 @@ TEST(terrain_wind_is_channelled_along_a_valley) {
             const double dx = (x - CX) * WIND_TEST_CELL_M;   // Metres from the valley axis
             grid[at(x, y)].elevation = static_cast<float>(600.0 * (1.0 - std::exp(-dx * dx / (2.0 * 1500.0 * 1500.0))));
         }
-    const WindField f = solveTerrainWind(grid, WIND_TEST_CELL_M, WIND_TEST_CELL_M, 20.0f, 225.0f, windTestSettings());
+    const WindField f = solveTerrainWind(gridWithCells(WIND_TEST_CELL_M), grid, 20.0f, 225.0f, windTestSettings());
     const double floorHeading = headingDeg(f.toward[at(CX, CY)]);
     std::printf("  (valley floor: %.2f km/h heading %.1f deg)\n", f.speedKmh[at(CX, CY)], floorHeading);
     CHECK(f.converged);
@@ -84,7 +84,7 @@ SLOW_TEST(terrain_wind_stability_changes_how_much_air_goes_round) {
     double turn[3];
     const float alphas[3] = { 0.3f, 1.0f, 3.0f };
     for (int i = 0; i < 3; ++i) {
-        const WindField f = solveTerrainWind(hill, WIND_TEST_CELL_M, WIND_TEST_CELL_M, 20.0f, 270.0f, windTestSettings(alphas[i]));
+        const WindField f = solveTerrainWind(gridWithCells(WIND_TEST_CELL_M), hill, 20.0f, 270.0f, windTestSettings(alphas[i]));
         CHECK(f.converged);
         turn[i] = -f.toward[at(CX - d, CY - d)].y;   // How far north the NW flank wind is turned
     }
@@ -130,8 +130,8 @@ SLOW_TEST(terrain_wind_fast_kernels_match_the_reference_solver_bit_for_bit) {
         fast.layers = c.layers;
         WindSolverSettings reference = fast;
         reference.referenceKernels = true;
-        const WindField a = solveTerrainWind(grid, c.cellX, c.cellY, 20.0f, c.fromDeg, fast);
-        const WindField b = solveTerrainWind(grid, c.cellX, c.cellY, 20.0f, c.fromDeg, reference);
+        const WindField a = solveTerrainWind(gridWithCells(c.cellX, c.cellY), grid, 20.0f, c.fromDeg, fast);
+        const WindField b = solveTerrainWind(gridWithCells(c.cellX, c.cellY), grid, 20.0f, c.fromDeg, reference);
         std::printf("  (%d x %d x %d mesh, alpha %.1f: %d CG iterations, %s)\n", a.columnsX, a.columnsY, a.layers,
                     c.alpha, a.iterations, sameWindField(a, b) ? "identical" : "DIFFERENT");
         CHECK(a.iterations > 0);   // The solve really ran (not the flat-ground shortcut)
@@ -152,8 +152,8 @@ TEST(fire_uses_the_terrain_wind_field) {
     WindField same;
     same.toward.assign(N, windTowardGrid(w.windFromDeg));
     same.speedKmh.assign(N, w.wind20ftKmh);
-    const FireSimulation plain(grid, w, WIND_TEST_CELL_M, WIND_TEST_CELL_M);
-    const FireSimulation withSame(grid, w, WIND_TEST_CELL_M, WIND_TEST_CELL_M, SIM_MINUTES_PER_TICK, &same);
+    const FireSimulation plain(gridWithCells(WIND_TEST_CELL_M), grid, w);
+    const FireSimulation withSame(gridWithCells(WIND_TEST_CELL_M), grid, w, SIM_MINUTES_PER_TICK, &same);
     bool identical = true;
     for (int i = 0; i < N && identical; i += 997)
         for (int dir = 0; dir < NUM_DIRS; ++dir) identical = identical && plain.directionalRos(i, dir) == withSame.directionalRos(i, dir);
@@ -163,7 +163,7 @@ TEST(fire_uses_the_terrain_wind_field) {
     WindField north;
     north.toward.assign(N, windTowardGrid(180.0f));   // From the south: blows north (-y)
     north.speedKmh.assign(N, w.wind20ftKmh);
-    FireSimulation sim(grid, w, WIND_TEST_CELL_M, WIND_TEST_CELL_M, SIM_MINUTES_PER_TICK, &north);
+    FireSimulation sim(gridWithCells(WIND_TEST_CELL_M), grid, w, SIM_MINUTES_PER_TICK, &north);
     sim.ignite(at(250, 250));
     for (int t = 0; t < 1500; ++t) sim.step();
     const int up = reach(sim, 250, 250, 0, -1), east = reach(sim, 250, 250, 1, 0);

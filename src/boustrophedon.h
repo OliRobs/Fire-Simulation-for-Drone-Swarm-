@@ -113,17 +113,17 @@ private:
 
 // Sector of the nearest lane for every inner-band cell (inside `area`), -1 elsewhere. Found by a breadth-first
 // search through the band from every lane's cells, so each cell goes to the lane it can be reached from first.
-// The second form fills `owner`, which must already be GRID_WIDTH x GRID_HEIGHT and -1 everywhere (e.g. a buffer
-// recycled from an earlier plan and cleared), instead of allocating a new whole-grid array.
+// `zone` and `owner` have one entry per cell of `grid`. The second form fills `owner`, which must already be -1
+// everywhere (e.g. a buffer recycled from an earlier plan and cleared), instead of allocating a new array.
 // bandCells: the number of zone-1 cells inside `area` if the caller already knows it (the planner counts them
 // while classifying), else -1. When the search reaches that many cells every band cell has an owner, so the last
 // stage (a scan of the whole area for band cells cut off from every lane) is skipped: it would change nothing.
-void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
+void buildOwnerMap(const GridSpec& grid, const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
                    const GridRect& area, std::vector<int>& owner, long long bandCells = -1);
-std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
-                               const GridRect& area, long long bandCells = -1);
+std::vector<int> buildOwnerMap(const GridSpec& grid, const std::vector<SweepLane>& lanes,
+                               const std::vector<std::uint8_t>& zone, const GridRect& area, long long bandCells = -1);
 // The same map as the first form, without copying `zone`: the flood marks claimed band cells in `zone` as it
 // goes (so it reads one byte per neighbour instead of two arrays) and puts every mark back before returning, so
 // `zone` is unchanged on return. Used by the planner, which owns its zone map; the forms above call it on a copy.
-void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std::uint8_t>& zone,
+void buildOwnerMapUsingZone(const GridSpec& grid, const std::vector<SweepLane>& lanes, std::vector<std::uint8_t>& zone,
                             const GridRect& area, std::vector<int>& owner, long long bandCells = -1);

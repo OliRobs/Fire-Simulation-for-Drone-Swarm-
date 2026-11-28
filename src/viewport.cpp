@@ -15,7 +15,7 @@ Viewport::Viewport(float mapWidth, float mapHeight)
 void Viewport::zoomAt(float wx, float wy, float factor) {
     const float fx = (wx - left()) / width();     // Where the point sits across the view, 0..1
     const float fy = (wy - top()) / height();
-    zoom_ = std::clamp(zoom_ * factor, 1.0f, VIEW_MAX_ZOOM);
+    zoom_ = std::clamp(zoom_ * factor, 1.0f, maxZoom());
     cx_ = wx - fx * width() + width() / 2;
     cy_ = wy - fy * height() + height() / 2;
     clamp();
@@ -45,10 +45,10 @@ void Viewport::reset() {
 }
 
 // ----------------------------------------------------------------------------
-// Keep the zoom between 1x and VIEW_MAX_ZOOM, and never show anything outside the map
+// Keep the zoom between 1x and maxZoom(), and never show anything outside the map
 // ----------------------------------------------------------------------------
 void Viewport::clamp() {
-    zoom_ = std::clamp(zoom_, 1.0f, VIEW_MAX_ZOOM);
+    zoom_ = std::clamp(zoom_, 1.0f, maxZoom());
     cx_ = std::clamp(cx_, width() / 2, mapW_ - width() / 2);
     cy_ = std::clamp(cy_, height() / 2, mapH_ - height() / 2);
 }

@@ -67,7 +67,8 @@ set(WF_TEST_FILES
   aco_voronoi
   sweep_lanes
   sweep_fleet
-  mission)
+  mission
+  grid)
 set(WF_TEST_SOURCES tests/test_main.cpp)
 foreach(name IN LISTS WF_TEST_FILES)
   list(APPEND WF_TEST_SOURCES tests/test_${name}.cpp)

@@ -21,10 +21,8 @@ inline float sqDist(Vec2 a, Vec2 b) {
     return dx * dx + dy * dy;
 }
 
-inline Vec2 cellCentre(int idx) { return Vec2(idx % GRID_WIDTH + 0.5f, idx / GRID_WIDTH + 0.5f); }
-
 // Rectangle of grid cells [x0, x1) x [y0, y1) (half-open, so x1 - x0 is the width). Used to keep per-frame
-// work to the part of the grid round the fire instead of all GRID_WIDTH x GRID_HEIGHT cells.
+// work to the part of the grid round the fire instead of all of it (GridSpec, grid.h, gives the grid's size).
 struct GridRect {
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;   // Default: empty
     bool empty() const { return x1 <= x0 || y1 <= y0; }

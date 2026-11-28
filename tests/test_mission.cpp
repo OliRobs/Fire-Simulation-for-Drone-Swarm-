@@ -48,14 +48,14 @@ TEST(drone_stops_before_a_blocked_segment) {
 // and none may be inside the hard no-fly zone at the end of a frame.
 SLOW_TEST(mission_drones_never_fly_over_fire) {
     std::vector<Cell> grid(N);
-    FireSimulation sim(grid);                       // Default weather: wind from the SW
+    FireSimulation sim(G, grid);                       // Default weather: wind from the SW
     // Several fires so drones have to work round them
     sim.ignite(at(250, 250)); sim.ignite(at(180, 300)); sim.ignite(at(320, 200));
 
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE);   // Range-limited, as in main.cpp
     for (int t = 0; t < 400; ++t) sim.step();      // Let the fire get going before drones launch
     live.compute(sim.fireMask());
-    Perimeter perim(sim.fireMask());
+    Perimeter perim(G, sim.fireMask());
     MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
 
     int crossings = 0, insideHardZone = 0;
@@ -88,7 +88,7 @@ TEST(fleet_grows_with_the_fire) {
     std::vector<std::uint8_t> fire = discFire(CX, CY, 1);
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     MissionController mission(live, perim.distance(), base);
     mission.markFireChanged();
     mission.update();
@@ -201,7 +201,7 @@ TEST(aco_drones_are_spread_round_the_tour) {
     std::vector<std::uint8_t> fire = discFire(250, 250, 30);
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
     mission.markFireChanged();
     mission.update();   // First frame triggers the plan
@@ -240,7 +240,7 @@ TEST(aco_drones_rejoin_at_the_nearest_node_going_forward) {
     std::vector<std::uint8_t> fire = discFire(cx, cy, 25);
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
     mission.markFireChanged();
 
@@ -325,7 +325,7 @@ TEST(aco_drones_spread_back_out_after_a_replan) {
     std::vector<std::uint8_t> fire = discFire(cx, cy, 25);
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
     mission.markFireChanged();
 
@@ -391,7 +391,7 @@ TEST(recycled_plan_buffers_match_fresh_plans) {
     for (const auto& fire : fires) {
         DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
         live.compute(fire);
-        Perimeter perim(fire);
+        Perimeter perim(G, fire);
         SafePlanner sp(live);
         auto fleetFor = [](const MissionPlan& prev) {
             SweepFleet fleet;
@@ -484,7 +484,7 @@ TEST(aco_tour_changes_only_when_the_perimeter_moves) {
     std::vector<std::uint8_t> fire = discFire(CX, CY, 25);
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
     mission.markFireChanged();
     CHECK(runToReplan(mission));
@@ -558,7 +558,7 @@ TEST(perimeter_line_reused_only_while_the_perimeter_holds) {
     std::vector<std::uint8_t> fire = discFire(CX, CY, 25);
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     MissionPlan first;
     {
         SafePlanner sp(live);

@@ -189,7 +189,7 @@ std::vector<Vec2> OriginalPlanner::leg(Vec2 a, Vec2 b) {
     // --- Phase 2: Reconstruct the cell path (start point, cell centres..., end point) ---
     std::vector<Vec2> full;
     for (int v = t; v != -1; v = came_[v]) {
-        full.push_back(cellCentre(v));
+        full.push_back(G.centre(v));
     }
     full.push_back(a);
     std::reverse(full.begin(), full.end());

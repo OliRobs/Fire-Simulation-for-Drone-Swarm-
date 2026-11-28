@@ -159,7 +159,7 @@ TEST(voronoi_assigns_every_cell) {
     std::vector<int> cells;
     for (int y = 100; y < 200; ++y) for (int x = 100; x < 200; ++x) cells.push_back(at(x, y));
     std::mt19937 rng(3);
-    const Voronoi v = buildVoronoi(cells, 9, rng);
+    const Voronoi v = buildVoronoi(G, cells, 9, rng);
     CHECK(v.assign.size() == cells.size());
     std::vector<int> counts(9, 0);
     for (int a : v.assign) { CHECK(a >= 0 && a < 9); if (a >= 0 && a < 9) ++counts[a]; }
@@ -180,11 +180,11 @@ TEST(voronoi_bucketed_assignment_matches_brute_force) {
         }
     for (int sites : { 1, 7, 64 }) {
         std::mt19937 rng(4);
-        const Voronoi v = buildVoronoi(cells, sites, rng);
+        const Voronoi v = buildVoronoi(G, cells, sites, rng);
         CHECK(static_cast<int>(v.sites.size()) == sites);
         int wrong = 0;
         for (size_t i = 0; i < cells.size(); ++i) {
-            const Vec2 p = cellCentre(cells[i]);
+            const Vec2 p = G.centre(cells[i]);
             int best = 0;
             float bd = std::numeric_limits<float>::max();
             for (int k = 0; k < sites; ++k) {
@@ -209,7 +209,7 @@ TEST(voronoi_bucketed_seeding_matches_plain_method) {
     auto plainVoronoi = [](const std::vector<int>& cells, int S, std::mt19937& rng) {
         const size_t n = cells.size();
         std::vector<Vec2> pts(n), sites;
-        for (size_t i = 0; i < n; ++i) pts[i] = cellCentre(cells[i]);
+        for (size_t i = 0; i < n; ++i) pts[i] = G.centre(cells[i]);
         // Farthest-point seeding: first seed random, then the first cell farthest from all seeds so far
         std::vector<float> minD(n, std::numeric_limits<float>::max());
         sites.push_back(pts[rng() % n]);
@@ -271,7 +271,7 @@ TEST(voronoi_bucketed_seeding_matches_plain_method) {
     for (const auto* cells : { &square, &ring, &outerRing }) {
         for (int sites : { 1, 2, 4, 9, 64 }) {
             std::mt19937 rngA(77), rngB(77);
-            const Voronoi fast = buildVoronoi(*cells, sites, rngA);
+            const Voronoi fast = buildVoronoi(G, *cells, sites, rngA);
             const Voronoi ref = plainVoronoi(*cells, sites, rngB);
             CHECK(fast.sites.size() == ref.sites.size());
             bool sameSites = fast.sites.size() == ref.sites.size();
@@ -291,7 +291,7 @@ TEST(planned_routes_never_cross_the_hard_no_fly_zone) {
 
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     SafePlanner sp(live);
     std::mt19937 rng(2024);
     const MissionPlan plan = planMission(live, perim.distance(), sp, rng);

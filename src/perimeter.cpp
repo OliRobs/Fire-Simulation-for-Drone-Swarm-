@@ -17,18 +17,19 @@
 
 // Constructor: Initializes committed fire mask and computes the baseline 
 // Euclidean Distance Transform (EDT) around the initial fire shape.
-Perimeter::Perimeter(const std::vector<std::uint8_t>& initialFire)
+Perimeter::Perimeter(const GridSpec& spec, const std::vector<std::uint8_t>& initialFire)
     : committed_(initialFire), trigger_(initialFire.size(), 0), lastLive_(initialFire),
     // Range limits (distance_transform.h): the committed-fire distance is read out to SEARCH_DISTANCE + 0.5
     // (mission zones; the ring and the trigger distance are nearer), the trigger distance only out to
     // PERIMETER_SECTION_RADIUS, so neither transform needs the whole grid.
-    perimEdt_(GRID_WIDTH, GRID_HEIGHT, SEARCH_DISTANCE + 1),
-    triggerEdt_(GRID_WIDTH, GRID_HEIGHT, PERIMETER_SECTION_RADIUS + 1) {
+    perimEdt_(spec, SEARCH_DISTANCE + 1),
+    triggerEdt_(spec, PERIMETER_SECTION_RADIUS + 1) {
+    requireGridSize(initialFire, spec, "Perimeter initial fire");
     // Initial distance field computation around committed fire boundaries
     perimEdt_.compute(committed_);
     // Record where the starting fire is, so later updates know where committed_ can be non-zero
     int x0, y0, x1, y1;
-    if (maskBounds(committed_, GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1)) fireSeen_ = GridRect{ x0, y0, x1 + 1, y1 + 1 };
+    if (maskBounds(committed_, spec.width, spec.height, x0, y0, x1, y1)) fireSeen_ = GridRect{ x0, y0, x1 + 1, y1 + 1 };
 }
 
 // ----------------------------------------------------------------------------
@@ -36,7 +37,7 @@ Perimeter::Perimeter(const std::vector<std::uint8_t>& initialFire)
 // ----------------------------------------------------------------------------
 bool Perimeter::update(const std::vector<std::uint8_t>& liveFire) {
     int x0, y0, x1, y1;
-    if (!maskBounds(liveFire, GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1)) return update(liveFire, GridRect{});
+    if (!maskBounds(liveFire, grid().width, grid().height, x0, y0, x1, y1)) return update(liveFire, GridRect{});
     return update(liveFire, GridRect{ x0, y0, x1 + 1, y1 + 1 });
 }
 
@@ -70,6 +71,8 @@ bool Perimeter::update(const std::vector<std::uint8_t>& liveFire, const GridRect
     // Every cell that is (or ever was) live fire, or committed, lies inside 'area', so the loops below only
     // visit it: outside it liveFire, lastLive_ and committed_ are all 0. Using the union with the earlier
     // rectangles (not just this one) also catches cells that were live last time but have gone out since.
+    requireGridSize(liveFire, grid(), "Perimeter::update live fire");
+    const int W = grid().width;
     fireSeen_ = fireSeen_.unite(fireBounds);
     const GridRect area = fireSeen_;
 
@@ -77,7 +80,7 @@ bool Perimeter::update(const std::vector<std::uint8_t>& liveFire, const GridRect
     newTriggers_.clear();
     const std::size_t rowBytes = static_cast<std::size_t>(area.x1 - area.x0);
     for (int y = area.y0; y < area.y1 && rowBytes > 0; ++y) {
-        const int rowStart = y * GRID_WIDTH + area.x0;
+        const int rowStart = y * W + area.x0;
         const std::uint8_t* now = liveFire.data() + rowStart;
         std::uint8_t* last = lastLive_.data() + rowStart;
         if (std::memcmp(now, last, rowBytes) == 0) continue;   // Row unchanged: nothing new can trigger here
@@ -102,7 +105,7 @@ bool Perimeter::update(const std::vector<std::uint8_t>& liveFire, const GridRect
     for (int idx : newTriggers_) trigger_[idx] = 0;   // Back to all 0 for the next call
 
     for (int y = area.y0; y < area.y1; ++y) {
-        for (int idx = y * GRID_WIDTH + area.x0, end = y * GRID_WIDTH + area.x1; idx < end; ++idx) {
+        for (int idx = y * W + area.x0, end = y * W + area.x1; idx < end; ++idx) {
             // Expand committed fire mask to include live fire cells within the section radius
             if (liveFire[idx] && !committed_[idx] && triggerEdt_.squaredDistance(idx) <= sectionSq) {
                 committed_[idx] = 1;
@@ -128,8 +131,9 @@ std::vector<int> Perimeter::ringCells() const {
     // window: only that needs scanning, in the same row-major order as a whole-grid scan
     const GridRect win = perimEdt_.window();
     std::vector<int> ring;
+    const int W = grid().width;
     for (int y = win.y0; y < win.y1; ++y) {
-        for (int idx = y * GRID_WIDTH + win.x0, end = y * GRID_WIDTH + win.x1; idx < end; ++idx) {
+        for (int idx = y * W + win.x0, end = y * W + win.x1; idx < end; ++idx) {
             const double d2 = perimEdt_.squaredDistance(idx);
             // Collect cells residing within the thin ring shell radius [PERIMETER_DISTANCE ± 0.5]
             if (d2 >= ringLo && d2 < ringHi) {
@@ -159,10 +163,10 @@ namespace {
 
     // Id of the square side from corner c to corner c+1 (mod 4) of the square whose top-left sample is (x, y).
     // Horizontal sides and vertical sides get even and odd ids, keyed by the side's top / left sample, so the
-    // side shared by two squares gets the same id from both. Samples run from -1 to GRID_WIDTH (one ring of
+    // side shared by two squares gets the same id from both. Samples run from -1 to gridWidth (one ring of
     // padding round the grid), hence the +1 offsets.
-    std::int64_t sideId(int x, int y, int c) {
-        const std::int64_t W = GRID_WIDTH + 2;
+    std::int64_t sideId(int x, int y, int c, int gridWidth) {
+        const std::int64_t W = static_cast<std::int64_t>(gridWidth) + 2;
         auto key = [&](int sx, int sy, int vertical) {
             return ((static_cast<std::int64_t>(sy) + 1) * W + (sx + 1)) * 2 + vertical;
         };
@@ -186,14 +190,15 @@ std::vector<std::vector<Vec2>> tracePerimeterLine(const DistanceTransform& perim
     // Only the transform's window holds finite distances; the level line lies well inside it, so squares
     // from one sample outside the window to its far edge are enough
     const GridRect win = perimEdt.window();
+    const GridSpec& grid = perimEdt.grid();
     std::vector<std::vector<Vec2>> loops;
     if (win.empty()) return loops;
 
     // Level-line function at sample (x, y): negative on the fire side of the line (nearer than `level`).
     // Samples off the grid count as far from the fire, so a loop that would leave the map closes along its edge.
     auto f = [&](int x, int y) -> double {
-        if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) return 1e9;
-        return std::sqrt(perimEdt.squaredDistance(y * GRID_WIDTH + x)) - level;
+        if (!grid.inside(x, y)) return 1e9;
+        return std::sqrt(perimEdt.squaredDistance(grid.index(x, y))) - level;
     };
 
     // Pieces keyed by the side they start on (each side crossing starts exactly one piece)
@@ -256,8 +261,8 @@ std::vector<std::vector<Vec2>> tracePerimeterLine(const DistanceTransform& perim
                     for (int k = 1; k < 4 && e < 0; ++k) { const int j = (c + k) % 4; if (crosses[j] && !leaving[j]) e = j; }
                 }
                 if (e < 0) continue;   // Cannot happen with a consistent sign pattern
-                const std::int64_t start = sideId(x, y, c);
-                pieces[start] = Piece{ at[c], at[e], sideId(x, y, e) };
+                const std::int64_t start = sideId(x, y, c, grid.width);
+                pieces[start] = Piece{ at[c], at[e], sideId(x, y, e, grid.width) };
                 order.push_back(start);
             }
         }

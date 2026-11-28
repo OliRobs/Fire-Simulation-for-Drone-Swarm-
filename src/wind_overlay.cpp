@@ -46,10 +46,10 @@ void windArrowColour(float speedKmh, float openKmh, std::uint8_t& r, std::uint8_
 // Lattice spacing: whole powers of two of cells, so the lattice points of a finer spacing include those of
 // every coarser one, and the arrows only re-arrange when the zoom crosses a factor of two
 // ----------------------------------------------------------------------------
-float windArrowSpacing(float perPixel, float spacingPx) {
+float windArrowSpacing(const GridSpec& grid, float perPixel, float spacingPx) {
     const float cellsWanted = spacingPx * perPixel / static_cast<float>(CELL_SIZE);   // Cells per spacingPx on screen
     int cells = 1;
-    while (cells < cellsWanted && cells < std::max(GRID_WIDTH, GRID_HEIGHT)) cells *= 2;
+    while (cells < cellsWanted && cells < std::max(grid.width, grid.height)) cells *= 2;
     return static_cast<float>(cells * CELL_SIZE);
 }
 
@@ -59,10 +59,12 @@ float windArrowSpacing(float perPixel, float spacingPx) {
 std::vector<WindArrow> buildWindArrows(const WindField& field, const Viewport& view, float perPixel,
                                        float openKmh, float maxKmh, float spacingPx) {
     std::vector<WindArrow> arrows;
-    const std::size_t cellCount = static_cast<std::size_t>(GRID_WIDTH) * GRID_HEIGHT;
-    if (field.toward.size() != cellCount || field.speedKmh.size() != cellCount || maxKmh <= 0.0f) return arrows;
+    const GridSpec& grid = field.grid;
+    const std::size_t cellCount = grid.count();
+    if (cellCount == 0 || field.toward.size() != cellCount || field.speedKmh.size() != cellCount || maxKmh <= 0.0f)
+        return arrows;
 
-    const float step = windArrowSpacing(perPixel, spacingPx);            // World units between arrows
+    const float step = windArrowSpacing(grid, perPixel, spacingPx);      // World units between arrows
     const float cs = static_cast<float>(CELL_SIZE);
     // Lattice points sit at (k + 0.5) x step; take those inside the view plus up to one step beyond each edge,
     // so an arrow whose centre is just off screen but whose shaft reaches in is still drawn.
@@ -76,12 +78,12 @@ std::vector<WindArrow> buildWindArrows(const WindField& field, const Viewport& v
     for (int ky = ky0; ky <= ky1; ++ky) {
         const float py = (ky + 0.5f) * step;
         const int cy = static_cast<int>(py / cs);   // Cell under the lattice point
-        if (cy < 0 || cy >= GRID_HEIGHT) continue;
+        if (cy < 0 || cy >= grid.height) continue;
         for (int kx = kx0; kx <= kx1; ++kx) {
             const float px = (kx + 0.5f) * step;
             const int cx = static_cast<int>(px / cs);
-            if (cx < 0 || cx >= GRID_WIDTH) continue;
-            const std::size_t idx = static_cast<std::size_t>(cy) * GRID_WIDTH + cx;
+            if (cx < 0 || cx >= grid.width) continue;
+            const std::size_t idx = static_cast<std::size_t>(cy) * grid.width + cx;
             const Vec2 dir = field.toward[idx];   // Unit vector, grid frame (x east, y south) = world frame
             const float speed = field.speedKmh[idx];
 
