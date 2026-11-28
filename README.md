@@ -16,7 +16,13 @@ Needs CMake 3.16+, **SFML 2.5 – 2.6** (not SFML 3, the API changed) and GDAL 3
     cmake -S . -B build && cmake --build build
     ./build/wildfire        # run from the repo root (reads the .tif files there, in ./landfire or ./dem)
     ./build/wildfire --data D:/gis/landfire --centre -117.87 34.25   # another folder / window centre
-    ./build/wf_tests        # headless tests
+    ./build/wf_tests        # headless tests (all of them)
+    ./build/wf_tests wind   # only the tests whose name contains "wind"; --list lists them
+    ctest --test-dir build -j -LE slow   # quick run: every test file in parallel, slow tests left out
+
+The tests are in one file per module (`tests/test_<module>.cpp`, sharing `tests/test_support.h`), on a small
+built-in framework (`tests/test_framework.h`: `TEST`, `SLOW_TEST`, `CHECK`). ctest has one entry per file plus
+a `slow` entry, labelled `slow`, for the tests that take a second or so each.
 
 To build just the simulation core and the tests, without SFML or GDAL:
 
