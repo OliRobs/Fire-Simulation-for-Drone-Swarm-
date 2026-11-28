@@ -114,7 +114,7 @@ the tiles (check its GeoJSON footprint).
 | Layer | Used for | Notes |
 |---|---|---|
 | 1 m DEM tiles (`USGS_1M_`, m) | Simulation grid, elevation, slope and aspect | See above. Takes priority over the LANDFIRE elevation and slope. |
-| Elevation (`_Elev_`, m) | Without DEM tiles: simulation grid, background shading, **aspect** (which way is uphill) | The download is 30 m pixels over ~264 x 207 km, so a window of GRID_WIDTH x GRID_HEIGHT cells (2000 x 10 m = 20 km) is cut out, centred on the raster centre or on `--centre <lon> <lat>`. Not read when the DEM tiles cover the whole window. |
+| Elevation (`_Elev_`, m) | Without DEM tiles: simulation grid, background shading, **aspect** (which way is uphill) | The download is 30 m pixels over ~264 x 207 km, so a window of GRID_WIDTH x GRID_HEIGHT cells (1200 x 1000 cells of 10 m = 12 km x 10 km) is cut out, centred on the raster centre or on `--centre <lon> <lat>`. Not read when the DEM tiles cover the whole window. |
 | Slope (`_SlpD_`, degrees) | Without DEM tiles: Rothermel slope factor | Missing cells (or a missing layer) fall back to slope computed from the elevation. |
 | FBFM40 (`FBFM40`) | Fuel model per cell | Scott & Burgan model numbers, looked up in `fuel_models.cpp` (Table 7 of RMRS-GTR-153). 91-99 (urban, water, agriculture, bare...) and NoData don't burn. |
 | Roads (`_Roads_`) | Fuel breaks (not drawn unless `R` is pressed) | Classes 20 primary, 21 secondary, 22 tertiary, 23 thinned. Road cells don't burn (`ROADS_ARE_FUEL_BREAKS`); diagonal road lines hold too. |
