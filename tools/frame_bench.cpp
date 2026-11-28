@@ -21,7 +21,6 @@
 // does not change the checksum, while any change a reader could see does.
 // ============================================================================
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +31,7 @@
 #include "mission_controller.h"
 #include "perimeter.h"
 #include "wind_solver.h"
+#include "test_support.h"   // ridgeValleyTerrain / windBenchTerrain, shared with the wind tests
 
 namespace {
     // ------------------------------------------------------------------------
@@ -72,25 +72,13 @@ namespace {
     // ------------------------------------------------------------------------
     // Times solveTerrainWind on the real grid size with 10 m cells (the DEM's SIM_CELL_SIZE_M), so the wind
     // mesh is the app's own 120 x 100 x 20 nodes. The map is synthetic so it runs without the git-ignored
-    // DEM tiles: about 1 km of relief from crossing ridges and valleys plus a few summits (San Gabriel-like
-    // scale), GR2 grass everywhere (no canopy). The checksum hashes every cell's solved speed and direction
-    // with the CG iteration count and final residual, so it catches any change to the solved wind, to the last bit.
+    // DEM tiles: windBenchTerrain() in tests/test_support (about 1 km of relief from crossing ridges and
+    // valleys plus three summits, a San Gabriel-like scale), GR2 grass everywhere (no canopy). The checksum
+    // hashes every cell's solved speed and direction with the CG iteration count and final residual, so it
+    // catches any change to the solved wind, to the last bit.
     int runWindBench(const char* expect) {
         const float cell = SIM_CELL_SIZE_M;
-        std::vector<Cell> grid(static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT);
-        for (int y = 0; y < GRID_HEIGHT; ++y)
-            for (int x = 0; x < GRID_WIDTH; ++x) {
-                const double X = x * cell, Y = y * cell;   // Metres from the north-west corner
-                double z = 900.0 + 300.0 * std::sin(X / 1700.0) * std::cos(Y / 1300.0)   // Ridge-and-valley grain
-                         + 150.0 * std::sin((X + 0.6 * Y) / 650.0);                       // Smaller oblique spurs
-                // Three summits (centre in metres, height, spread)
-                const double peaks[3][4] = { { 3500, 2800, 450, 900 }, { 8200, 6100, 380, 1200 }, { 10400, 2200, 300, 700 } };
-                for (const auto& p : peaks) {
-                    const double dx = X - p[0], dy = Y - p[1];
-                    z += p[2] * std::exp(-(dx * dx + dy * dy) / (2.0 * p[3] * p[3]));
-                }
-                grid[static_cast<size_t>(y) * GRID_WIDTH + x].elevation = static_cast<float>(z);
-            }
+        const std::vector<Cell> grid = ridgeValleyTerrain(windBenchTerrain(), cell, cell);
 
         const auto t0 = Clock::now();
         const WindField f = solveTerrainWind(grid, cell, cell, WIND_SPEED_20FT_KMH, WIND_FROM_DEG);

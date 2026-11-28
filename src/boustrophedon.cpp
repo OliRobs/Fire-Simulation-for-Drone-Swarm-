@@ -128,7 +128,7 @@ namespace {
 //    projection, about 30, so the cells just outside the swath, which no sample reaches, cost the most.)
 // The samples that are tested use exactly the original expressions (same float sample point, same distance test),
 // and the samples skipped provably fail that test, so the marked cells are exactly those the disc stamps marked.
-// tests.cpp checks this bit for bit against the disc version (lane_stamp_matches_disc_stamps, and
+// tests/test_sweep_lanes.cpp checks this bit for bit against the disc version (lane_stamp_matches_disc_stamps, and
 // lane_stamp_matches_disc_stamps_on_the_edge for cells right on the swath's edge).
 void stampLaneCoverage(const SweepLane& lane, const GridRect& area, std::vector<std::uint8_t>& covered) {
     const float r = LANE_COVER_RADIUS, r2 = r * r;

@@ -42,16 +42,51 @@ target_include_directories(wf_core PUBLIC src)
 wf_warnings(wf_core)
 
 # --- Headless tests ---
+# Shared helpers (synthetic fires and terrains, a planned sweep for one fire). The wind benchmark links them
+# too, so the benchmark and the wind tests share one terrain generator.
+add_library(wf_test_support STATIC tests/test_support.cpp)
+target_include_directories(wf_test_support PUBLIC tests)
+target_link_libraries(wf_test_support PUBLIC wf_core)
+wf_warnings(wf_test_support)
+
+# One file of tests per module, all linked into one executable (wf_tests); see tests/test_framework.h.
+# Each file is a ctest entry running its quick tests (wf_tests --file <file> --fast), so `ctest -j` runs them
+# in parallel and `ctest -R wind_solver` runs one module. The tests declared SLOW_TEST (most of a second or
+# more each: the end-to-end mission test, the bit-for-bit comparisons against the original code) run in one
+# more entry, `slow`, labelled `slow`: `ctest -LE slow` skips it for a quick run.
+set(WF_TEST_FILES
+  distance_transform
+  fire_model
+  perimeter
+  safe_planner
+  rothermel
+  crown_fire
+  viewport
+  wind_solver
+  wind_overlay
+  aco_voronoi
+  sweep_lanes
+  sweep_fleet
+  mission)
+set(WF_TEST_SOURCES tests/test_main.cpp)
+foreach(name IN LISTS WF_TEST_FILES)
+  list(APPEND WF_TEST_SOURCES tests/test_${name}.cpp)
+endforeach()
+
 enable_testing()
-add_executable(wf_tests tests/tests.cpp)
-target_link_libraries(wf_tests PRIVATE wf_core)
+add_executable(wf_tests ${WF_TEST_SOURCES})
+target_link_libraries(wf_tests PRIVATE wf_test_support)
 wf_warnings(wf_tests)
-add_test(NAME wf_tests COMMAND wf_tests)
+foreach(name IN LISTS WF_TEST_FILES)
+  add_test(NAME ${name} COMMAND wf_tests --file test_${name}.cpp --fast)
+endforeach()
+add_test(NAME slow COMMAND wf_tests --slow)
+set_tests_properties(slow PROPERTIES LABELS slow)
 
 # --- Frame benchmark (tools/frame_bench.cpp): times the frame loop and prints a checksum of the results ---
 # Headless like the tests. CI runs it and compares the checksum with tools/bench_checksum.txt.
 add_executable(wf_bench tools/frame_bench.cpp)
-target_link_libraries(wf_bench PRIVATE wf_core)
+target_link_libraries(wf_bench PRIVATE wf_test_support)   # wf_core, plus the shared synthetic terrain
 wf_warnings(wf_bench)
 
 if(WF_BUILD_APP)

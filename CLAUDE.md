@@ -7,8 +7,10 @@ surveys round the fire. README.md has the module table and input-data notes.
 
 - Full build: `cmake -S . -B build && cmake --build build`, then run `./build/wildfire` from the repo root
   (it loads the LANDFIRE layers from the repo root or `landfire/`, falling back to `elevation_map.tif`).
-- Tests: `./build/wf_tests` (or `ctest --test-dir build`). They are headless and take about 20 s (most of
-  it the end-to-end mission test on the full 1200 x 1000 grid).
+- Tests: `./build/wf_tests` (all, about 20 s) or `ctest --test-dir build -j` (one entry per test file, in
+  parallel). They are headless. `wf_tests <name substring>` runs matching tests, `wf_tests --list` lists them,
+  `ctest -LE slow` skips the SLOW_TESTs (end-to-end mission test, bit-for-bit reference comparisons) and takes
+  a few seconds. Tests live in `tests/test_<module>.cpp`; shared helpers in `tests/test_support.h`.
 - Core and tests only, without SFML or GDAL: add `-DWF_BUILD_APP=OFF`.
 - Benchmark: `./build/wf_bench [frames]` prints per-phase times and a results checksum. CI (Linux) fails if the
   checksum differs from `tools/bench_checksum.txt`. Optimisations must leave it unchanged; a change meant to alter
@@ -89,8 +91,8 @@ These behaviours were asked for explicitly. Keep them when changing planning cod
 
 - Comment all code clearly: a header block above each function saying what it does and why, and comments on
   non-obvious steps. Match the existing style (`// ----` section banners).
-- Any change to fire spread, planning or drone movement needs a test in `tests/tests.cpp`. Run `wf_tests`
-  before committing.
+- Any change to fire spread, planning or drone movement needs a test in the module's `tests/test_*.cpp`
+  (a new test file goes in `WF_TEST_FILES` in `CMakeLists.txt`). Run `wf_tests` before committing.
 - Work on a branch and open a pull request; don't push to `main`.
 - Physics and fuel constants come from the papers in the claude.ai project (Scott & Burgan 2005 for the fuel
   models; Andrews 2018 RMRS-GTR-371 for the Rothermel equations). Cite the source in a comment when adding one.
