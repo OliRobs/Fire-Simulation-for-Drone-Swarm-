@@ -148,6 +148,7 @@ exit /b 0</Command>
     <ClInclude Include="src\topography.h" />
     <ClInclude Include="src\viewport.h" />
     <ClInclude Include="src\types.h" />
+    <ClInclude Include="src\grid.h" />
     <ClInclude Include="src\voronoi.h" />
     <ClInclude Include="src\wind_overlay.h" />
     <ClInclude Include="src\wind_solver.h" />

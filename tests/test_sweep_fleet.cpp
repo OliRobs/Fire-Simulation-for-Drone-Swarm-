@@ -249,7 +249,7 @@ TEST(sweep_ownership_is_stable) {
     DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
     std::vector<std::uint8_t> fire = discFire(600, 600, 60);
     live.compute(fire);
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     SafePlanner sp(live);
     std::mt19937 rng(2024);
     MissionPlan first = planMission(live, perim.distance(), sp, rng);

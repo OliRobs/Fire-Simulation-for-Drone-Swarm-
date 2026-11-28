@@ -2,13 +2,14 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "grid.h"
 #include "types.h"
 
-// The simulation grid plus the ground size of one cell, which the slope and spread calculations need.
+// The simulation grid: its size and the ground size of one cell (which the slope and spread calculations
+// need), and the cells themselves (spec.count() of them, row-major).
 struct Terrain {
+    GridSpec spec;
     std::vector<Cell> grid;
-    float cellSizeX = DEFAULT_CELL_SIZE_M;   // Metres per cell, east-west
-    float cellSizeY = DEFAULT_CELL_SIZE_M;   // Metres per cell, north-south
 };
 
 // GeoTIFF paths for the LANDFIRE layers. Any may be empty (missing): elevation falls back to a synthetic
@@ -44,17 +45,19 @@ struct WindowRequest {
     double lon = 0.0, lat = 0.0;  // WGS84 degrees
 };
 
-// Builds the grid from the GeoTIFFs. With 1 m DEM tiles, the tiles define the grid: a GRID_WIDTH x
-// GRID_HEIGHT window of SIM_CELL_SIZE_M cells in the tiles' UTM zone, centred on the tiles (or --centre), and
+// Builds a width x height grid from the GeoTIFFs. With 1 m DEM tiles, the tiles define the grid: a width x
+// height window of SIM_CELL_SIZE_M cells in the tiles' UTM zone, centred on the tiles (or --centre), and
 // each cell's elevation, slope and aspect come from the 1 m pixels inside it (aggregateFineTopography).
 // Without tiles, the LANDFIRE elevation layer defines the coordinate system as below.
 // Canopy layers are converted from LANDFIRE's stored integers to real units (RMRS-GTR-220: CBH is metres x 10,
 // CBD is kg/m^3 x 100; LANDFIRE product pages: CH is metres x 10). If it is larger than
-// GRID_WIDTH x GRID_HEIGHT cells of SIM_CELL_SIZE_M (LANDFIRE is), a window of that size is cut out at native
+// width x height cells of SIM_CELL_SIZE_M (LANDFIRE is), a window of that size is cut out at native
 // resolution; a smaller DEM (such as the bundled elevation_map.tif) is used whole, as before. Every other layer
 // is warped onto the same grid: average for elevation and slope, most common value for fuel, max for roads.
 // With ALIGN_NORTH_UP the window is laid out north-up in the local UTM zone (see makeNorthUpWindow).
-Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window);
+// The result's spec is width x height with the cell size actually used (SIM_CELL_SIZE_M for a window cut from
+// a large raster, the raster's own pixel size for a small DEM used whole).
+Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window, int width, int height);
 
 // Elevation mapped linearly to 0 (lowest, black) .. 255 (highest, white), one value per cell.
 std::vector<std::uint8_t> computeTerrainShade(const std::vector<Cell>& grid);

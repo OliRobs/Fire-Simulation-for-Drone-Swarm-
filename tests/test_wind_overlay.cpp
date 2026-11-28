@@ -21,6 +21,7 @@ namespace {
     // A wind field that is the same everywhere: speedKmh, blowing FROM fromDeg
     WindField uniformWind(float speedKmh, float fromDeg) {
         WindField f;
+        f.grid = G;
         f.toward.assign(N, windTowardGrid(fromDeg));
         f.speedKmh.assign(N, speedKmh);
         return f;
@@ -38,10 +39,10 @@ TEST(wind_arrows_keep_their_screen_spacing_and_stay_put_when_panning) {
         Viewport v(static_cast<float>(GRID_WIDTH * CELL_SIZE), static_cast<float>(GRID_HEIGHT * CELL_SIZE));
         v.zoomAt(v.centreX(), v.centreY(), zoom);
         const float perPixel = perPixelAt(v);
-        const float stepPx = windArrowSpacing(perPixel) / perPixel;   // Lattice spacing on screen
+        const float stepPx = windArrowSpacing(G, perPixel) / perPixel;   // Lattice spacing on screen
         const std::vector<WindArrow> arrows = buildWindArrows(f, v, perPixel, 20.0f, 20.0f);
         // Every arrow's centre lies in the view or within one spacing of it
-        const float step = windArrowSpacing(perPixel);
+        const float step = windArrowSpacing(G, perPixel);
         bool inView = true;
         for (const WindArrow& a : arrows) {
             const float mx = 0.5f * (a.x0 + a.x1), my = 0.5f * (a.y0 + a.y1);
@@ -61,7 +62,7 @@ TEST(wind_arrows_keep_their_screen_spacing_and_stay_put_when_panning) {
     v.zoomAt(v.centreX(), v.centreY(), 6.0f);
     const float perPixel = perPixelAt(v);
     const std::vector<WindArrow> before = buildWindArrows(f, v, perPixel, 20.0f, 20.0f);
-    v.pan(windArrowSpacing(perPixel) / 3.0f, 0.0f);
+    v.pan(windArrowSpacing(G, perPixel) / 3.0f, 0.0f);
     const std::vector<WindArrow> after = buildWindArrows(f, v, perPixel, 20.0f, 20.0f);
     int shared = 0, moved = 0;
     for (const WindArrow& a : after) {
@@ -79,7 +80,7 @@ TEST(wind_arrows_keep_their_screen_spacing_and_stay_put_when_panning) {
 TEST(wind_arrows_show_direction_speed_and_colour) {
     Viewport v(static_cast<float>(GRID_WIDTH * CELL_SIZE), static_cast<float>(GRID_HEIGHT * CELL_SIZE));
     const float perPixel = perPixelAt(v);
-    const float step = windArrowSpacing(perPixel);
+    const float step = windArrowSpacing(G, perPixel);
 
     // Open wind from the west everywhere: arrows point east (+x), white, 85 % of the spacing long
     const std::vector<WindArrow> east = buildWindArrows(uniformWind(20.0f, 270.0f), v, perPixel, 20.0f, 20.0f);
@@ -114,7 +115,7 @@ TEST(wind_arrows_show_direction_speed_and_colour) {
 TEST(wind_arrows_show_the_terrain_wind_over_a_hill) {
     WindSolverSettings s;
     s.columnSizeM = 600.0f;
-    const WindField f = solveTerrainWind(gaussianHill(), WIND_TEST_CELL_M, WIND_TEST_CELL_M, 20.0f, 270.0f, s);
+    const WindField f = solveTerrainWind(gridWithCells(WIND_TEST_CELL_M), gaussianHill(), 20.0f, 270.0f, s);
     const float maxKmh = *std::max_element(f.speedKmh.begin(), f.speedKmh.end());
     Viewport v(static_cast<float>(GRID_WIDTH * CELL_SIZE), static_cast<float>(GRID_HEIGHT * CELL_SIZE));
     const float perPixel = perPixelAt(v);

@@ -21,8 +21,8 @@
 
 // Constructor: allocate the A* buffers once (one entry per grid cell)
 SafePlanner::SafePlanner(const DistanceTransform& liveEdt)
-    : edt_(liveEdt),
-      nodes_(GRID_WIDTH * GRID_HEIGHT, Node{ 0.0f, -1, 0, 0 }) {
+    : edt_(liveEdt), W_(liveEdt.grid().width), H_(liveEdt.grid().height),
+      nodes_(liveEdt.grid().count(), Node{ 0.0f, -1, 0, 0 }), flyW_(W_ + 2) {
 }
 
 // ----------------------------------------------------------------------------
@@ -31,8 +31,8 @@ SafePlanner::SafePlanner(const DistanceTransform& liveEdt)
 // Evaluates if a given grid coordinate (x, y) is within bounds and outside 
 // the hard no-fly safety zone surrounding the active fire front.
 bool SafePlanner::cellOk(int x, int y) const {
-    return x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT
-        && edt_.squaredDistance(y * GRID_WIDTH + x) >= HARD_NO_FLY_SQ;
+    return x >= 0 && x < W_ && y >= 0 && y < H_
+        && edt_.squaredDistance(y * W_ + x) >= HARD_NO_FLY_SQ;
 }
 
 // ----------------------------------------------------------------------------
@@ -46,23 +46,23 @@ void SafePlanner::refreshFlyable() {
     if (flyBuilt_ && edt_.version() == flyVersion_) return;   // Field unchanged: the bitmap is still right
     if (!flyBuilt_) {
         // First use: border cells 0, every grid cell flyable until the field says otherwise
-        fly_.assign(static_cast<size_t>(FLY_W) * (GRID_HEIGHT + 2), 0);
-        for (int y = 0; y < GRID_HEIGHT; ++y) {
-            std::fill(fly_.begin() + (y + 1) * FLY_W + 1, fly_.begin() + (y + 1) * FLY_W + 1 + GRID_WIDTH, std::uint8_t(1));
+        fly_.assign(static_cast<size_t>(flyW_) * (H_ + 2), 0);
+        for (int y = 0; y < H_; ++y) {
+            std::fill(fly_.begin() + (y + 1) * flyW_ + 1, fly_.begin() + (y + 1) * flyW_ + 1 + W_, std::uint8_t(1));
         }
         flyBuilt_ = true;
         flyWin_ = GridRect{};
     }
     // Cells the previous window covered are back to flyable (outside the new window the field reads "very far")
     for (int y = flyWin_.y0; y < flyWin_.y1; ++y) {
-        std::fill(fly_.begin() + (y + 1) * FLY_W + 1 + flyWin_.x0, fly_.begin() + (y + 1) * FLY_W + 1 + flyWin_.x1,
+        std::fill(fly_.begin() + (y + 1) * flyW_ + 1 + flyWin_.x0, fly_.begin() + (y + 1) * flyW_ + 1 + flyWin_.x1,
                   std::uint8_t(1));
     }
     // Inside the field's window: the same test as cellOk()
     const GridRect win = edt_.window();
     for (int y = win.y0; y < win.y1; ++y) {
-        std::uint8_t* row = fly_.data() + (y + 1) * FLY_W + 1;
-        for (int x = win.x0; x < win.x1; ++x) row[x] = edt_.squaredDistance(y * GRID_WIDTH + x) >= HARD_NO_FLY_SQ;
+        std::uint8_t* row = fly_.data() + (y + 1) * flyW_ + 1;
+        for (int x = win.x0; x < win.x1; ++x) row[x] = edt_.squaredDistance(y * W_ + x) >= HARD_NO_FLY_SQ;
     }
     flyWin_ = win;
     flyVersion_ = edt_.version();
@@ -94,8 +94,8 @@ bool SafePlanner::lineClear(Vec2 a, Vec2 b) const {
     // No-fly radius and the slack the skip leaves: two half cell-diagonals plus a rounding margin
     static const double noFlyRadius = std::sqrt(HARD_NO_FLY_SQ);
     constexpr double slack = 1.41421356237 + 0.05;
-    const bool inside = std::min(a.x, b.x) >= 0.5f && std::max(a.x, b.x) <= GRID_WIDTH - 0.5f
-                     && std::min(a.y, b.y) >= 0.5f && std::max(a.y, b.y) <= GRID_HEIGHT - 0.5f;
+    const bool inside = std::min(a.x, b.x) >= 0.5f && std::max(a.x, b.x) <= W_ - 0.5f
+                     && std::min(a.y, b.y) >= 0.5f && std::max(a.y, b.y) <= H_ - 0.5f;
     const double spacing = static_cast<double>(len) / steps;   // Distance between consecutive samples (cells)
 
     for (int i = 0; i <= steps; ) {
@@ -109,7 +109,7 @@ bool SafePlanner::lineClear(Vec2 a, Vec2 b) const {
         int skip = 0;
         if (inside && spacing > 0.0) {
             // How far along the line every cell is guaranteed to pass, in whole samples
-            const double room = edt_.distanceLowerBound(y * GRID_WIDTH + x) - noFlyRadius - slack;
+            const double room = edt_.distanceLowerBound(y * W_ + x) - noFlyRadius - slack;
             if (room > 0.0) skip = static_cast<int>(room / spacing);
         }
         i += 1 + skip;
@@ -148,7 +148,7 @@ std::vector<Vec2> SafePlanner::leg(Vec2 a, Vec2 b) {
     // Octile distance heuristic to the goal from cell (x, y), admissible for 8-connected moves:
     // |dx| + |dy| - (2 - sqrt 2) * min(|dx|, |dy|). Same float arithmetic as before, with the cell's coordinates
     // passed in rather than recovered from its index by a divide and a modulo.
-    const int tx = t % GRID_WIDTH, ty = t / GRID_WIDTH;
+    const int tx = t % W_, ty = t / W_;
     auto hTo = [tx, ty](int x, int y) {
         const float dx = static_cast<float>(std::abs(x - tx)), dy = static_cast<float>(std::abs(y - ty));
         return dx + dy - 0.58579f * std::min(dx, dy);
@@ -183,7 +183,7 @@ std::vector<Vec2> SafePlanner::leg(Vec2 a, Vec2 b) {
     nodes[s].came = -1;
     nodes[s].openStamp = search_;
     {
-        const float f0 = hTo(s % GRID_WIDTH, s / GRID_WIDTH);
+        const float f0 = hTo(s % W_, s / W_);
         lowest = static_cast<size_t>(f0);
         push(f0, s);
     }
@@ -198,19 +198,19 @@ std::vector<Vec2> SafePlanner::leg(Vec2 a, Vec2 b) {
 
         if (u == t) { reached = true; break; }    // Goal reached
 
-        const int ux = u % GRID_WIDTH, uy = u / GRID_WIDTH;
-        const int fu = (uy + 1) * FLY_W + (ux + 1);   // u in the padded bitmap
+        const int ux = u % W_, uy = u / W_;
+        const int fu = (uy + 1) * flyW_ + (ux + 1);   // u in the padded bitmap
 
         // Expand all 8 neighbours
         for (int d = 0; d < NUM_DIRS; ++d) {
             const int nx = ux + DX[d], ny = uy + DY[d];
-            if (!fly[fu + DY[d] * FLY_W + DX[d]]) continue;   // cellOk(nx, ny); off the grid reads 0
+            if (!fly[fu + DY[d] * flyW_ + DX[d]]) continue;   // cellOk(nx, ny); off the grid reads 0
 
             // No corner cutting: a diagonal step needs both orthogonal cells it squeezes past to be flyable
             const bool diagonal = DX[d] != 0 && DY[d] != 0;
-            if (diagonal && (!fly[fu + DX[d]] || !fly[fu + DY[d] * FLY_W])) continue;
+            if (diagonal && (!fly[fu + DX[d]] || !fly[fu + DY[d] * flyW_])) continue;
 
-            const int v = ny * GRID_WIDTH + nx;
+            const int v = ny * W_ + nx;
             const float ng = nu.g + (diagonal ? 1.41421f : 1.0f);
 
             // Better than the cost so far (infinity if v has not been reached in this search)?
@@ -234,7 +234,7 @@ std::vector<Vec2> SafePlanner::leg(Vec2 a, Vec2 b) {
     // --- Phase 2: Reconstruct the cell path (start point, cell centres..., end point) ---
     std::vector<Vec2> full;
     for (int v = t; v != -1; v = nodes[v].came) {
-        full.push_back(cellCentre(v));
+        full.push_back(edt_.grid().centre(v));
     }
     full.push_back(a);
     std::reverse(full.begin(), full.end());
@@ -267,7 +267,7 @@ int SafePlanner::snap(Vec2 p) const {
         for (int dy = -r; dy <= r; ++dy) {
             for (int dx = -r; dx <= r; ++dx) {
                 if (std::max(std::abs(dx), std::abs(dy)) == r && cellOk(cx + dx, cy + dy)) {
-                    return (cy + dy) * GRID_WIDTH + (cx + dx);
+                    return (cy + dy) * W_ + (cx + dx);
                 }
             }
         }

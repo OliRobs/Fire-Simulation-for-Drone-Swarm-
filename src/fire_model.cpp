@@ -39,10 +39,16 @@ Vec2 windTowardGrid(float fromDeg) {
 // ----------------------------------------------------------------------------
 // Simulation set-up: precompute every cell's directional spread rates
 // ----------------------------------------------------------------------------
-FireSimulation::FireSimulation(std::vector<Cell> grid, const FireWeather& weather,
-    float cellSizeX, float cellSizeY, float minutesPerTick, const WindField* windField)
-    : grid_(std::move(grid)), fireMask_(grid_.size(), 0), minutesPerTick_(minutesPerTick) {
-    constexpr int N = GRID_WIDTH * GRID_HEIGHT;
+FireSimulation::FireSimulation(const GridSpec& spec, std::vector<Cell> grid, const FireWeather& weather,
+    float minutesPerTick, const WindField* windField)
+    : spec_(spec), grid_(std::move(grid)), fireMask_(grid_.size(), 0), minutesPerTick_(minutesPerTick) {
+    requireGridSize(grid_, spec_, "FireSimulation cells");
+    if (windField) {
+        requireGridSize(windField->speedKmh, spec_, "FireSimulation wind field speeds");
+        requireGridSize(windField->toward, spec_, "FireSimulation wind field directions");
+    }
+    const int N = static_cast<int>(spec_.count());
+    const float cellSizeX = spec_.cellSizeX, cellSizeY = spec_.cellSizeY;   // Ground size of a cell, m
 
     // Unit direction (in metres, so non-square cells still give true directions) and length of each step
     double stepUx[NUM_DIRS], stepUy[NUM_DIRS];
@@ -188,17 +194,18 @@ void FireSimulation::igniteAt(int idx, double t) {
     arrival_[idx] = t;
     burning_.push_back(idx);
 
-    const int x = idx % GRID_WIDTH, y = idx / GRID_WIDTH;
+    const int W = spec_.width;
+    const int x = idx % W, y = idx / W;
     fireBounds_.include(x, y);   // Keep the fire's bounding box current (readers use it to skip grid scans)
     for (int d = 0; d < NUM_DIRS; ++d) {
         const int nx = x + DX[d], ny = y + DY[d];
-        if (nx < 0 || nx >= GRID_WIDTH || ny < 0 || ny >= GRID_HEIGHT) continue;
-        const int nIdx = ny * GRID_WIDTH + nx;
+        if (!spec_.inside(nx, ny)) continue;
+        const int nIdx = ny * W + nx;
         if (!burnable_[nIdx] || grid_[nIdx].state != CellState::Unburned) continue;
 
         // Diagonal steps may not squeeze between two nonburnable cells: otherwise a one-cell-wide diagonal
         // road or river would leak fire through its corners.
-        if (DX[d] != 0 && DY[d] != 0 && !burnable_[y * GRID_WIDTH + nx] && !burnable_[ny * GRID_WIDTH + x]) continue;
+        if (DX[d] != 0 && DY[d] != 0 && !burnable_[y * W + nx] && !burnable_[ny * W + x]) continue;
 
         // Half the step at this cell's rate, half at the neighbour's: rate = harmonic mean of the two
         const float rOut = dirRos_[static_cast<size_t>(idx) * NUM_DIRS + d];

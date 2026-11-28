@@ -81,7 +81,8 @@ namespace {
         const std::vector<Cell> grid = ridgeValleyTerrain(windBenchTerrain(), cell, cell);
 
         const auto t0 = Clock::now();
-        const WindField f = solveTerrainWind(grid, cell, cell, WIND_SPEED_20FT_KMH, WIND_FROM_DEG);
+        const GridSpec spec{ GRID_WIDTH, GRID_HEIGHT, cell, cell };
+        const WindField f = solveTerrainWind(spec, grid, WIND_SPEED_20FT_KMH, WIND_FROM_DEG);
         const auto t1 = Clock::now();
         std::printf("terrain wind: %d x %d x %d mesh, %d CG iterations (residual %.2e%s), solve %.0f ms\n",
                     f.columnsX, f.columnsY, f.layers, f.iterations, f.relResidual,
@@ -110,12 +111,13 @@ int main(int argc, char** argv) {
 
     // --- Set-up, as in main.cpp but on a synthetic map (default cells: GR2 grass, flat) ---
     const auto t0 = Clock::now();
-    std::vector<Cell> grid(static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT);
-    FireSimulation sim(grid);
-    sim.ignite((GRID_HEIGHT / 2) * GRID_WIDTH + GRID_WIDTH / 2);
-    DistanceTransform live(GRID_WIDTH, GRID_HEIGHT, LIVE_EDT_RANGE, DistanceTransform::Mode::IncrementalClamped);
-    Perimeter perim(sim.fireMask());
-    MissionController mission(live, perim.distance(), Vec2(2.5f, GRID_HEIGHT - 2.5f));
+    const GridSpec spec{ GRID_WIDTH, GRID_HEIGHT };   // The app's default grid (config.h), 10 m cells
+    std::vector<Cell> grid(spec.count());
+    FireSimulation sim(spec, grid);
+    sim.ignite(spec.index(spec.width / 2, spec.height / 2));
+    DistanceTransform live(spec, LIVE_EDT_RANGE, DistanceTransform::Mode::IncrementalClamped);
+    Perimeter perim(spec, sim.fireMask());
+    MissionController mission(live, perim.distance(), Vec2(2.5f, spec.height - 2.5f));
     const auto t1 = Clock::now();
     std::printf("grid %d x %d, %.1f s per frame, %d frames (%.0f simulated min), set-up %.0f ms\n", GRID_WIDTH,
                 GRID_HEIGHT, SIM_MINUTES_PER_TICK * 60.0f, frames, frames * SIM_MINUTES_PER_TICK, ms(t0, t1));

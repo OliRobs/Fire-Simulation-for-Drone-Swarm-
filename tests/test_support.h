@@ -9,6 +9,7 @@
 #include "config.h"
 #include "distance_transform.h"
 #include "fire_model.h"
+#include "grid.h"
 #include "mission_planner.h"
 #include "perimeter.h"
 #include "safe_planner.h"
@@ -18,7 +19,15 @@
 // ----------------------------------------------------------------------------
 // Grid indexing
 // ----------------------------------------------------------------------------
-// Cells on the grid, and the index of cell (x, y)
+// The grid most tests run on: the app's default size (config.h) with 10 m cells. Tests of grid handling also
+// build their own small and non-square GridSpecs.
+inline const GridSpec G{ GRID_WIDTH, GRID_HEIGHT };
+
+// The same grid size with cells of cellX x cellY metres (tests that run the fire or the wind on 30 m cells)
+inline GridSpec gridWithCells(float cellX, float cellY) { return GridSpec{ GRID_WIDTH, GRID_HEIGHT, cellX, cellY }; }
+inline GridSpec gridWithCells(float cell) { return gridWithCells(cell, cell); }
+
+// Cells on the grid G, and the index of cell (x, y)
 constexpr int N = GRID_WIDTH * GRID_HEIGHT;
 inline int at(int x, int y) { return y * GRID_WIDTH + x; }
 
@@ -31,11 +40,13 @@ constexpr int CY = GRID_HEIGHT / 2;
 // ----------------------------------------------------------------------------
 // Synthetic fires
 // ----------------------------------------------------------------------------
-// A filled disc of fire cells of radius r round (cx, cy)
+// A filled disc of fire cells of radius r round (cx, cy), on grid G or on `spec`
 std::vector<std::uint8_t> discFire(int cx, int cy, int r);
+std::vector<std::uint8_t> discFire(const GridSpec& spec, int cx, int cy, int r);
 
-// True if the segment a -> b passes through any fire cell (sampled every 0.1 cells)
+// True if the segment a -> b passes through any fire cell (sampled every 0.1 cells), on grid G or on `spec`
 bool crossesFire(const std::vector<std::uint8_t>& fire, Vec2 a, Vec2 b);
+bool crossesFire(const GridSpec& spec, const std::vector<std::uint8_t>& fire, Vec2 a, Vec2 b);
 
 // A fire with a concave bay: a disc with a bite taken out of its east side
 std::vector<std::uint8_t> bayFire();
@@ -50,7 +61,7 @@ std::vector<std::vector<std::uint8_t>> exactnessFires();
 // ----------------------------------------------------------------------------
 // Everything a sweep test needs for one fire: the distance fields, the planner and the plan
 struct SweepSetup {
-    DistanceTransform live{ GRID_WIDTH, GRID_HEIGHT };
+    DistanceTransform live{ G };
     Perimeter perim;
     SafePlanner sp;
     MissionPlan plan;

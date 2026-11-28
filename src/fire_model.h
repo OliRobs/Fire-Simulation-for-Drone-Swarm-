@@ -6,6 +6,7 @@
 #include <vector>
 #include "crown_fire.h"
 #include "rothermel.h"
+#include "grid.h"
 #include "types.h"
 
 // Weather inputs to the Rothermel model. None of these are in the LANDFIRE layers: the defaults are a
@@ -38,12 +39,12 @@ struct WindField;   // Per-cell terrain-adjusted 20-ft wind (wind_solver.h)
 // deterministic and independent of the tick length.
 class FireSimulation {
 public:
-    // cellSizeX/Y: ground size of one cell in metres.
+    // spec: the grid (size, and the ground size of one cell in metres); grid: one Cell per cell of it.
     // windField: optional per-cell 20-ft wind from solveTerrainWind (wind_solver.h). When given, each cell uses
     // its own wind speed and direction from it, and weather.wind20ftKmh / windFromDeg are not used; when null,
     // every cell gets the single open wind from `weather`. Only read here, in the constructor.
-    FireSimulation(std::vector<Cell> grid, const FireWeather& weather = FireWeather(),
-                   float cellSizeX = DEFAULT_CELL_SIZE_M, float cellSizeY = DEFAULT_CELL_SIZE_M,
+    // Throws std::invalid_argument if grid (or the wind field) does not have one entry per cell of spec.
+    FireSimulation(const GridSpec& spec, std::vector<Cell> grid, const FireWeather& weather = FireWeather(),
                    float minutesPerTick = SIM_MINUTES_PER_TICK, const WindField* windField = nullptr);
 
     bool ignite(int idx);   // Manual ignition (start point, mouse click). False if the cell isn't Unburned or can't burn.
@@ -57,6 +58,7 @@ public:
     double minutes() const { return now_; }                       // Simulated time since the start
 
     const std::vector<Cell>& grid() const { return grid_; }
+    const GridSpec& gridSpec() const { return spec_; }                    // The grid's size and cell size
     const std::vector<std::uint8_t>& fireMask() const { return fireMask_; } // 1 = Burning or Burned
     // Bounding box of the fire mask (every cell that is Burning or Burned), kept up to date as cells ignite.
     // The fire never shrinks, so neither does this. Lets the distance transforms and the perimeter skip
@@ -69,6 +71,7 @@ public:
 private:
     void igniteAt(int idx, double t);  // Mark a cell alight at time t and schedule its neighbours
 
+    GridSpec spec_;
     std::vector<Cell> grid_;
     float stepDistance_[NUM_DIRS];     // Metres between cell centres in each direction
     std::vector<float> dirRos_;        // [cell * 8 + direction]: Rothermel rate from the cell in that direction, m/min

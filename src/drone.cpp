@@ -92,18 +92,19 @@ bool stepDrone(Drone& d, const SafePlanner* planner) {
 // along the distance-field gradient away from the fire front.
 void keepClearOfFire(Drone& d, const DistanceTransform& liveEdt) {
     const float minDist = static_cast<float>(std::sqrt(HARD_NO_FLY_SQ));
+    const int W = liveEdt.grid().width, H = liveEdt.grid().height;   // The field's grid, cells
 
     // Helper lambda to look up Euclidean distance to the nearest fire front at grid (x, y)
     auto distAt = [&](int x, int y) {
-        x = std::clamp(x, 0, GRID_WIDTH - 1);
-        y = std::clamp(y, 0, GRID_HEIGHT - 1);
-        return static_cast<float>(std::sqrt(liveEdt.squaredDistance(y * GRID_WIDTH + x)));
+        x = std::clamp(x, 0, W - 1);
+        y = std::clamp(y, 0, H - 1);
+        return static_cast<float>(std::sqrt(liveEdt.squaredDistance(y * W + x)));
         };
 
     // Iterative gradient push-back solver (up to 40 step refinement passes)
     for (int iter = 0; iter < 40; ++iter) {
-        const int x = std::clamp(static_cast<int>(d.pos.x), 0, GRID_WIDTH - 1);
-        const int y = std::clamp(static_cast<int>(d.pos.y), 0, GRID_HEIGHT - 1);
+        const int x = std::clamp(static_cast<int>(d.pos.x), 0, W - 1);
+        const int y = std::clamp(static_cast<int>(d.pos.y), 0, H - 1);
         const float cur = distAt(x, y);
 
         // Safe distance satisfied; no intervention needed
@@ -116,7 +117,7 @@ void keepClearOfFire(Drone& d, const DistanceTransform& liveEdt) {
         // Handle zero-gradient flat regions (deep inside fire envelope)
         if (gl < 1e-3f) {
             // Fallback direction: Push drone radially outward from map center
-            g = d.pos - Vec2(GRID_WIDTH * 0.5f, GRID_HEIGHT * 0.5f);
+            g = d.pos - Vec2(W * 0.5f, H * 0.5f);
             gl = std::sqrt(g.x * g.x + g.y * g.y);
 
             // Extreme edge-case fallback: Default to positive X displacement
@@ -127,7 +128,7 @@ void keepClearOfFire(Drone& d, const DistanceTransform& liveEdt) {
         d.pos += g * ((minDist - cur + 0.3f) / gl);
 
         // Clamp final position within operational map grid boundaries
-        d.pos.x = std::clamp(d.pos.x, 0.5f, GRID_WIDTH - 0.5f);
-        d.pos.y = std::clamp(d.pos.y, 0.5f, GRID_HEIGHT - 0.5f);
+        d.pos.x = std::clamp(d.pos.x, 0.5f, W - 0.5f);
+        d.pos.y = std::clamp(d.pos.y, 0.5f, H - 0.5f);
     }
 }

@@ -17,8 +17,8 @@ namespace {
 
     // Distance (cells) from the committed fire at cell (x, y); far away off the grid
     float distAt(const DistanceTransform& edt, int x, int y) {
-        if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) return 1e9f;
-        return static_cast<float>(std::sqrt(edt.squaredDistance(y * GRID_WIDTH + x)));
+        if (!edt.grid().inside(x, y)) return 1e9f;
+        return static_cast<float>(std::sqrt(edt.squaredDistance(edt.grid().index(x, y))));
     }
 
     // ------------------------------------------------------------------------
@@ -52,10 +52,11 @@ namespace {
         std::vector<Vec2> pts;
         bool inRun = false;
         Vec2 last;
+        const GridSpec& grid = edt.grid();
         for (float t = t0; t <= t1 + 1e-4f; t += RAY_STEP) {
             const Vec2 q = p + dir * t;
             const int x = static_cast<int>(std::floor(q.x)), y = static_cast<int>(std::floor(q.y));
-            if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) {
+            if (!grid.inside(x, y)) {
                 if (t > 0.0f) break;   // Ran off the map
                 continue;
             }
@@ -64,7 +65,7 @@ namespace {
                 if (d < MIN_FIRE_DISTANCE - 1.0f) break;                    // Past the standoff, at the fire
                 if (t > 2.0f && d > PERIMETER_DISTANCE + 1.5f) break;       // Left the band outwards again
             }
-            const bool in = zone[y * GRID_WIDTH + x] == 1;
+            const bool in = zone[grid.index(x, y)] == 1;
             if (in && !inRun) { pts.push_back(q); inRun = true; }           // A run starts
             if (!in && inRun) { pts.push_back(last); inRun = false; }       // A run ends at the previous sample
             if (in) last = q;
@@ -264,6 +265,7 @@ std::vector<SweepLane> layLanes(const std::vector<std::vector<Vec2>>& loops, con
 int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& perimEdt,
                      const std::vector<std::uint8_t>& zone, const GridRect& area) {
     if (area.empty() || lanes.empty()) return 0;
+    const int W = perimEdt.grid().width;   // Row length of the zone map
     const int w = area.x1 - area.x0, h = area.y1 - area.y0;
     std::vector<std::uint8_t> covered(static_cast<size_t>(w) * h, 0);
     for (const SweepLane& l : lanes) stampLaneCoverage(l, area, covered);
@@ -279,7 +281,7 @@ int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& per
     // unchanged, so the patches (and the order of the cells in each) are exactly the same as before.
     std::vector<int> candidates;
     for (int y = 0; y < h; ++y) {
-        const std::uint8_t* zoneRow = zone.data() + static_cast<size_t>(area.y0 + y) * GRID_WIDTH + area.x0;
+        const std::uint8_t* zoneRow = zone.data() + static_cast<size_t>(area.y0 + y) * W + area.x0;
         for (int x = 0; x < w; ++x) {
             if (zoneRow[x] == 1 && !covered[y * w + x]) candidates.push_back(y * w + x);
         }
@@ -309,7 +311,7 @@ int fillCoverageGaps(std::vector<SweepLane>& lanes, const DistanceTransform& per
                     if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                     const int ni = ny * w + nx;
                     if (covered[ni] || inPatch[ni] == mark) continue;
-                    if (zone[(area.y0 + ny) * GRID_WIDTH + area.x0 + nx] != 1) continue;
+                    if (zone[(area.y0 + ny) * W + area.x0 + nx] != 1) continue;
                     inPatch[ni] = mark;
                     stack.push_back(ni);
                 }
@@ -521,20 +523,20 @@ int SectorLapTable::greedyLast(int first, int bound, float limit) {
 // ----------------------------------------------------------------------------
 // Ownership Map
 // ----------------------------------------------------------------------------
-std::vector<int> buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
-                               const GridRect& area, long long bandCells) {
-    std::vector<int> owner(static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT, -1);
-    buildOwnerMap(lanes, zone, area, owner, bandCells);
+std::vector<int> buildOwnerMap(const GridSpec& grid, const std::vector<SweepLane>& lanes,
+                               const std::vector<std::uint8_t>& zone, const GridRect& area, long long bandCells) {
+    std::vector<int> owner(grid.count(), -1);
+    buildOwnerMap(grid, lanes, zone, area, owner, bandCells);
     return owner;
 }
 
 // Fills a caller-provided whole-grid array (all -1 on entry); only cells inside `area` are written. The zone map
 // is read-only here, so the flood runs on a copy of it (the planner, which owns its zone map, calls
 // buildOwnerMapUsingZone directly and saves the copy).
-void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
+void buildOwnerMap(const GridSpec& grid, const std::vector<SweepLane>& lanes, const std::vector<std::uint8_t>& zone,
                    const GridRect& area, std::vector<int>& owner, long long bandCells) {
     std::vector<std::uint8_t> scratch = zone;
-    buildOwnerMapUsingZone(lanes, scratch, area, owner, bandCells);
+    buildOwnerMapUsingZone(grid, lanes, scratch, area, owner, bandCells);
 }
 
 // ----------------------------------------------------------------------------
@@ -553,9 +555,12 @@ void buildOwnerMap(const std::vector<SweepLane>& lanes, const std::vector<std::u
 // means precisely "zone == 1 and owner < 0" in the original test. The cells, their order in the queue and the
 // sector each gets are therefore unchanged. Every marked cell is in the queue, so walking the queue afterwards
 // puts every mark back to 1, and the zone map is exactly as it was on entry before the final scan reads it.
-void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std::uint8_t>& zone,
+void buildOwnerMapUsingZone(const GridSpec& grid, const std::vector<SweepLane>& lanes, std::vector<std::uint8_t>& zone,
                             const GridRect& area, std::vector<int>& owner, long long bandCells) {
+    requireGridSize(zone, grid, "buildOwnerMap zone");
+    requireGridSize(owner, grid, "buildOwnerMap owner");
     constexpr std::uint8_t ZONE_CLAIMED = 3;   // Band cell already given an owner (only while this function runs)
+    const int W = grid.width;
     std::vector<int> queue;
 
     // Seed the search with every cell a lane run passes over
@@ -567,7 +572,7 @@ void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std
                 const Vec2 p = a + (b - a) * (static_cast<float>(s) / steps);
                 const int x = static_cast<int>(std::floor(p.x)), y = static_cast<int>(std::floor(p.y));
                 if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1) continue;
-                const int idx = y * GRID_WIDTH + x;
+                const int idx = y * W + x;
                 if (zone[idx] != 1) continue;   // Not a band cell, or already claimed
                 zone[idx] = ZONE_CLAIMED;
                 owner[idx] = l.sector;
@@ -585,12 +590,12 @@ void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std
     //    cells: reserving that up front saves the repeated reallocate-and-copy as it grows.
     queue.reserve(static_cast<size_t>(std::max(0, area.x1 - area.x0)) * std::max(0, area.y1 - area.y0));
     int offset[NUM_DIRS];
-    for (int k = 0; k < NUM_DIRS; ++k) offset[k] = DY[k] * GRID_WIDTH + DX[k];
+    for (int k = 0; k < NUM_DIRS; ++k) offset[k] = DY[k] * W + DX[k];
     std::uint8_t* const zp = zone.data();
     int* const op = owner.data();
     for (size_t head = 0; head < queue.size(); ++head) {
         const int idx = queue[head];
-        const int x = idx % GRID_WIDTH, y = idx / GRID_WIDTH;
+        const int x = idx % W, y = idx / W;
         const int sector = op[idx];
         if (x > area.x0 && x < area.x1 - 1 && y > area.y0 && y < area.y1 - 1) {
             // Interior cell: all eight neighbours are inside the area
@@ -607,7 +612,7 @@ void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std
         for (int k = 0; k < NUM_DIRS; ++k) {
             const int nx = x + DX[k], ny = y + DY[k];
             if (nx < area.x0 || nx >= area.x1 || ny < area.y0 || ny >= area.y1) continue;
-            const int ni = ny * GRID_WIDTH + nx;
+            const int ni = ny * W + nx;
             if (zp[ni] != 1) continue;   // Not a band cell, or already claimed
             zp[ni] = ZONE_CLAIMED;
             op[ni] = sector;
@@ -626,7 +631,7 @@ void buildOwnerMapUsingZone(const std::vector<SweepLane>& lanes, std::vector<std
     // Band cells cut off from every lane (a sliver beyond a gap in the band): nearest lane in a straight line
     for (int y = area.y0; y < area.y1; ++y) {
         for (int x = area.x0; x < area.x1; ++x) {
-            const int idx = y * GRID_WIDTH + x;
+            const int idx = y * W + x;
             if (zone[idx] != 1 || owner[idx] >= 0 || lanes.empty()) continue;
             const Vec2 p(x + 0.5f, y + 0.5f);
             float bd = std::numeric_limits<float>::max();

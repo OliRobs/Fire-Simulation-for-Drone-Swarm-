@@ -14,7 +14,7 @@
 // 3. Lloyd's Relaxation: Iteratively moves site centroids to the center of 
 //    mass of their assigned cell regions to create uniform, well-shaped sectors.
 // ============================================================================
-Voronoi buildVoronoi(const std::vector<int>& cells, int numSites, std::mt19937& rng) {
+Voronoi buildVoronoi(const GridSpec& grid, const std::vector<int>& cells, int numSites, std::mt19937& rng) {
     const int S = numSites;
     Voronoi v;
     std::vector<Vec2>& sites = v.sites;
@@ -23,9 +23,9 @@ Voronoi buildVoronoi(const std::vector<int>& cells, int numSites, std::mt19937& 
     if (cells.empty() || S <= 0) return v;
 
     // Cell centres, worked out once. The steps below visit cells many times (seeding, then once per Lloyd
-    // pass), and cellCentre() does an integer divide and modulo per call.
+    // pass), and GridSpec::centre() does an integer divide and modulo per call.
     std::vector<Vec2> pts(cells.size());
-    for (size_t i = 0; i < cells.size(); ++i) pts[i] = cellCentre(cells[i]);
+    for (size_t i = 0; i < cells.size(); ++i) pts[i] = grid.centre(cells[i]);
 
     // ------------------------------------------------------------------------
     // Blocks of cells, shared by the seeding (Step 1) and the assignment (Step 2)
@@ -33,9 +33,9 @@ Voronoi buildVoronoi(const std::vector<int>& cells, int numSites, std::mt19937& 
     // The cells' bounding box is cut into BUCKET x BUCKET blocks. Both steps use a block's rectangle to rule
     // out, with one cheap bound per block, work that cannot change any cell inside it.
     constexpr int BUCKET = 16;   // Block side in cells: small enough to prune well, big enough to be cheap
-    int minX = GRID_WIDTH, minY = GRID_HEIGHT, maxX = -1, maxY = -1;
+    int minX = grid.width, minY = grid.height, maxX = -1, maxY = -1;
     for (int idx : cells) {
-        const int x = idx % GRID_WIDTH, y = idx / GRID_WIDTH;
+        const int x = idx % grid.width, y = idx / grid.width;
         minX = std::min(minX, x); maxX = std::max(maxX, x);
         minY = std::min(minY, y); maxY = std::max(maxY, y);
     }
@@ -45,7 +45,7 @@ Voronoi buildVoronoi(const std::vector<int>& cells, int numSites, std::mt19937& 
     std::vector<int> bucketOf(cells.size());
     std::vector<char> used(static_cast<size_t>(bw) * bh, 0);   // Blocks that hold at least one cell
     for (size_t i = 0; i < cells.size(); ++i) {
-        const int x = cells[i] % GRID_WIDTH, y = cells[i] / GRID_WIDTH;
+        const int x = cells[i] % grid.width, y = cells[i] / grid.width;
         bucketOf[i] = ((y - minY) / BUCKET) * bw + (x - minX) / BUCKET;
         used[bucketOf[i]] = 1;
     }

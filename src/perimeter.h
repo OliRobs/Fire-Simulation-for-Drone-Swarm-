@@ -10,16 +10,18 @@
 // the perimeter (and the survey zones measured from it) stays put.
 class Perimeter {
 public:
-    explicit Perimeter(const std::vector<std::uint8_t>& initialFire);
+    // Perimeter on grid `spec` round the starting fire (one value per cell of spec)
+    Perimeter(const GridSpec& spec, const std::vector<std::uint8_t>& initialFire);
 
     // Call when the fire has grown. Returns true if any section of the perimeter moved.
     // fireBounds must contain every non-zero cell of liveFire (FireSimulation::fireBounds()): the update
-    // then only looks inside it rather than at all GRID_WIDTH x GRID_HEIGHT cells.
+    // then only looks inside it rather than at every cell of the grid.
     bool update(const std::vector<std::uint8_t>& liveFire, const GridRect& fireBounds);
     // Same, finding the fire's bounding box by scanning liveFire (for callers without one, e.g. tests)
     bool update(const std::vector<std::uint8_t>& liveFire);
 
     const DistanceTransform& distance() const { return perimEdt_; } // Distance from the committed fire
+    const GridSpec& grid() const { return perimEdt_.grid(); }        // The grid
     std::vector<int> ringCells() const;                              // Cells ~PERIMETER_DISTANCE out
 
 private:

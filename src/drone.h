@@ -31,5 +31,6 @@ size_t nearestWaypoint(const std::vector<Vec2>& route, Vec2 p);
 // Returns false if it stopped because of a blocked segment (the caller should re-route the drone).
 bool stepDrone(Drone& d, const SafePlanner* planner = nullptr);
 
-// Hard safety net: a drone closer than HARD_MIN_FIRE_DISTANCE to the fire is pushed straight back out.
+// Hard safety net: a drone closer than HARD_MIN_FIRE_DISTANCE to the fire is pushed straight back out
+// (kept on liveEdt's grid).
 void keepClearOfFire(Drone& d, const DistanceTransform& liveEdt);

@@ -277,7 +277,7 @@ SLOW_TEST(fire_setup_matches_original_rates) {
     const float csx = 10.0f, csy = 12.0f;
     long cellsCompared = 0, differ = 0, active = 0, passive = 0, sheltered = 0;
     for (const FireWeather& weather : weathers) {
-        FireSimulation sim(grid, weather, csx, csy);
+        FireSimulation sim(gridWithCells(csx, csy), grid, weather);
 
         // --- The original set-up loop, word for word except for writing to local arrays ---
         double stepUx[NUM_DIRS], stepUy[NUM_DIRS];

@@ -121,7 +121,7 @@ TEST(live_edt_incremental_matches_clamped_full_transform) {
 
     // --- A real fire, frame by frame, with a second fire part-way ---
     std::vector<Cell> grid(N);
-    FireSimulation sim(grid);
+    FireSimulation sim(G, grid);
     sim.ignite(at(CX, CY));
     for (int t = 0; t < 500; ++t) {
         sim.step();

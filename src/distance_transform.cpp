@@ -11,13 +11,16 @@
 
 // Constructor: Initializes grid dimensions and pre-allocates workspace buffers. Every cell starts "very far"
 // (INF), so with a range limit the cells never inside a window read correctly without being written.
-DistanceTransform::DistanceTransform(int w, int h, int maxDistance, Mode mode)
-    : w_(w), h_(h), maxDistance_(maxDistance), sq_(static_cast<size_t>(w) * h, INF),
+DistanceTransform::DistanceTransform(const GridSpec& spec, int maxDistance, Mode mode)
+    : spec_(spec), w_(spec.width), h_(spec.height), maxDistance_(maxDistance), sq_(spec.count(), INF),
       incremental_(mode == Mode::IncrementalClamped && maxDistance > 0) {
-    const int m = std::max(w, h);
+    const int m = std::max(w_, h_);
     // Allocate 1D buffers used by the 1D EDT pass (sized to max dimension m)
     f_.resize(m); d_.resize(m); v_.resize(m); z_.resize(m + 1);
 }
+
+DistanceTransform::DistanceTransform(int w, int h, int maxDistance, Mode mode)
+    : DistanceTransform(GridSpec{ w, h }, maxDistance, mode) {}
 
 // ----------------------------------------------------------------------------
 // Compute 2D Distance Transform
@@ -26,6 +29,7 @@ DistanceTransform::DistanceTransform(int w, int h, int maxDistance, Mode mode)
 // Populates internal `sq_` vector with squared Euclidean distance to the nearest source cell.
 // With a range limit (maxDistance_ > 0) only a window round the sources is worked out; see the header.
 void DistanceTransform::compute(const std::vector<std::uint8_t>& sources) {
+    requireGridSize(sources, spec_, "DistanceTransform::compute sources");
     if (maxDistance_ <= 0) {   // No range limit: the bounding box is not needed, the whole grid is worked out
         computeIn(sources, GridRect{ 0, 0, w_, h_ });
         return;
@@ -52,6 +56,7 @@ void DistanceTransform::compute(const std::vector<std::uint8_t>& sources) {
 // ----------------------------------------------------------------------------
 // The caller promises every source lies inside sourceBounds (see the header).
 void DistanceTransform::compute(const std::vector<std::uint8_t>& sources, const GridRect& sourceBounds) {
+    requireGridSize(sources, spec_, "DistanceTransform::compute sources");
     // Clip to the grid, in case the caller's rectangle runs off it
     const GridRect clipped{ std::max(0, sourceBounds.x0), std::max(0, sourceBounds.y0),
                             std::min(w_, sourceBounds.x1), std::min(h_, sourceBounds.y1) };

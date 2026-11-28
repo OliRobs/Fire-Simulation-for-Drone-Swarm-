@@ -138,9 +138,10 @@ std::vector<std::string> findDemTiles(const std::string& dir, bool recursive) {
 // ----------------------------------------------------------------------------
 // Load Terrain Data
 // ----------------------------------------------------------------------------
-Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
-    constexpr int N = GRID_WIDTH * GRID_HEIGHT;
+Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window, int width, int height) {
     Terrain terrain;
+    terrain.spec = GridSpec{ width, height };   // Cell size set below once the grid's source is known
+    const int N = static_cast<int>(terrain.spec.count());
     terrain.grid.resize(N);
 
     std::cout << "Loading GIS datasets via GDAL...\n";
@@ -152,7 +153,7 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
     const bool haveDemTiles = !paths.demTiles.empty() && buildMosaic(paths.demTiles, DEM_MOSAIC_PATH);
     const std::string gridSource = haveDemTiles ? std::string(DEM_MOSAIC_PATH)
                                  : !paths.elevation.empty() ? paths.elevation : paths.fuel;
-    bool haveGrid = !gridSource.empty() && readRasterGrid(gridSource.c_str(), GRID_WIDTH, GRID_HEIGHT, full);
+    bool haveGrid = !gridSource.empty() && readRasterGrid(gridSource.c_str(), width, height, full);
     if (haveGrid) {
         grid = full;
         // Centre: requested lon/lat, else the middle of the raster
@@ -171,7 +172,7 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
             // If the tiles are smaller than the window, it is still centred on them and the cells beyond the
             // DEM fall back to the LANDFIRE elevation and slope.
             if (!makeWindow(full, cx, cy, SIM_CELL_SIZE_M, grid)) {
-                const double w = GRID_WIDTH * SIM_CELL_SIZE_M, h = GRID_HEIGHT * SIM_CELL_SIZE_M;
+                const double w = width * SIM_CELL_SIZE_M, h = height * SIM_CELL_SIZE_M;
                 grid.minX = std::round((cx - w / 2) / SIM_CELL_SIZE_M) * SIM_CELL_SIZE_M;
                 grid.maxY = std::round((cy + h / 2) / SIM_CELL_SIZE_M) * SIM_CELL_SIZE_M;
                 grid.maxX = grid.minX + w;
@@ -180,7 +181,7 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
                              "cells outside them use the LANDFIRE elevation\n";
             }
             std::printf("Simulation window: %d x %d cells of %.0f m on the 1 m DEM's grid, x %.0f .. %.0f, "
-                        "y %.0f .. %.0f\n", GRID_WIDTH, GRID_HEIGHT, SIM_CELL_SIZE_M, grid.minX, grid.maxX,
+                        "y %.0f .. %.0f\n", width, height, SIM_CELL_SIZE_M, grid.minX, grid.maxX,
                         grid.minY, grid.maxY);
         }
         // A large projected raster (LANDFIRE) gets a window of SIM_CELL_SIZE_M cells, north-up in the local UTM
@@ -188,21 +189,21 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
         else if (full.projected && ALIGN_NORTH_UP && makeNorthUpWindow(full, cx, cy, SIM_CELL_SIZE_M, grid, zone, rotation)) {
             std::printf("Simulation window: %d x %d cells of %.0f m, north-up on UTM zone %dN (the source grid is "
                         "rotated %.1f deg from north here, so layers are re-sampled onto the new grid)\n",
-                        GRID_WIDTH, GRID_HEIGHT, SIM_CELL_SIZE_M, zone, rotation);
+                        width, height, SIM_CELL_SIZE_M, zone, rotation);
         }
         else if (full.projected && makeWindow(full, cx, cy, SIM_CELL_SIZE_M, grid)) {
-            std::cout << "Simulation window: " << GRID_WIDTH << " x " << GRID_HEIGHT << " cells of "
+            std::cout << "Simulation window: " << width << " x " << height << " cells of "
                       << SIM_CELL_SIZE_M << " m on the source grid, x " << grid.minX << " .. " << grid.maxX
                       << ", y " << grid.minY << " .. " << grid.maxY << "\n";
         }
         else if (window.useLonLat) {
             std::cout << "Raster is smaller than the simulation window, so --centre is ignored\n";
         }
-        terrain.cellSizeX = static_cast<float>(grid.cellSizeX());
-        terrain.cellSizeY = static_cast<float>(grid.cellSizeY());
-        std::cout << "Grid cell size: " << terrain.cellSizeX << " x " << terrain.cellSizeY << " (map units)\n";
+        terrain.spec.cellSizeX = static_cast<float>(grid.cellSizeX());
+        terrain.spec.cellSizeY = static_cast<float>(grid.cellSizeY());
+        std::cout << "Grid cell size: " << terrain.spec.cellSizeX << " x " << terrain.spec.cellSizeY << " (map units)\n";
         // The automaton draws square cells; a non-square footprint still works but looks stretched
-        if (std::fabs(terrain.cellSizeX / terrain.cellSizeY - 1.0f) > 0.01f) {
+        if (std::fabs(terrain.spec.cellSizeX / terrain.spec.cellSizeY - 1.0f) > 0.01f) {
             std::cerr << "Warning: grid cells are not square (stretched on screen)\n";
         }
     }
@@ -234,9 +235,9 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
     }
     else if (fineCells == 0) {
         std::cout << "No DEM: using a synthetic diagonal slope\n";
-        for (int y = 0; y < GRID_HEIGHT; ++y)
-            for (int x = 0; x < GRID_WIDTH; ++x)
-                terrain.grid[y * GRID_WIDTH + x].elevation = (x * 0.3f) + ((GRID_HEIGHT - y) * 0.5f);
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                terrain.grid[y * width + x].elevation = (x * 0.3f) + ((height - y) * 0.5f);
     }
     if (fineCells > 0) {
         // Cells the tiles miss (only if the tiles are smaller than the window) get the lowest DEM elevation
@@ -253,7 +254,7 @@ Terrain loadTerrain(const LandscapePaths& paths, const WindowRequest& window) {
     // From the grid elevations first (Horn's method on the cells). Then, cell by cell, the best source wins:
     // the 1 m DEM (mean 1 m slope and overall uphill direction) where it covers the cell, else the measured
     // LANDFIRE slope (direction still from the elevations).
-    computeTopography(terrain.grid, terrain.cellSizeX, terrain.cellSizeY, false);
+    computeTopography(terrain.spec, terrain.grid, false);
     if (haveGrid && needLandfireTerrain && loadLayer(paths.slope, grid, Resample::Average, "slope", raw)) {
         for (int i = 0; i < N; ++i) {
             if (!fromFineDem(i) && !isNoData(raw[i]) && raw[i] >= 0.0f && raw[i] <= 90.0f) terrain.grid[i].slopeDeg = raw[i];

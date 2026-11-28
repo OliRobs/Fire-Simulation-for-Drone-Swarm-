@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include "grid.h"
 #include "types.h"
 
 // Exact Euclidean distance transform (Felzenszwalb & Huttenlocher), O(N).
@@ -26,8 +27,14 @@ class DistanceTransform {
 public:
     enum class Mode { Exact, IncrementalClamped };
 
-    // maxDistance: cells; 0 = no limit (the whole grid, the original behaviour). IncrementalClamped needs a limit.
+    // A field over grid `spec`. maxDistance: cells; 0 = no limit (the whole grid). IncrementalClamped needs a
+    // limit. The planner and drone code read the grid's size back from the field (grid()).
+    explicit DistanceTransform(const GridSpec& spec, int maxDistance = 0, Mode mode = Mode::Exact);
+    // Same, for a w x h grid of the default cell size (tests and small helper fields)
     DistanceTransform(int w, int h, int maxDistance = 0, Mode mode = Mode::Exact);
+
+    // The grid this field covers
+    const GridSpec& grid() const { return spec_; }
 
     // sources[i] != 0 marks a source cell. Read results via squaredDistance().
     void compute(const std::vector<std::uint8_t>& sources);
@@ -74,6 +81,7 @@ private:
     // Incremental mode: lowers every distance within the clamp radius of source cell (sx, sy)
     void addSource(int sx, int sy);
 
+    GridSpec spec_;                 // The grid (w_ x h_ cells)
     int w_, h_;
     int maxDistance_;               // 0 = whole grid
     std::uint64_t version_ = 0;     // compute() calls so far (see version())

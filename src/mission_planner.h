@@ -24,7 +24,8 @@ struct SweepFleet {
     MissionPlan* recycle = nullptr;
 };
 
-// Builds the whole survey plan from the live fire (standoff) and the committed perimeter (zones).
+// Builds the whole survey plan from the live fire (standoff) and the committed perimeter (zones). The plan is
+// on the two fields' grid (they must be the same grid: std::invalid_argument otherwise).
 // Sweep: as many sectors as needed to keep every lap within MAX_SWEEP_LAP_S, but at least as many as the fleet
 // has drones, clamped to MIN_SWEEP_DRONES .. MAX_SWEEP_DRONES. plan.sectorDrone gives each sector's drone id,
 // or -1 where a new drone has to be launched. The only time it plans for fewer sectors than drones is the shrink

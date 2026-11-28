@@ -229,13 +229,14 @@ namespace {
     // Groups the fire grid into columns, sets their roughness and stretches the node layers between each
     // column's ground and a flat top above the highest summit (WindNinja's Mesh::get_z / compute_domain_height).
     // wind20Ms is used only for the boundary-layer height (0.2 u* / f, Blackadar & Tennekes 1968).
-    Mesh buildMesh(const std::vector<Cell>& grid, float cellSizeX, float cellSizeY, double wind20Ms,
-                   const WindSolverSettings& s) {
+    Mesh buildMesh(const GridSpec& spec, const std::vector<Cell>& grid, double wind20Ms, const WindSolverSettings& s) {
         Mesh m;
+        const float cellSizeX = spec.cellSizeX, cellSizeY = spec.cellSizeY;
+        const int W = spec.width, H = spec.height;
         const int fx = std::max(1, static_cast<int>(std::lround(s.columnSizeM / cellSizeX)));   // Fire cells per column
         const int fy = std::max(1, static_cast<int>(std::lround(s.columnSizeM / cellSizeY)));
-        m.nx = (GRID_WIDTH + fx - 1) / fx;
-        m.ny = (GRID_HEIGHT + fy - 1) / fy;
+        m.nx = (W + fx - 1) / fx;
+        m.ny = (H + fy - 1) / fy;
         m.nz = std::max(3, s.layers);
         m.hx = static_cast<double>(fx) * cellSizeX;
         m.hy = static_cast<double>(fy) * cellSizeY;
@@ -247,9 +248,9 @@ namespace {
             for (int i = 0; i < m.nx; ++i) {
                 double sumZ = 0.0, sumH = 0.0;
                 int n = 0;
-                for (int y = j * fy; y < std::min((j + 1) * fy, GRID_HEIGHT); ++y)
-                    for (int x = i * fx; x < std::min((i + 1) * fx, GRID_WIDTH); ++x) {
-                        const Cell& c = grid[static_cast<std::size_t>(y) * GRID_WIDTH + x];
+                for (int y = j * fy; y < std::min((j + 1) * fy, H); ++y)
+                    for (int x = i * fx; x < std::min((i + 1) * fx, W); ++x) {
+                        const Cell& c = grid[static_cast<std::size_t>(y) * W + x];
                         sumZ += c.elevation;
                         sumH += vegetationHeightM(c);
                         ++n;
@@ -525,10 +526,11 @@ namespace {
     }
 
     // The open wind everywhere: used when there is nothing to adjust (no wind, or a map too small for a mesh)
-    WindField uniformField(Vec2 toward, double wind20Kmh) {
+    WindField uniformField(const GridSpec& spec, Vec2 toward, double wind20Kmh) {
         WindField f;
-        f.toward.assign(static_cast<std::size_t>(GRID_WIDTH) * GRID_HEIGHT, toward);
-        f.speedKmh.assign(static_cast<std::size_t>(GRID_WIDTH) * GRID_HEIGHT, static_cast<float>(wind20Kmh));
+        f.grid = spec;
+        f.toward.assign(spec.count(), toward);
+        f.speedKmh.assign(spec.count(), static_cast<float>(wind20Kmh));
         f.converged = true;
         return f;
     }
@@ -537,15 +539,17 @@ namespace {
 // ----------------------------------------------------------------------------
 // Solve the terrain wind (steps 1-6 of wind_solver.h)
 // ----------------------------------------------------------------------------
-WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float cellSizeY,
-                           float wind20Kmh, float windFromDeg, const WindSolverSettings& s) {
+WindField solveTerrainWind(const GridSpec& spec, const std::vector<Cell>& grid, float wind20Kmh, float windFromDeg,
+                           const WindSolverSettings& s) {
+    requireGridSize(grid, spec, "solveTerrainWind cells");
+    const float cellSizeX = spec.cellSizeX, cellSizeY = spec.cellSizeY;   // Ground size of a fire cell, m
     const Vec2 toward = windTowardGrid(windFromDeg);
     const double wind20Ms = wind20Kmh / KMH_PER_MS;
-    if (wind20Ms <= 0.0) return uniformField(toward, 0.0);
+    if (wind20Ms <= 0.0) return uniformField(spec, toward, 0.0);
 
     // --- Step 1: mesh ---
-    const Mesh m = buildMesh(grid, cellSizeX, cellSizeY, wind20Ms, s);
-    if (m.nx < 3 || m.ny < 3) return uniformField(toward, wind20Kmh);   // No interior nodes to solve for
+    const Mesh m = buildMesh(spec, grid, wind20Ms, s);
+    if (m.nx < 3 || m.ny < 3) return uniformField(spec, toward, wind20Kmh);   // No interior nodes to solve for
     const std::size_t total = m.count();
 
     // --- Step 2: first guess, the open wind spread up each column with the log profile ---
@@ -639,6 +643,7 @@ WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float
 
     // --- Step 4: preconditioned conjugate gradients ---
     WindField field;
+    field.grid = spec;
     field.columnsX = m.nx;
     field.columnsY = m.ny;
     field.layers = m.nz;
@@ -769,13 +774,13 @@ WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float
         }
 
     // --- Step 6b: bilinear interpolation from the column centres to every fire cell ---
-    field.toward.resize(static_cast<std::size_t>(GRID_WIDTH) * GRID_HEIGHT);
+    field.toward.resize(spec.count());
     field.speedKmh.resize(field.toward.size());
-    for (int y = 0; y < GRID_HEIGHT; ++y) {
+    for (int y = 0; y < spec.height; ++y) {
         const double ty = std::clamp((y + 0.5) * cellSizeY / m.hy - 0.5, 0.0, m.ny - 1.0);
         const int j0 = std::min(static_cast<int>(ty), m.ny - 2);
         const double fy = ty - j0;
-        for (int x = 0; x < GRID_WIDTH; ++x) {
+        for (int x = 0; x < spec.width; ++x) {
             const double tx = std::clamp((x + 0.5) * cellSizeX / m.hx - 0.5, 0.0, m.nx - 1.0);
             const int i0 = std::min(static_cast<int>(tx), m.nx - 2);
             const double fx = tx - i0;
@@ -784,7 +789,7 @@ WindField solveTerrainWind(const std::vector<Cell>& grid, float cellSizeX, float
             const double cu = (1 - fy) * ((1 - fx) * colU[c00] + fx * colU[c10]) + fy * ((1 - fx) * colU[c01] + fx * colU[c11]);
             const double cv = (1 - fy) * ((1 - fx) * colV[c00] + fx * colV[c10]) + fy * ((1 - fx) * colV[c01] + fx * colV[c11]);
             const double speed = std::sqrt(cu * cu + cv * cv);
-            const std::size_t idx = static_cast<std::size_t>(y) * GRID_WIDTH + x;
+            const std::size_t idx = static_cast<std::size_t>(y) * spec.width + x;
             field.speedKmh[idx] = static_cast<float>(speed * KMH_PER_MS);
             // Direction of the solved wind; keep the open wind's direction where the wind has died away
             field.toward[idx] = speed > 1e-6 ? Vec2(static_cast<float>(cu / speed), static_cast<float>(cv / speed)) : toward;

@@ -37,10 +37,10 @@ struct WindArrow {
 void windArrowColour(float speedKmh, float openKmh, std::uint8_t& r, std::uint8_t& g, std::uint8_t& b);
 
 // Lattice spacing in world units for a view showing `perPixel` world units per screen pixel: CELL_SIZE x the
-// smallest power of two cells that is at least spacingPx screen pixels
-float windArrowSpacing(float perPixel, float spacingPx = WIND_ARROW_SPACING_PX);
+// smallest power of two cells that is at least spacingPx screen pixels (at most the grid's longer side)
+float windArrowSpacing(const GridSpec& grid, float perPixel, float spacingPx = WIND_ARROW_SPACING_PX);
 
-// The arrows inside `view` for `field` (GRID_WIDTH x GRID_HEIGHT cells, one cell = CELL_SIZE world units).
+// The arrows inside `view` for `field` (on field.grid, one cell = CELL_SIZE world units).
 // perPixel: world units per screen pixel. openKmh: the weather's open 20-ft wind. maxKmh: the fastest speed in
 // the field (the full-length arrow). Empty when the field is empty.
 std::vector<WindArrow> buildWindArrows(const WindField& field, const Viewport& view, float perPixel,

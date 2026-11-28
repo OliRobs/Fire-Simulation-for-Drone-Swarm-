@@ -548,7 +548,7 @@ TEST(owner_map_matches_original_flood) {
         for (const GridRect area : { w, GridRect{ w.x0, w.y0, mx, my }, GridRect{ mx - 37, w.y0, w.x1, my + 23 },
                                      GridRect{ w.x0 + 5, my - 60, w.x1 - 5, my + 60 } }) {
             std::vector<int> fast(N, -1), original(N, -1);
-            buildOwnerMap(s.plan.lanes, zone, area, fast);
+            buildOwnerMap(G, s.plan.lanes, zone, area, fast);
             ref::ownerSeedAndFlood(s.plan.lanes, zone, area, original);
             for (int y = area.y0; y < area.y1; ++y) {
                 for (int x = area.x0; x < area.x1; ++x) {
@@ -590,8 +590,8 @@ TEST(owner_map_band_count_skip_is_exact) {
             long long band = 0;
             for (int y = w.y0; y < w.y1; ++y)
                 for (int x = w.x0; x < w.x1; ++x) band += (*zone)[at(x, y)] == 1;
-            const std::vector<int> plain = buildOwnerMap(s.plan.lanes, *zone, w);          // Always scans
-            const std::vector<int> counted = buildOwnerMap(s.plan.lanes, *zone, w, band);  // May skip the scan
+            const std::vector<int> plain = buildOwnerMap(G, s.plan.lanes, *zone, w);          // Always scans
+            const std::vector<int> counted = buildOwnerMap(G, s.plan.lanes, *zone, w, band);  // May skip the scan
             for (int i = 0; i < N; ++i) differ += plain[i] != counted[i];
             // Every band cell has an owner either way (so a skipped scan really had nothing left to do)
             long long unowned = 0;
@@ -634,7 +634,7 @@ TEST(owner_map_using_zone_matches_and_restores_zone) {
                 for (const long long count : { -1LL, band }) {
                     std::vector<std::uint8_t> zone = *zoneIn;   // Marked and restored by the call
                     std::vector<int> fast(N, -1);
-                    buildOwnerMapUsingZone(s.plan.lanes, zone, area, fast, count);
+                    buildOwnerMapUsingZone(G, s.plan.lanes, zone, area, fast, count);
                     zoneChanged += zone != *zoneIn;
                     ++cases;
                     for (int i = 0; i < N; ++i) {
@@ -730,7 +730,7 @@ TEST(sector_matching_over_band_matches_window_scan) {
     for (const auto& fire : fires) {
         DistanceTransform live(GRID_WIDTH, GRID_HEIGHT);
         live.compute(fire);
-        Perimeter perim(fire);
+        Perimeter perim(G, fire);
         SafePlanner sp(live);
         MissionPlan kept;   // The plan the next fire's fleets follow on from
         for (int variant = 0; variant < 3; ++variant) {
@@ -779,7 +779,7 @@ TEST(sector_matching_over_band_matches_window_scan) {
 TEST(perimeter_trace_matches_per_corner_evaluation) {
     int loopsChecked = 0;
     for (const auto& fire : exactnessFires()) {
-        Perimeter perim(fire);
+        Perimeter perim(G, fire);
         // The planner's level, the survey standoff, and an odd fractional level
         for (float level : { static_cast<float>(PERIMETER_DISTANCE), static_cast<float>(MIN_FIRE_DISTANCE), 57.3f }) {
             const auto fast = tracePerimeterLine(perim.distance(), level);

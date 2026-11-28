@@ -29,24 +29,25 @@ namespace {
 // 3. Voronoi sector boundaries, standoff safety zones, and outer search limits.
 // 4. Multi-drone positions, sensor range radii, and active flight paths.
 // ============================================================================
-Renderer::Renderer(const std::vector<std::uint8_t>& terrainShade)
-    : window_(sf::VideoMode(GRID_WIDTH* CELL_SIZE, GRID_HEIGHT* CELL_SIZE),
+Renderer::Renderer(const GridSpec& spec, const std::vector<std::uint8_t>& terrainShade)
+    : W_(spec.width), H_(spec.height),
+    window_(sf::VideoMode(W_ * CELL_SIZE, H_ * CELL_SIZE),
         "2D Wildfire Simulator (Rothermel, LANDFIRE) - wheel: zoom, right-drag: pan, F: frame fire"),
     terrainShade_(terrainShade),
-    pixels_(static_cast<size_t>(GRID_WIDTH)* GRID_HEIGHT * 4, 255),       // RGBA primary grid buffer
-    overlayPixels_(static_cast<size_t>(GRID_WIDTH)* GRID_HEIGHT * 4, 0),   // RGBA mission overlay buffer
+    pixels_(static_cast<size_t>(W_)* H_ * 4, 255),       // RGBA primary grid buffer
+    overlayPixels_(static_cast<size_t>(W_)* H_ * 4, 0),   // RGBA mission overlay buffer
     marker_(3.0f), sensor_(SENSOR_RADIUS* CELL_SIZE), body_(5.0f),
-    view_(static_cast<float>(GRID_WIDTH * CELL_SIZE), static_cast<float>(GRID_HEIGHT * CELL_SIZE)) {
+    view_(static_cast<float>(W_ * CELL_SIZE), static_cast<float>(H_ * CELL_SIZE)) {
     window_.setFramerateLimit(30); // Cap frame rate to 30 FPS
 
     // Create primary terrain & fire texture/sprite mapped to grid dimensions
-    texture_.create(GRID_WIDTH, GRID_HEIGHT);
+    texture_.create(W_, H_);
     texture_.update(pixels_.data());
     sprite_.setTexture(texture_);
     sprite_.setScale(static_cast<float>(CELL_SIZE), static_cast<float>(CELL_SIZE));
 
     // Create mission overlay texture/sprite (Voronoi borders, boundaries)
-    overlayTex_.create(GRID_WIDTH, GRID_HEIGHT);
+    overlayTex_.create(W_, H_);
     // Start fully transparent (a new texture's contents are undefined). After this, setMissionVisuals()
     // only re-uploads the rows a plan changes.
     overlayTex_.update(overlayPixels_.data());
@@ -72,7 +73,7 @@ void Renderer::setColor(int idx, std::uint8_t r, std::uint8_t g, std::uint8_t b)
     pixels_[idx * 4 + 2] = b;
 
     // Grow the dirty row range to take in this cell's row
-    const int y = idx / GRID_WIDTH;
+    const int y = idx / W_;
     if (dirtyY1_ <= dirtyY0_) { dirtyY0_ = y; dirtyY1_ = y + 1; }
     else { dirtyY0_ = std::min(dirtyY0_, y); dirtyY1_ = std::max(dirtyY1_, y + 1); }
 }
@@ -110,7 +111,7 @@ void Renderer::paintBase(int idx, const std::vector<Cell>& grid) {
 
 // Repaints the entire base grid texture array
 void Renderer::paintAll(const std::vector<Cell>& grid) {
-    for (int i = 0; i < GRID_WIDTH * GRID_HEIGHT; ++i) paintBase(i, grid);
+    for (int i = 0; i < W_ * H_; ++i) paintBase(i, grid);
 }
 
 // Repaints only dirty/modified grid cells for performance optimization
@@ -143,18 +144,18 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
     const DistanceTransform& liveEdt) {
     // Reset only the part of the overlay the previous plan drew on (the rest is still transparent)
     for (int y = overlayDrawn_.y0; y < overlayDrawn_.y1; ++y) {
-        std::fill(overlayPixels_.begin() + (static_cast<size_t>(y) * GRID_WIDTH + overlayDrawn_.x0) * 4,
-                  overlayPixels_.begin() + (static_cast<size_t>(y) * GRID_WIDTH + overlayDrawn_.x1) * 4, 0);
+        std::fill(overlayPixels_.begin() + (static_cast<size_t>(y) * W_ + overlayDrawn_.x0) * 4,
+                  overlayPixels_.begin() + (static_cast<size_t>(y) * W_ + overlayDrawn_.x1) * 4, 0);
     }
     // Every search-area cell (zone != 0) lies inside plan.bounds (mission_types.h), so that is all that needs scanning
     const GridRect box{ std::max(0, plan.bounds.x0), std::max(0, plan.bounds.y0),
-                        std::min(GRID_WIDTH, plan.bounds.x1), std::min(GRID_HEIGHT, plan.bounds.y1) };
+                        std::min(W_, plan.bounds.x1), std::min(H_, plan.bounds.y1) };
 
-    auto inGrid = [](int x, int y) { return x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT; };
-    auto labelAt = [&](int x, int y) { return inGrid(x, y) ? plan.label[y * GRID_WIDTH + x] : -1; };
-    auto zoneAt = [&](int x, int y) { return inGrid(x, y) ? plan.zone[y * GRID_WIDTH + x] : std::uint8_t(0); };
-    auto ownerAt = [&](int x, int y) { return inGrid(x, y) && !plan.owner.empty() ? plan.owner[y * GRID_WIDTH + x] : -1; };
-    auto holeAt = [&](int x, int y) { return inGrid(x, y) && liveEdt.squaredDistance(y * GRID_WIDTH + x) < NO_FLY_SQ; };
+    auto inGrid = [this](int x, int y) { return x >= 0 && x < W_ && y >= 0 && y < H_; };
+    auto labelAt = [&](int x, int y) { return inGrid(x, y) ? plan.label[y * W_ + x] : -1; };
+    auto zoneAt = [&](int x, int y) { return inGrid(x, y) ? plan.zone[y * W_ + x] : std::uint8_t(0); };
+    auto ownerAt = [&](int x, int y) { return inGrid(x, y) && !plan.owner.empty() ? plan.owner[y * W_ + x] : -1; };
+    auto holeAt = [&](int x, int y) { return inGrid(x, y) && liveEdt.squaredDistance(y * W_ + x) < NO_FLY_SQ; };
     // Drone id flying a sector (-1 if unknown)
     auto droneOf = [&](int sector) {
         return sector >= 0 && sector < static_cast<int>(plan.sectorDrone.size()) ? plan.sectorDrone[sector] : -1;
@@ -169,7 +170,7 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
             const int l = labelAt(x, y);
             const int r = labelAt(x + 1, y), dn = labelAt(x, y + 1);
 
-            sf::Uint8* px = &overlayPixels_[(y * GRID_WIDTH + x) * 4];
+            sf::Uint8* px = &overlayPixels_[(y * W_ + x) * 4];
 
             if (zoneAt(x + 1, y) == 0 || zoneAt(x, y + 1) == 0 || zoneAt(x - 1, y) == 0 || zoneAt(x, y - 1) == 0) {
                 // Boundary edge of active search zone
@@ -199,8 +200,8 @@ void Renderer::setMissionVisuals(const MissionPlan& plan, const std::vector<Dron
     // Upload the rows that changed: those of the old drawing (now cleared) and of the new one
     const GridRect rows = overlayDrawn_.unite(box);
     if (!rows.empty()) {
-        overlayTex_.update(overlayPixels_.data() + static_cast<size_t>(rows.y0) * GRID_WIDTH * 4,
-                           GRID_WIDTH, rows.y1 - rows.y0, 0, rows.y0);
+        overlayTex_.update(overlayPixels_.data() + static_cast<size_t>(rows.y0) * W_ * 4,
+                           W_, rows.y1 - rows.y0, 0, rows.y0);
     }
     overlayDrawn_ = box;
 
@@ -262,8 +263,8 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
     // Send only the rows that changed since the last frame. Whole rows are contiguous in pixels_, so they go
     // up in one call without copying; most frames only a few rows round the fire front have changed.
     if (dirtyY1_ > dirtyY0_) {
-        texture_.update(pixels_.data() + static_cast<size_t>(dirtyY0_) * GRID_WIDTH * 4,
-                        GRID_WIDTH, dirtyY1_ - dirtyY0_, 0, dirtyY0_);
+        texture_.update(pixels_.data() + static_cast<size_t>(dirtyY0_) * W_ * 4,
+                        W_, dirtyY1_ - dirtyY0_, 0, dirtyY0_);
         dirtyY0_ = dirtyY1_ = 0;
     }
     window_.clear(sf::Color::Black);
@@ -278,9 +279,9 @@ void Renderer::draw(const MissionPlan& plan, const std::vector<Drone>& drones) {
     if (cellPx >= 8.0f) {
         const sf::Color lineColour(0, 0, 0, static_cast<sf::Uint8>(std::min(80.0f, 20.0f + (cellPx - 8.0f) * 4.0f)));
         const int x0 = std::max(0, static_cast<int>(view_.left() / cs));
-        const int x1 = std::min(GRID_WIDTH, static_cast<int>(std::ceil((view_.left() + view_.width()) / cs)));
+        const int x1 = std::min(W_, static_cast<int>(std::ceil((view_.left() + view_.width()) / cs)));
         const int y0 = std::max(0, static_cast<int>(view_.top() / cs));
-        const int y1 = std::min(GRID_HEIGHT, static_cast<int>(std::ceil((view_.top() + view_.height()) / cs)));
+        const int y1 = std::min(H_, static_cast<int>(std::ceil((view_.top() + view_.height()) / cs)));
         sf::VertexArray lines(sf::Lines);
         for (int x = x0; x <= x1; ++x) {   // Vertical lines on cell edges
             lines.append(sf::Vertex(sf::Vector2f(x * cs, y0 * cs), lineColour));
@@ -469,7 +470,7 @@ bool Renderer::handleViewEvent(const sf::Event& event) {
 // ----------------------------------------------------------------------------
 void Renderer::frameMask(const std::vector<std::uint8_t>& mask) {
     int x0, y0, x1, y1;
-    if (!maskBounds(mask, GRID_WIDTH, GRID_HEIGHT, x0, y0, x1, y1)) return;   // No fire yet
+    if (!maskBounds(mask, W_, H_, x0, y0, x1, y1)) return;   // No fire yet
     const float cs = static_cast<float>(CELL_SIZE);
     view_.frame(x0 * cs, y0 * cs, (x1 + 1) * cs, (y1 + 1) * cs, cellsFromMetres(300.0f) * cs);
     applyView();

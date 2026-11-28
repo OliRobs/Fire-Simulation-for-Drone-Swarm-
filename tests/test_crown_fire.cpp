@@ -34,7 +34,7 @@ namespace {
         FireWeather w;
         w.windFromDeg = 270.0f;
         w.wind20ftKmh = 30.0f;
-        FireSimulation sim(grid, w, 30.0f, 30.0f);
+        FireSimulation sim(gridWithCells(30.0f), grid, w);
         sim.ignite(at(100, 250));
         for (int t = 0; t < 360; ++t) sim.step();      // 60 minutes
         int k = 0;
@@ -64,7 +64,7 @@ SLOW_TEST(crown_fire_in_the_simulation) {
     for (Cell& c : grid) { c.fuelModel = 165; c.canopyCoverPct = 50; c.canopyHeightM = 20; c.canopyBaseHeightM = 1; c.canopyBulkDensity = 0.25f; }
     FireWeather off;
     off.crownFire = false;
-    FireSimulation sim(grid, off);
+    FireSimulation sim(G, grid, off);
     CHECK(sim.grid()[at(10, 10)].fireType == static_cast<int>(FireType::Surface));
 }
 

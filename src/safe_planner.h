@@ -10,6 +10,7 @@
 // line-of-sight checks.
 class SafePlanner {
 public:
+    // Plans against liveEdt, on liveEdt's grid (DistanceTransform::grid())
     explicit SafePlanner(const DistanceTransform& liveEdt);
 
     // True if cell (x, y) is on the map and outside the hard no-fly zone
@@ -30,6 +31,7 @@ private:
     void refreshFlyable();                  // Brings fly_ up to date with the live distance field (see below)
 
     const DistanceTransform& edt_;
+    const int W_, H_;                       // Grid size, cells (from edt_.grid(); kept here for the hot loops)
 
     // A* working storage, reused between calls. Instead of clearing all 250k entries on every search,
     // each search bumps search_ and an entry only counts as valid if its stamp equals the current search.
@@ -53,10 +55,10 @@ private:
 
     // Flyable-cell bitmap for A*: one byte per cell, 1 where cellOk() is true, on a grid padded with a border of
     // 0 (not flyable) cells all round, so neighbour tests need no bounds checks. Cell (x, y) is at
-    // (y + 1) * FLY_W + (x + 1). It is only brought up to date when an A* search is about to run and the live
+    // (y + 1) * flyW_ + (x + 1). It is only brought up to date when an A* search is about to run and the live
     // distance field has been recomputed since (DistanceTransform::version()), and only the field's window is
     // rewritten (outside it every cell is far from the fire, i.e. flyable).
-    static constexpr int FLY_W = GRID_WIDTH + 2;
+    const int flyW_;                        // Padded row length, W_ + 2
     std::vector<std::uint8_t> fly_;
     bool flyBuilt_ = false;
     std::uint64_t flyVersion_ = 0;          // edt_.version() that fly_ matches

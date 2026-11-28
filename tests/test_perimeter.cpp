@@ -19,10 +19,10 @@
 // identically: same ring, same distances everywhere the mission planner reads them
 SLOW_TEST(perimeter_update_with_bounds_matches_scan) {
     std::vector<Cell> grid(N);
-    FireSimulation sim(grid);
+    FireSimulation sim(G, grid);
     sim.ignite(at(400, 400));
     for (int t = 0; t < 200; ++t) sim.step();
-    Perimeter withBounds(sim.fireMask()), scanned(sim.fireMask());
+    Perimeter withBounds(G, sim.fireMask()), scanned(G, sim.fireMask());
     int moves = 0;
     for (int t = 0; t < 1500; ++t) {
         sim.step();
@@ -112,10 +112,10 @@ TEST(perimeter_update_tests_only_new_cells_and_matches_original) {
     // --- A real fire: one ignition, then a second, separate one part-way through ---
     {
         std::vector<Cell> grid(N);
-        FireSimulation sim(grid);
+        FireSimulation sim(G, grid);
         sim.ignite(at(CX, CY));
         for (int t = 0; t < 100; ++t) sim.step();
-        Perimeter fast(sim.fireMask());
+        Perimeter fast(G, sim.fireMask());
         OriginalPerimeter original(sim.fireMask());
         for (int t = 0; t < 2400; ++t) {
             if (t == 900) sim.ignite(at(CX + 150, CY + 80));   // A spot fire well outside the perimeter
@@ -139,7 +139,7 @@ TEST(perimeter_update_tests_only_new_cells_and_matches_original) {
         std::mt19937 rng(7);
         std::uniform_int_distribution<int> dx(-60, 60), rad(5, 45);
         std::vector<std::uint8_t> mask = discFire(CX, CY, 20);
-        Perimeter fast(mask);
+        Perimeter fast(G, mask);
         OriginalPerimeter original(mask);
         for (int step = 0; step < 60; ++step) {
             mask = discFire(CX + dx(rng), CY + dx(rng), rad(rng));
@@ -168,7 +168,7 @@ TEST(perimeter_update_tests_only_new_cells_and_matches_original) {
 // ============================================================================
 TEST(perimeter_line_round_fire_is_one_loop) {
     const int r = 30;
-    Perimeter perim(discFire(400, 400, r));
+    Perimeter perim(G, discFire(400, 400, r));
     const auto loops = tracePerimeterLine(perim.distance());
     CHECK(loops.size() == 1);
     if (loops.size() != 1) return;
@@ -194,7 +194,7 @@ TEST(perimeter_line_two_fires_give_two_loops_the_same_way_round) {
     std::vector<std::uint8_t> fire = discFire(400, 400, 20);
     const auto other = discFire(GRID_WIDTH * 3 / 4, GRID_HEIGHT * 3 / 4, 35);   // Far enough apart on any grid
     for (int i = 0; i < N; ++i) fire[i] |= other[i];
-    Perimeter perim(fire);
+    Perimeter perim(G, fire);
     const auto loops = tracePerimeterLine(perim.distance());
     CHECK(loops.size() == 2);
     for (const auto& l : loops) CHECK(loopSignedArea(l) < 0.0);

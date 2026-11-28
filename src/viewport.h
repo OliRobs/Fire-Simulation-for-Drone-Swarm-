@@ -10,7 +10,7 @@
 // it into an sf::View. World units are window pixels at zoom 1 (cells x CELL_SIZE).
 // ============================================================================
 
-constexpr float VIEW_MAX_ZOOM = GRID_WIDTH / 10.0f;   // Zoom in until 10 cells (100 m) fill the view: 120x on 1200 cells
+constexpr float VIEW_MIN_CELLS = 10.0f;  // Most zoomed in: 10 cells (100 m) across the view (120x on 1200 cells)
 constexpr float VIEW_ZOOM_STEP = 1.25f;  // One mouse-wheel notch or +/- key press
 
 class Viewport {
@@ -20,6 +20,7 @@ public:
     float centreX() const { return cx_; }
     float centreY() const { return cy_; }
     float zoom() const { return zoom_; }                 // 1 = whole map visible
+    float maxZoom() const { return mapW_ / (CELL_SIZE * VIEW_MIN_CELLS); }   // VIEW_MIN_CELLS cells across
     float width() const { return mapW_ / zoom_; }        // Visible size, world units
     float height() const { return mapH_ / zoom_; }
     float left() const { return cx_ - width() / 2; }
