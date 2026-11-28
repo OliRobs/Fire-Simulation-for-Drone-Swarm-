@@ -2,6 +2,7 @@
 // Frame benchmark (target wf_bench): main.cpp's frame loop without SFML, timing each phase.
 //
 // Run:  ./build/wf_bench [frames] [--expect <checksum>]      (default 2400 frames = 200 simulated minutes)
+//       ./build/wf_bench --wind [--expect <checksum>]          (terrain wind solver only, see runWindBench)
 //
 // Synthetic map: GR2 grass everywhere (DEFAULT_FUEL_MODEL), one ignition at the centre of the grid, the
 // launch point in the bottom-left corner as in main.cpp. Grid size and frame length come from config.h.
@@ -20,6 +21,7 @@
 // does not change the checksum, while any change a reader could see does.
 // ============================================================================
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +31,7 @@
 #include "fire_model.h"
 #include "mission_controller.h"
 #include "perimeter.h"
+#include "wind_solver.h"
 
 namespace {
     // ------------------------------------------------------------------------
@@ -49,17 +52,73 @@ namespace {
         const double cap = (range + 1.0) * (range + 1.0);
         return d2 < cap ? d2 : cap;
     }
+
+    // Prints the checksum and, with --expect, returns 1 when it differs from the expected one
+    int reportChecksum(const char* expect, const char* what) {
+        char sum[32];
+        std::snprintf(sum, sizeof(sum), "%016llx", static_cast<unsigned long long>(g_hash));
+        std::printf("checksum %s\n", sum);
+        if (expect && std::strcmp(expect, sum) != 0) {
+            std::printf("CHECKSUM MISMATCH: expected %s. %s results changed: if that is intended, update "
+                        "tools/%s and say why in the pull request.\n", expect, what,
+                        std::strcmp(what, "Terrain wind") == 0 ? "wind_checksum.txt" : "bench_checksum.txt");
+            return 1;
+        }
+        return 0;
+    }
+
+    // ------------------------------------------------------------------------
+    // Terrain wind benchmark (--wind)
+    // ------------------------------------------------------------------------
+    // Times solveTerrainWind on the real grid size with 10 m cells (the DEM's SIM_CELL_SIZE_M), so the wind
+    // mesh is the app's own 120 x 100 x 20 nodes. The map is synthetic so it runs without the git-ignored
+    // DEM tiles: about 1 km of relief from crossing ridges and valleys plus a few summits (San Gabriel-like
+    // scale), GR2 grass everywhere (no canopy). The checksum hashes every cell's solved speed and direction
+    // with the CG iteration count and final residual, so it catches any change to the solved wind, to the last bit.
+    int runWindBench(const char* expect) {
+        const float cell = SIM_CELL_SIZE_M;
+        std::vector<Cell> grid(static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT);
+        for (int y = 0; y < GRID_HEIGHT; ++y)
+            for (int x = 0; x < GRID_WIDTH; ++x) {
+                const double X = x * cell, Y = y * cell;   // Metres from the north-west corner
+                double z = 900.0 + 300.0 * std::sin(X / 1700.0) * std::cos(Y / 1300.0)   // Ridge-and-valley grain
+                         + 150.0 * std::sin((X + 0.6 * Y) / 650.0);                       // Smaller oblique spurs
+                // Three summits (centre in metres, height, spread)
+                const double peaks[3][4] = { { 3500, 2800, 450, 900 }, { 8200, 6100, 380, 1200 }, { 10400, 2200, 300, 700 } };
+                for (const auto& p : peaks) {
+                    const double dx = X - p[0], dy = Y - p[1];
+                    z += p[2] * std::exp(-(dx * dx + dy * dy) / (2.0 * p[3] * p[3]));
+                }
+                grid[static_cast<size_t>(y) * GRID_WIDTH + x].elevation = static_cast<float>(z);
+            }
+
+        const auto t0 = Clock::now();
+        const WindField f = solveTerrainWind(grid, cell, cell, WIND_SPEED_20FT_KMH, WIND_FROM_DEG);
+        const auto t1 = Clock::now();
+        std::printf("terrain wind: %d x %d x %d mesh, %d CG iterations (residual %.2e%s), solve %.0f ms\n",
+                    f.columnsX, f.columnsY, f.layers, f.iterations, f.relResidual,
+                    f.converged ? "" : ", NOT converged", ms(t0, t1));
+        std::printf("mass error (RMS div) %.3e -> %.3e 1/s\n", f.divergenceBefore, f.divergenceAfter);
+
+        mix(f.iterations);
+        mix(f.relResidual);
+        for (size_t i = 0; i < f.speedKmh.size(); ++i) { mix(f.speedKmh[i]); mix(f.toward[i].x); mix(f.toward[i].y); }
+        return reportChecksum(expect, "Terrain wind");
+    }
 }
 
 int main(int argc, char** argv) {
-    // --- Arguments: [frames] [--expect <hex checksum>] ---
+    // --- Arguments: [frames | --wind] [--expect <hex checksum>] ---
     int frames = 2400;
+    bool wind = false;
     const char* expect = nullptr;
     for (int a = 1; a < argc; ++a) {
         if (std::strcmp(argv[a], "--expect") == 0 && a + 1 < argc) expect = argv[++a];
+        else if (std::strcmp(argv[a], "--wind") == 0) wind = true;
         else frames = std::atoi(argv[a]);
     }
-    if (frames <= 0) { std::fprintf(stderr, "usage: wf_bench [frames] [--expect <checksum>]\n"); return 2; }
+    if (wind) return runWindBench(expect);
+    if (frames <= 0) { std::fprintf(stderr, "usage: wf_bench [frames | --wind] [--expect <checksum>]\n"); return 2; }
 
     // --- Set-up, as in main.cpp but on a synthetic map (default cells: GR2 grass, flat) ---
     const auto t0 = Clock::now();
@@ -140,14 +199,5 @@ int main(int argc, char** argv) {
                 tStep / frames, tLive / frames, tPerim / frames, ringCalls ? tRing / ringCalls : 0.0, ringCalls);
     std::printf("mission [ms]: normal frame %.3f, re-plan average %.1f, worst %.1f\n",
                 flyFrames ? tFly / flyFrames : 0.0, replans ? tReplan / replans : 0.0, worstReplan);
-    char sum[32];
-    std::snprintf(sum, sizeof(sum), "%016llx", static_cast<unsigned long long>(g_hash));
-    std::printf("checksum %s\n", sum);
-
-    if (expect && std::strcmp(expect, sum) != 0) {
-        std::printf("CHECKSUM MISMATCH: expected %s. Results changed: if that is intended, update "
-                    "tools/bench_checksum.txt and say why in the pull request.\n", expect);
-        return 1;
-    }
-    return 0;
+    return reportChecksum(expect, "Simulation or planning");
 }

@@ -35,6 +35,13 @@ jobs:
           ./build/wf_bench 2400 --expect "$(head -n 1 tools/bench_checksum.txt)" | tee bench.txt
           { echo '### Frame benchmark (2400 frames)'; echo '```'; cat bench.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      # Terrain wind solver at the app's mesh size: fails if the solved wind differs from tools/wind_checksum.txt
+      - name: Wind solver benchmark and checksum
+        shell: bash
+        run: |
+          ./build/wf_bench --wind --expect "$(head -n 1 tools/wind_checksum.txt)" | tee wind.txt
+          { echo '### Terrain wind solver'; echo '```'; cat wind.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   # MSVC build of the simulation core and tests, to catch Windows-only compile errors.
   # The SFML/GDAL app is skipped here: building GDAL through vcpkg takes far longer than the rest of CI,
   # and vcpkg's SFML is now version 3, which this code doesn't support.

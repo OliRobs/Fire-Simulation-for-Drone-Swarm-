@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <initializer_list>
 #include <limits>
@@ -1524,6 +1525,73 @@ TEST(terrain_wind_stability_changes_how_much_air_goes_round) {
     }
     std::printf("  (NW flank turn: stable %.3f, neutral %.3f, unstable %.3f)\n", turn[0], turn[1], turn[2]);
     CHECK(turn[0] > turn[1] && turn[1] > turn[2]);
+}
+
+// The solver's fast paths (row-wise CG kernels with the wavefront Gauss-Seidel sweeps, and the element
+// geometry shared down each mesh column) must give exactly what the solver gives as first written
+// (WindSolverSettings::referenceKernels), to the last bit, on any mesh shape. The cases cover: square and
+// non-square cells; meshes whose free rows are and are not a multiple of the sweep band (4 rows); meshes
+// narrower than the band's skew (2 free nodes per row); 3 to 20 layers; stable, neutral and unstable air
+// (alpha 0.3 / 1 / 3, so Rz is not always a power of two); and mixed roughness (a forest patch).
+namespace {
+    // Ridges, valleys and two summits (about 700 m of relief), with a forest patch in the north-west quarter
+    std::vector<Cell> ruggedWindTerrain(float cellX, float cellY) {
+        std::vector<Cell> grid(N);
+        for (int y = 0; y < GRID_HEIGHT; ++y)
+            for (int x = 0; x < GRID_WIDTH; ++x) {
+                const double X = x * cellX, Y = y * cellY;
+                double z = 500.0 + 200.0 * std::sin(X / 2500.0) * std::cos(Y / 1900.0) + 80.0 * std::sin((X + 0.7 * Y) / 900.0);
+                const double d1x = X - 0.3 * GRID_WIDTH * cellX, d1y = Y - 0.4 * GRID_HEIGHT * cellY;
+                const double d2x = X - 0.7 * GRID_WIDTH * cellX, d2y = Y - 0.6 * GRID_HEIGHT * cellY;
+                z += 350.0 * std::exp(-(d1x * d1x + d1y * d1y) / (2.0 * 2500.0 * 2500.0))
+                   + 250.0 * std::exp(-(d2x * d2x + d2y * d2y) / (2.0 * 1800.0 * 1800.0));
+                Cell& c = grid[at(x, y)];
+                c.elevation = static_cast<float>(z);
+                if (x < GRID_WIDTH / 2 && y < GRID_HEIGHT / 2) { c.canopyCoverPct = 60.0f; c.canopyHeightM = 18.0f; }
+            }
+        return grid;
+    }
+
+    // True when two solved fields are identical to the last bit, diagnostics included
+    bool sameWindField(const WindField& a, const WindField& b) {
+        return a.iterations == b.iterations && a.converged == b.converged && a.columnsX == b.columnsX
+            && a.columnsY == b.columnsY && a.layers == b.layers
+            && std::memcmp(&a.relResidual, &b.relResidual, sizeof(double)) == 0
+            && std::memcmp(&a.divergenceBefore, &b.divergenceBefore, sizeof(double)) == 0
+            && std::memcmp(&a.divergenceAfter, &b.divergenceAfter, sizeof(double)) == 0
+            && a.speedKmh.size() == b.speedKmh.size() && a.toward.size() == b.toward.size()
+            && std::memcmp(a.speedKmh.data(), b.speedKmh.data(), a.speedKmh.size() * sizeof(float)) == 0
+            && std::memcmp(a.toward.data(), b.toward.data(), a.toward.size() * sizeof(Vec2)) == 0;
+    }
+}
+
+TEST(terrain_wind_fast_kernels_match_the_reference_solver_bit_for_bit) {
+    struct Case { float cellX, cellY, columnM; int layers; float alpha; float fromDeg; bool hill; };
+    const Case cases[] = {
+        { 30.0f, 30.0f, 600.0f, 20, 1.0f, 270.0f, true },     // 60 x 50 x 20 nodes: 48 free rows (a multiple of 4)
+        { 30.0f, 30.0f, 600.0f, 20, 0.3f, 225.0f, false },    // Stable air, rugged terrain with a forest patch
+        { 30.0f, 25.0f, 750.0f, 7, 3.0f, 200.0f, false },     // Non-square cells, unstable air: 48 x 34 x 7 (32 free rows)
+        { 30.0f, 30.0f, 1500.0f, 5, 1.0f, 135.0f, false },    // 24 x 20 x 5: 18 free rows (4 bands + 2)
+        { 30.0f, 30.0f, 6000.0f, 4, 1.0f, 45.0f, false },     // 6 x 5 x 4: 3 free rows (one partial band)
+        { 30.0f, 30.0f, 9000.0f, 3, 1.0f, 315.0f, false },    // 4 x 4 x 3: 2 free nodes per row, narrower than the skew
+    };
+    int checked = 0;
+    for (const Case& c : cases) {
+        const std::vector<Cell> grid = c.hill ? gaussianHill() : ruggedWindTerrain(c.cellX, c.cellY);
+        WindSolverSettings fast = windTestSettings(c.alpha);
+        fast.columnSizeM = c.columnM;
+        fast.layers = c.layers;
+        WindSolverSettings reference = fast;
+        reference.referenceKernels = true;
+        const WindField a = solveTerrainWind(grid, c.cellX, c.cellY, 20.0f, c.fromDeg, fast);
+        const WindField b = solveTerrainWind(grid, c.cellX, c.cellY, 20.0f, c.fromDeg, reference);
+        std::printf("  (%d x %d x %d mesh, alpha %.1f: %d CG iterations, %s)\n", a.columnsX, a.columnsY, a.layers,
+                    c.alpha, a.iterations, sameWindField(a, b) ? "identical" : "DIFFERENT");
+        CHECK(a.iterations > 0);   // The solve really ran (not the flat-ground shortcut)
+        CHECK(sameWindField(a, b));
+        ++checked;
+    }
+    CHECK(checked == 6);
 }
 
 // The fire model reads each cell's wind from the field: a field equal to the open wind changes nothing, and a
