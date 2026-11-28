@@ -174,3 +174,15 @@ std::vector<Cell> gaussianHill() {
 }
 
 double headingDeg(Vec2 v) { return std::atan2(v.x, -v.y) * 180.0 / 3.14159265358979; }
+
+std::uint64_t windFieldHash(const WindField& f) {
+    std::uint64_t h = 1469598103934665603ULL;   // FNV-1a offset basis
+    auto mix = [&h](const auto& v) {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(&v);
+        for (std::size_t i = 0; i < sizeof(v); ++i) { h ^= p[i]; h *= 1099511628211ULL; }
+    };
+    mix(f.iterations);
+    mix(f.relResidual);
+    for (std::size_t i = 0; i < f.speedKmh.size(); ++i) { mix(f.speedKmh[i]); mix(f.toward[i].x); mix(f.toward[i].y); }
+    return h;
+}

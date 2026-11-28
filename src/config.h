@@ -31,7 +31,7 @@ constexpr float SIM_CELL_SIZE_M = 10.0f;
 constexpr float DEFAULT_CELL_SIZE_M = SIM_CELL_SIZE_M; // Ground size of a cell when no DEM is loaded (metres)
 
 // Converts a ground distance into whole cells. The drone and perimeter settings below are design values in
-// METRES (they were chosen on 30 m cells), so they stay the same on the ground whatever SIM_CELL_SIZE_M is.
+// METRES, so they stay the same on the ground whatever SIM_CELL_SIZE_M is.
 constexpr int cellsFromMetres(float metres) { return static_cast<int>(metres / SIM_CELL_SIZE_M + 0.5f); }
 
 // Lay the window out north-up (local UTM zone) rather than on the LANDFIRE Albers grid, which is rotated away
@@ -74,7 +74,7 @@ constexpr int DEFAULT_FUEL_MODEL = 102;
 // --- Terrain-adjusted wind (wind_solver.h) ---
 // The open wind above is adjusted over the terrain by a mass-conserving solver (WindNinja's method), so every
 // cell gets its own 20-ft wind speed and direction: faster over ridges, slower in hollows, turned along valleys.
-// false = the single open wind everywhere, as before.
+// false = the single open wind everywhere.
 constexpr bool USE_TERRAIN_WIND = true;
 constexpr float WIND_COLUMN_SIZE_M = 100.0f;   // Horizontal spacing of the wind mesh (10 x 10 fire cells per column)
 constexpr int WIND_LAYERS = 20;                // Mesh nodes up each column, ground to domain top (WindNinja: 20)
@@ -96,7 +96,7 @@ constexpr int ROAD_CLASS_MAX = 23;
 // ============================================================================
 // --- Distances round the fire ---
 // Set in metres and converted to cells (cellsFromMetres), so they keep their meaning on the ground if the cell
-// size changes. The values are the original 30 m-cell settings (e.g. 70 cells x 30 m).
+// size changes.
 constexpr int PERIMETER_DISTANCE = cellsFromMetres(1200.0f);  // Perimeter ring sits 1.2 km out from the fire
 constexpr int SEARCH_DISTANCE = cellsFromMetres(2100.0f);       // Search area extends 2.1 km from the fire
 constexpr int MIN_FIRE_DISTANCE = cellsFromMetres(300.0f);      // Survey standoff: sweeps and points of interest stay 300 m from the fire
@@ -166,7 +166,7 @@ constexpr int LIVE_EDT_RANGE = MIN_FIRE_DISTANCE + 1;
 constexpr float SENSOR_RADIUS = 60.0f / SIM_CELL_SIZE_M;   // Cells; 60 m, so the swath is 120 m wide
 constexpr int LANE_SPACING = static_cast<int>(2.0f * SENSOR_RADIUS);
 constexpr float DRONE_SPEED = DRONE_SPEED_MPS * SIM_MINUTES_PER_TICK * 60.0f / SIM_CELL_SIZE_M;   // Cells per tick
-// Voronoi region size target: 630 m x 630 m (was 450 cells of 30 m, ~21 x 21 cells)
+// Voronoi region size target: 630 m x 630 m
 constexpr int TARGET_REGION_CELLS = static_cast<int>(405000.0f / (SIM_CELL_SIZE_M * SIM_CELL_SIZE_M) + 0.5f);
 
 // ============================================================================

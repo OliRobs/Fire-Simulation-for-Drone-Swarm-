@@ -346,6 +346,7 @@ On 30 m cells with 600 m columns (fast; the full 10 m / 100 m resolution gives t
 | 600 m deep north-south valley, wind from the SW | On the floor the wind slows to 16 km/h and turns from 45 deg to 29 deg, towards the valley axis |
 | Stability | Flank turning: stable > neutral > unstable |
 | Fire model | A field equal to the open wind gives identical spread rates; a field blowing north makes the fire run north |
+| Golden fields | Six solves (square and non-square cells, 3-20 layers, alpha 0.3 / 1 / 3, a forest patch) hash to recorded values: any change to the solved wind, to the last bit, fails (compared on GCC / x86-64 Linux, like `tools/wind_checksum.txt`) |
 
 The mass error is measured from the third layer of elements up. In the lowest two layers the node smoothing
 (step 5) mixes in the ground nodes' slip velocity, so div(u) there reflects the smoothing rather than the solve.
